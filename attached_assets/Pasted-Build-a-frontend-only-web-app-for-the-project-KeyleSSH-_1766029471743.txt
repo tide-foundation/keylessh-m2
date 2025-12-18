@@ -1,0 +1,151 @@
+Build a frontend-only web app for the project KeyleSSH (https://github.com/tide-foundation/KeyleSSH
+). This frontend is a multi-user Web SSH console (terminal-style “SSH box”) that authenticates users via Tidecloak OIDC. KeyleSSH will handle token authorization on the backend; the frontend must obtain and send the OIDC access token (bearer) to the backend API / websocket.
+
+Core requirements
+
+Framework & tooling
+
+Use React + TypeScript + Vite
+
+Use TailwindCSS for styling (dark-first)
+
+Use React Router for routing
+
+Use TanStack Query for API data fetching/caching
+
+Use xterm.js to render the terminal
+
+Provide a clean, production-ready project structure and README.
+
+Authentication (OIDC / Tidecloak)
+
+Implement OIDC login using standard Authorization Code + PKCE (or a reputable OIDC client library).
+
+On login: redirect to Tidecloak, handle callback, store tokens (prefer in-memory + refresh flow; avoid localStorage unless necessary).
+
+Add Logout.
+
+Extract user identity + roles/claims (e.g. admin vs normal user) from ID token or userinfo.
+
+Protect routes: unauthenticated users go to /login, authenticated users go to dashboards.
+
+Include an AuthContext that exposes user, roles, accessToken, login(), logout(), getToken().
+
+Routing
+
+/login
+
+/app (User dashboard)
+
+/app/console/:serverId (SSH console)
+
+/admin (Admin dashboard; only for admin role)
+
+/* -> redirect appropriately.
+
+User dashboard
+Create a dashboard where a user can:
+
+See a list of servers they are allowed to access.
+
+Pick a server and pick a ssh user to connect as (e.g. root, debian, docker), restricted by backend data.
+
+Click Connect to open the console page.
+
+See “recent connections” and “active sessions” (if backend provides it).
+
+SSH console page
+
+Full page terminal UI using xterm.js
+
+Connect to KeyleSSH via WebSocket (or SSE if that’s how backend is built, but prefer WS).
+
+Send auth token: include Authorization: Bearer <accessToken> for REST and for WS either:
+
+Use a WS URL with token query param (only if required), OR
+
+Use a backend-issued short-lived connect token retrieved via REST first (preferred).
+
+Support:
+
+Terminal resize handling
+
+Copy/paste
+
+Connection status indicator (connecting/connected/disconnected)
+
+Reconnect button
+
+Clean disconnect
+
+Friendly error messages.
+
+Admin dashboard
+Admin UI where admins can:
+
+Add/edit/remove servers (name, host, port, tags, environment, enabled flag)
+
+Manage which SSH users exist per server (root/debian/docker etc.)
+
+Manage users (assign role, server access, allowed ssh users)
+
+View active sessions and basic system health (UI only).
+If backend endpoints aren’t ready, implement mock adapters behind an API layer so the UI works.
+
+API layer
+Create a typed API client module:
+
+GET /servers (returns list + allowed ssh users)
+
+GET /servers/:id
+
+GET /sessions
+
+POST /sessions (create session with serverId + sshUser)
+
+WS /sessions/:id/connect (terminal stream)
+
+ADMIN: /admin/servers, /admin/users, /admin/ssh-users, /admin/sessions
+If uncertain about exact endpoints, implement a configurable base path and centralize endpoints in one file with TODO notes.
+
+Environment config
+Support .env vars:
+
+VITE_API_BASE_URL
+
+VITE_WS_BASE_URL
+
+VITE_OIDC_ISSUER
+
+VITE_OIDC_CLIENT_ID
+
+VITE_OIDC_REDIRECT_URI
+
+VITE_OIDC_LOGOUT_REDIRECT_URI
+
+VITE_OIDC_SCOPE (default: openid profile email)
+Document them in README.
+
+UI/UX
+
+Dark terminal-centric theme.
+
+Use a left sidebar nav for app pages.
+
+Top bar with user info + logout.
+
+Clear role separation (admin vs user).
+
+Loading skeletons, empty states, and error states.
+
+Deliverables
+
+A complete runnable Vite React TS project in Replit.
+
+All code implemented (components, routes, auth, api, terminal integration).
+
+Mock mode if backend is not available (toggle via env var like VITE_USE_MOCK=true).
+
+README with setup steps and how to point it at a KeyleSSH backend.
+
+Now generate the entire project, including all source files, with sensible defaults, clean code, and comments where backend specifics are unknown.
