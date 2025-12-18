@@ -2,28 +2,13 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
-import { createProxyMiddleware } from "http-proxy-middleware";
+import { setupWSBridge } from "./wsBridge";
 
 const app = express();
 const httpServer = createServer(app);
 
-// KeyleSSH proxy configuration
-const KEYLESSH_URL = process.env.KEYLESSH_URL || "http://localhost:8001";
-
-// Proxy /ssh requests to KeyleSSH
-app.use(
-  "/ssh",
-  createProxyMiddleware({
-    target: KEYLESSH_URL,
-    changeOrigin: true,
-    ws: true,
-    on: {
-      error: (err: Error) => {
-        console.error("KeyleSSH proxy error:", err.message);
-      },
-    },
-  })
-);
+// Setup WebSocket TCP bridge for SSH connections
+setupWSBridge(httpServer);
 
 declare module "http" {
   interface IncomingMessage {

@@ -1,0 +1,281 @@
+# KeyleSSH - Secure Web SSH Console
+
+A secure, multi-user web-based SSH console with OIDC authentication. SSH encryption happens entirely in the browser - private keys never leave the client.
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                  BROWSER                                     │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌─────────────────────────────┐ │
+│  │   TideCloak     │  │    xterm.js      │  │  @microsoft/dev-tunnels-ssh │ │
+│  │   React SDK     │  │    Terminal      │  │  (SSH Protocol Handler)     │ │
+│  │                 │  │                  │  │                             │ │
+│  │  - OIDC Login   │  │  - Display       │  │  - Key Import (in-memory)   │ │
+│  │  - JWT Tokens   │  │  - Input/Output  │  │  - SSH Handshake            │ │
+│  │  - Auto Refresh │  │  - Resize        │  │  - Encryption/Decryption    │ │
+│  └────────┬────────┘  └────────┬─────────┘  └──────────────┬──────────────┘ │
+│           │                    │                           │                 │
+│           │              User Input/Output          Encrypted SSH Data       │
+│           │                    │                           │                 │
+│           ▼                    ▼                           ▼                 │
+│  ┌─────────────────────────────────────────────────────────────────────────┐ │
+│  │                         WebSocket Connection                             │ │
+│  │                    wss://host/ws/tcp?host=X&port=Y                       │ │
+│  └─────────────────────────────────────────────────────────────────────────┘ │
+│                                      │                                       │
+│   🔒 Private Key NEVER leaves here   │   (Only encrypted SSH traffic)        │
+└──────────────────────────────────────┼───────────────────────────────────────┘
+                                       │
+                                       │ TLS Encrypted
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              EXPRESS SERVER                                  │
+│                                                                              │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌─────────────────────────────┐ │
+│  │   REST API      │  │  JWT Middleware  │  │   WebSocket-TCP Bridge      │ │
+│  │                 │  │                  │  │                             │ │
+│  │  /api/servers   │  │  - Decode Token  │  │  - Validate JWT             │ │
+│  │  /api/sessions  │  │  - Check Expiry  │  │  - Check Server Access      │ │
+│  │  /api/admin/*   │  │  - Extract User  │  │  - Create TCP Socket        │ │
+│  │                 │  │  - Check Roles   │  │  - Bidirectional Pipe       │ │
+│  └────────┬────────┘  └────────┬─────────┘  └──────────────┬──────────────┘ │
+│           │                    │                           │                 │
+│           ▼                    │                           ▼                 │
+│  ┌─────────────────┐           │            ┌─────────────────────────────┐ │
+│  │  Storage        │           │            │   TCP Socket                │ │
+│  │  (In-Memory)    │           │            │   Raw Bytes ←→ SSH Server   │ │
+│  │                 │           │            └──────────────┬──────────────┘ │
+│  │  - Servers      │           │                           │                 │
+│  │  - Sessions     │           │                           │                 │
+│  └─────────────────┘           │                           │                 │
+│                                │                           │                 │
+└────────────────────────────────┼───────────────────────────┼─────────────────┘
+                                 │                           │
+                    ┌────────────┘                           │
+                    │                                        │
+                    ▼                                        ▼
+┌─────────────────────────────────┐      ┌─────────────────────────────────────┐
+│         TIDECLOAK               │      │           SSH SERVER                │
+│     (Keycloak-based IdP)        │      │                                     │
+│                                 │      │   - Receives encrypted SSH traffic  │
+│  - User Authentication          │      │   - Authenticates with public key   │
+│  - JWT Token Issuance           │      │   - Opens shell session             │
+│  - Role Management              │      │   - Sends/receives data             │
+│  - User Attributes              │      │                                     │
+│    (allowed_servers)            │      │   Example: 192.168.1.100:22         │
+│                                 │      │                                     │
+└─────────────────────────────────┘      └─────────────────────────────────────┘
+```
+
+## Security Model
+
+### Private Key Security
+- **Private keys are imported in the browser** using Web Crypto API
+- **Keys never leave the browser** - all SSH encryption happens client-side
+- **Backend is a dumb pipe** - only forwards encrypted bytes, cannot decrypt
+- **Optional session storage** - keys can be remembered for tab lifetime only
+
+### Authentication Flow
+```
+┌──────────┐     ┌──────────────┐     ┌───────────┐     ┌─────────────┐
+│  User    │────▶│  TideCloak   │────▶│  Backend  │────▶│ SSH Server  │
+└──────────┘     └──────────────┘     └───────────┘     └─────────────┘
+     │                  │                   │                  │
+     │  1. Login        │                   │                  │
+     │─────────────────▶│                   │                  │
+     │                  │                   │                  │
+     │  2. JWT Token    │                   │                  │
+     │◀─────────────────│                   │                  │
+     │  (includes roles,│                   │                  │
+     │   allowed_servers)                   │                  │
+     │                  │                   │                  │
+     │  3. API Request + Bearer Token       │                  │
+     │─────────────────────────────────────▶│                  │
+     │                  │                   │                  │
+     │                  │  4. Validate JWT  │                  │
+     │                  │     Check Access  │                  │
+     │                  │                   │                  │
+     │  5. WebSocket + Token                │                  │
+     │─────────────────────────────────────▶│                  │
+     │                  │                   │                  │
+     │                  │                   │  6. TCP Connect  │
+     │                  │                   │─────────────────▶│
+     │                  │                   │                  │
+     │  7. SSH Handshake (encrypted, browser handles crypto)   │
+     │◀───────────────────────────────────────────────────────▶│
+     │                  │                   │                  │
+     │  8. Interactive Shell Session        │                  │
+     │◀═══════════════════════════════════════════════════════▶│
+```
+
+### Role-Based Access Control
+| Role | Permissions |
+|------|-------------|
+| `user` | Access only servers in their `allowedServers` list |
+| `admin` | Access all servers, manage users, manage servers |
+
+Admin role is determined by the `tide-realm-admin` client role under `realm-management` in TideCloak.
+
+## Tech Stack
+
+### Frontend
+- **React 18** + TypeScript
+- **Vite** - Build tool
+- **TailwindCSS** - Styling (dark theme)
+- **Shadcn/ui** - UI components
+- **xterm.js** - Terminal emulator
+- **@microsoft/dev-tunnels-ssh** - Browser SSH client
+- **@tidecloak/react** - OIDC authentication
+- **TanStack Query** - Server state management
+- **Wouter** - Routing
+
+### Backend
+- **Express.js** - HTTP server
+- **ws** - WebSocket server
+- **JWT** - Token validation (decoded, not verified - TideCloak handles verification)
+
+## Project Structure
+
+```
+├── client/
+│   └── src/
+│       ├── components/
+│       │   ├── layout/           # App layout, sidebar
+│       │   ├── ui/               # Shadcn UI components
+│       │   └── PrivateKeyInput.tsx
+│       ├── contexts/
+│       │   └── AuthContext.tsx   # TideCloak auth wrapper
+│       ├── hooks/
+│       │   └── useSSHSession.ts  # SSH connection hook
+│       ├── lib/
+│       │   ├── api.ts            # API client
+│       │   ├── queryClient.ts    # TanStack Query setup
+│       │   └── sshClient.ts      # Browser SSH client
+│       ├── pages/
+│       │   ├── Login.tsx
+│       │   ├── Dashboard.tsx
+│       │   ├── Console.tsx       # SSH terminal page
+│       │   ├── AdminDashboard.tsx
+│       │   ├── AdminServers.tsx
+│       │   ├── AdminUsers.tsx
+│       │   └── AdminSessions.tsx
+│       └── tidecloakAdapter.json # TideCloak configuration
+├── server/
+│   ├── index.ts                  # Express app setup
+│   ├── routes.ts                 # API endpoints
+│   ├── auth.ts                   # JWT middleware + Keycloak Admin API
+│   ├── wsBridge.ts               # WebSocket-TCP bridge
+│   └── storage.ts                # In-memory data store
+└── shared/
+    └── schema.ts                 # Shared TypeScript types
+```
+
+## API Endpoints
+
+### User Endpoints (Authenticated)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/servers` | List servers user can access |
+| GET | `/api/servers/:id` | Get server details |
+| GET | `/api/sessions` | List user's active sessions |
+| POST | `/api/sessions` | Create new session record |
+| DELETE | `/api/sessions/:id` | End session |
+| POST | `/api/ssh/authorize` | Authorize SSH connection |
+
+### Admin Endpoints (Admin Role Required)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/admin/servers` | List all servers |
+| POST | `/api/admin/servers` | Create server |
+| PATCH | `/api/admin/servers/:id` | Update server |
+| DELETE | `/api/admin/servers/:id` | Delete server |
+| GET | `/api/admin/users` | List all users (from TideCloak) |
+| PATCH | `/api/admin/users/:id` | Update user role/access |
+| GET | `/api/admin/sessions` | List all sessions |
+
+### WebSocket
+| Endpoint | Description |
+|----------|-------------|
+| `ws://host/ws/tcp?host=X&port=Y&serverId=Z&token=T` | TCP bridge for SSH |
+
+## Environment Variables
+
+```env
+# Server
+PORT=3000                                    # Server port
+
+# TideCloak/Keycloak (optional, defaults provided)
+KEYCLOAK_URL=https://staging.dauth.me        # TideCloak server URL
+KEYCLOAK_REALM=keylessh                      # Realm name
+```
+
+## Running the Application
+
+### Development
+```bash
+npm install
+npm run dev
+```
+
+### Production Build
+```bash
+npm run build
+npm start
+```
+
+### Type Checking
+```bash
+npm run check
+```
+
+## SSH Connection Flow
+
+1. **User navigates to** `/app/console/:serverId?user=username`
+2. **Frontend fetches** server details from API
+3. **Private key dialog** appears - user pastes/uploads their SSH private key
+4. **Frontend opens WebSocket** to `/ws/tcp` with server connection params
+5. **Backend validates JWT**, checks user has access to server
+6. **Backend opens TCP socket** to SSH server (e.g., 192.168.1.100:22)
+7. **Browser's SSH library** performs handshake over WebSocket
+   - Key exchange, authentication all happen in browser
+   - Backend just forwards encrypted bytes
+8. **Shell channel opened**, bound to xterm.js terminal
+9. **User interacts** with remote shell
+
+## TideCloak Configuration
+
+The TideCloak adapter configuration is in `client/src/tidecloakAdapter.json`:
+
+```json
+{
+  "realm": "keylessh",
+  "authServerUrl": "https://staging.dauth.me",
+  "resource": "keylessh",
+  ...
+}
+```
+
+### Required TideCloak Setup
+1. Create a realm (e.g., `keylessh`)
+2. Create a client (e.g., `keylessh`) with:
+   - Client authentication: OFF (public client)
+   - Valid redirect URIs: Your app URLs
+3. For admin users, assign the `tide-realm-admin` role from the `realm-management` client
+4. To allow admins to manage users via API, also assign `view-users` and `manage-users` roles
+
+### User Attributes
+- `allowed_servers`: Array of server IDs the user can access
+
+## Adding Server Access for Users
+
+1. Go to **Admin > Users** in the app
+2. Click the **edit button** on a user
+3. Check the **servers** they should access
+4. Click **Save Changes**
+
+This updates the `allowed_servers` attribute in TideCloak, which gets included in their JWT token on next login.
+
+## License
+
+MIT

@@ -4,12 +4,11 @@ import type { OIDCUser, UserRole } from "@shared/schema";
 // TideCloak/Keycloak configuration
 const KEYCLOAK_URL = process.env.KEYCLOAK_URL || "https://staging.dauth.me";
 const KEYCLOAK_REALM = process.env.KEYCLOAK_REALM || "keylessh";
-const KEYCLOAK_CLIENT_ID = process.env.KEYCLOAK_CLIENT_ID || "keylessh";
-const KEYCLOAK_CLIENT_SECRET = process.env.KEYCLOAK_CLIENT_SECRET || "";
 
 // Extended Request interface with user information
 export interface AuthenticatedRequest extends Request {
   user?: OIDCUser;
+  accessToken?: string;
 }
 
 // JWT payload structure from TideCloak/Keycloak
@@ -20,6 +19,11 @@ interface JWTPayload {
   email?: string;
   realm_access?: {
     roles: string[];
+  };
+  resource_access?: {
+    [client: string]: {
+      roles: string[];
+    };
   };
   allowed_servers?: string[];
   exp: number;
@@ -39,13 +43,18 @@ function decodeJWT(token: string): JWTPayload | null {
   }
 }
 
-// TideCloak role names
+// TideCloak role names - tide-realm-admin is a client role under realm-management
 const ADMIN_ROLE = "tide-realm-admin";
+const REALM_MANAGEMENT_CLIENT = "realm-management";
 
 // Extract user from JWT payload
 function extractUserFromPayload(payload: JWTPayload): OIDCUser {
-  const roles = payload.realm_access?.roles || [];
-  const isAdmin = roles.includes(ADMIN_ROLE);
+  // Check for admin role in realm-management client roles
+  const clientRoles = payload.resource_access?.[REALM_MANAGEMENT_CLIENT]?.roles || [];
+  const realmRoles = payload.realm_access?.roles || [];
+
+  // Check both locations for backwards compatibility
+  const isAdmin = clientRoles.includes(ADMIN_ROLE) || realmRoles.includes(ADMIN_ROLE);
 
   return {
     id: payload.sub,
@@ -80,6 +89,7 @@ export function authenticate(req: AuthenticatedRequest, res: Response, next: Nex
   }
 
   req.user = extractUserFromPayload(payload);
+  req.accessToken = token;
   next();
 }
 
@@ -98,58 +108,22 @@ export function requireAdmin(req: AuthenticatedRequest, res: Response, next: Nex
   next();
 }
 
-// Keycloak Admin API client
+// Keycloak Admin API client - uses the logged-in user's token
 export class KeycloakAdmin {
   private baseUrl: string;
   private realm: string;
-  private clientId: string;
-  private clientSecret: string;
-  private accessToken: string | null = null;
-  private tokenExpiry: number = 0;
 
   constructor() {
     this.baseUrl = KEYCLOAK_URL;
     this.realm = KEYCLOAK_REALM;
-    this.clientId = KEYCLOAK_CLIENT_ID;
-    this.clientSecret = KEYCLOAK_CLIENT_SECRET;
   }
 
-  // Get admin access token using client credentials
-  private async getAdminToken(): Promise<string> {
-    if (this.accessToken && this.tokenExpiry > Date.now()) {
-      return this.accessToken;
-    }
-
-    const tokenUrl = `${this.baseUrl}/realms/${this.realm}/protocol/openid-connect/token`;
-
-    const params = new URLSearchParams();
-    params.append("grant_type", "client_credentials");
-    params.append("client_id", this.clientId);
-    params.append("client_secret", this.clientSecret);
-
-    const response = await fetch(tokenUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: params.toString(),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to get admin token: ${response.status}`);
-    }
-
-    const data = await response.json();
-    this.accessToken = data.access_token;
-    this.tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
-
-    return this.accessToken!;
-  }
-
-  // Get all users from Keycloak
-  async getUsers(): Promise<OIDCUser[]> {
-    const token = await this.getAdminToken();
+  // Get all users from Keycloak using the user's token
+  async getUsers(token: string): Promise<OIDCUser[]> {
     const url = `${this.baseUrl}/admin/realms/${this.realm}/users`;
+
+    console.log(`[KeycloakAdmin] Fetching users from: ${url}`);
+    console.log(`[KeycloakAdmin] Using user's access token (first 20 chars): ${token.substring(0, 20)}...`);
 
     const response = await fetch(url, {
       headers: {
@@ -158,7 +132,9 @@ export class KeycloakAdmin {
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch users: ${response.status}`);
+      const errorText = await response.text();
+      console.error(`[KeycloakAdmin] Failed to fetch users: ${response.status} - ${errorText}`);
+      throw new Error(`Failed to fetch users: ${response.status} - ${errorText}`);
     }
 
     const keycloakUsers = await response.json();
@@ -166,7 +142,7 @@ export class KeycloakAdmin {
     // Transform Keycloak users to our OIDCUser format
     const users: OIDCUser[] = await Promise.all(
       keycloakUsers.map(async (kcUser: any) => {
-        const roles = await this.getUserRoles(kcUser.id);
+        const roles = await this.getUserRoles(token, kcUser.id);
         const attributes = kcUser.attributes || {};
 
         return {
@@ -183,8 +159,7 @@ export class KeycloakAdmin {
   }
 
   // Get a single user by ID
-  async getUser(userId: string): Promise<OIDCUser | null> {
-    const token = await this.getAdminToken();
+  async getUser(token: string, userId: string): Promise<OIDCUser | null> {
     const url = `${this.baseUrl}/admin/realms/${this.realm}/users/${userId}`;
 
     const response = await fetch(url, {
@@ -202,7 +177,7 @@ export class KeycloakAdmin {
     }
 
     const kcUser = await response.json();
-    const roles = await this.getUserRoles(userId);
+    const roles = await this.getUserRoles(token, userId);
     const attributes = kcUser.attributes || {};
 
     return {
@@ -214,28 +189,49 @@ export class KeycloakAdmin {
     };
   }
 
-  // Get user's realm roles
-  private async getUserRoles(userId: string): Promise<string[]> {
-    const token = await this.getAdminToken();
-    const url = `${this.baseUrl}/admin/realms/${this.realm}/users/${userId}/role-mappings/realm`;
+  // Get user's roles (both realm and client roles)
+  private async getUserRoles(token: string, userId: string): Promise<string[]> {
+    const allRoles: string[] = [];
 
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+    // Get realm roles
+    const realmRolesUrl = `${this.baseUrl}/admin/realms/${this.realm}/users/${userId}/role-mappings/realm`;
+    const realmResponse = await fetch(realmRolesUrl, {
+      headers: { Authorization: `Bearer ${token}` },
     });
 
-    if (!response.ok) {
-      return [];
+    if (realmResponse.ok) {
+      const realmRoles = await realmResponse.json();
+      allRoles.push(...realmRoles.map((r: any) => r.name));
     }
 
-    const roles = await response.json();
-    return roles.map((r: any) => r.name);
+    // Get client roles from realm-management
+    // First, get the realm-management client ID
+    const clientsUrl = `${this.baseUrl}/admin/realms/${this.realm}/clients?clientId=realm-management`;
+    const clientsResponse = await fetch(clientsUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (clientsResponse.ok) {
+      const clients = await clientsResponse.json();
+      if (clients.length > 0) {
+        const realmManagementId = clients[0].id;
+        const clientRolesUrl = `${this.baseUrl}/admin/realms/${this.realm}/users/${userId}/role-mappings/clients/${realmManagementId}`;
+        const clientRolesResponse = await fetch(clientRolesUrl, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (clientRolesResponse.ok) {
+          const clientRoles = await clientRolesResponse.json();
+          allRoles.push(...clientRoles.map((r: any) => r.name));
+        }
+      }
+    }
+
+    return allRoles;
   }
 
   // Update user attributes (allowedServers)
-  async updateUserAttributes(userId: string, allowedServers: string[]): Promise<void> {
-    const token = await this.getAdminToken();
+  async updateUserAttributes(token: string, userId: string, allowedServers: string[]): Promise<void> {
     const url = `${this.baseUrl}/admin/realms/${this.realm}/users/${userId}`;
 
     const response = await fetch(url, {
@@ -257,9 +253,7 @@ export class KeycloakAdmin {
   }
 
   // Update user role (admin/user)
-  async updateUserRole(userId: string, role: UserRole): Promise<void> {
-    const token = await this.getAdminToken();
-
+  async updateUserRole(token: string, userId: string, role: UserRole): Promise<void> {
     // Get available realm roles
     const rolesUrl = `${this.baseUrl}/admin/realms/${this.realm}/roles`;
     const rolesResponse = await fetch(rolesUrl, {

@@ -4,13 +4,14 @@ import { useQuery } from "@tanstack/react-query";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { io, Socket } from "socket.io-client";
 import "@xterm/xterm/css/xterm.css";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
+import { PrivateKeyInput } from "@/components/PrivateKeyInput";
+import { useSSHSession } from "@/hooks/useSSHSession";
 import {
   ArrowLeft,
   RefreshCw,
@@ -21,14 +22,28 @@ import {
   Wifi,
   WifiOff,
   Loader2,
+  Key,
 } from "lucide-react";
 import { Link } from "wouter";
-import type { ServerWithAccess, ConnectionStatus } from "@shared/schema";
+import type { ServerWithAccess } from "@shared/schema";
+import type { SSHConnectionStatus } from "@/lib/sshClient";
 
-const statusConfig: Record<ConnectionStatus, { label: string; color: string; icon: typeof Wifi }> = {
+const statusConfig: Record<
+  SSHConnectionStatus,
+  { label: string; color: string; icon: typeof Wifi }
+> = {
   connecting: { label: "Connecting...", color: "bg-chart-4", icon: Loader2 },
+  authenticating: {
+    label: "Authenticating...",
+    color: "bg-chart-4",
+    icon: Key,
+  },
   connected: { label: "Connected", color: "bg-chart-2", icon: Wifi },
-  disconnected: { label: "Disconnected", color: "bg-muted-foreground", icon: WifiOff },
+  disconnected: {
+    label: "Disconnected",
+    color: "bg-muted-foreground",
+    icon: WifiOff,
+  },
   error: { label: "Connection Error", color: "bg-destructive", icon: WifiOff },
 };
 
@@ -43,141 +58,60 @@ export default function Console() {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const socketRef = useRef<Socket | null>(null);
 
-  const [status, setStatus] = useState<ConnectionStatus>("disconnected");
+  const [showKeyDialog, setShowKeyDialog] = useState(false);
+  const [userDismissedDialog, setUserDismissedDialog] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [sshStatus, setSshStatus] = useState<string>("");
 
-  const { data: server, isLoading: serverLoading } = useQuery<ServerWithAccess>({
-    queryKey: ["/api/servers", params.serverId],
-  });
-
-  const connectToKeyleSSH = useCallback(() => {
-    if (socketRef.current?.connected) {
-      socketRef.current.disconnect();
+  const { data: server, isLoading: serverLoading } = useQuery<ServerWithAccess>(
+    {
+      queryKey: ["/api/servers", params.serverId],
     }
+  );
 
-    setStatus("connecting");
-
-    // Connect to KeyleSSH via Socket.IO (proxied through /ssh)
-    const socket = io({
-      path: "/ssh/socket.io",
-      withCredentials: true,
-      transports: ["websocket", "polling"],
+  // SSH session hook
+  const { connect, disconnect, send, resize, setDimensions, status, error } =
+    useSSHSession({
+      host: server?.host || "",
+      port: server?.port || 22,
+      serverId: params.serverId || "",
+      username: sshUser,
+      onData: useCallback((data: Uint8Array) => {
+        if (xtermRef.current) {
+          xtermRef.current.write(data);
+        }
+      }, []),
     });
 
-    socketRef.current = socket;
+  // Handle connection with private key
+  const handleConnect = useCallback(
+    async (privateKey: string, passphrase?: string) => {
+      try {
+        // Set initial terminal dimensions before connecting
+        const dims = fitAddonRef.current?.proposeDimensions();
+        if (dims) {
+          setDimensions(dims.cols, dims.rows);
+        }
 
-    // KeyleSSH Socket.IO events
-    socket.on("connect", () => {
-      setStatus("connected");
-      xtermRef.current?.focus();
-      // Send initial terminal geometry
-      const dims = fitAddonRef.current?.proposeDimensions();
-      if (dims) {
-        socket.emit("geometry", dims.cols, dims.rows);
+        await connect(privateKey, passphrase);
+        setShowKeyDialog(false);
+        xtermRef.current?.focus();
+      } catch (err) {
+        // Error is handled by the hook and displayed in the dialog
+        console.error("Connection failed:", err);
       }
-    });
-
-    socket.on("data", (data: string) => {
-      xtermRef.current?.write(data);
-    });
-
-    socket.on("ssherror", (error: string) => {
-      setStatus("error");
-      toast({
-        title: "SSH Error",
-        description: error,
-        variant: "destructive",
-      });
-    });
-
-    socket.on("status", (statusMsg: string) => {
-      setSshStatus(statusMsg);
-    });
-
-    socket.on("menu", () => {
-      // KeyleSSH sends this when ready
-      console.log("KeyleSSH menu ready");
-    });
-
-    socket.on("title", (title: string) => {
-      document.title = title;
-    });
-
-    socket.on("reauth", () => {
-      toast({
-        title: "Authentication Required",
-        description: "Please re-authenticate to continue",
-        variant: "destructive",
-      });
-      setStatus("error");
-    });
-
-    socket.on("disconnect", (reason) => {
-      console.log("Socket.IO disconnected:", reason);
-      if (status === "connected") {
-        setStatus("disconnected");
-      }
-    });
-
-    socket.on("connect_error", (error) => {
-      console.error("Socket.IO connection error:", error);
-      setStatus("error");
-      toast({
-        title: "Connection error",
-        description: "Failed to connect to KeyleSSH",
-        variant: "destructive",
-      });
-    });
-  }, [status, toast]);
-
-  // Initialize KeyleSSH session with server credentials
-  const initKeyleSSHSession = useCallback(async () => {
-    if (!server) return;
-
-    try {
-      // Make a request to /ssh/ to set up the KeyleSSH session
-      // This sets session.ssh with host/port and gets credentials
-      const response = await fetch(`/ssh/?port=${server.port}`, {
-        credentials: "include",
-        headers: {
-          // KeyleSSH uses basic auth or session-based auth
-          // The host is configured in KeyleSSH's config.json
-        },
-      });
-
-      if (response.ok) {
-        // Session is set up, now connect via Socket.IO
-        connectToKeyleSSH();
-      } else {
-        toast({
-          title: "Session setup failed",
-          description: "Failed to initialize SSH session",
-          variant: "destructive",
-        });
-        setStatus("error");
-      }
-    } catch (error) {
-      console.error("Failed to initialize KeyleSSH session:", error);
-      toast({
-        title: "Connection failed",
-        description: "Failed to connect to KeyleSSH",
-        variant: "destructive",
-      });
-      setStatus("error");
-    }
-  }, [server, connectToKeyleSSH, toast]);
+    },
+    [connect, setDimensions]
+  );
 
   const handleReconnect = useCallback(() => {
-    initKeyleSSHSession();
-  }, [initKeyleSSHSession]);
+    setUserDismissedDialog(false);
+    setShowKeyDialog(true);
+  }, []);
 
   const handleDisconnect = useCallback(() => {
-    socketRef.current?.disconnect();
-    setStatus("disconnected");
-  }, []);
+    disconnect();
+  }, [disconnect]);
 
   const handleCopy = useCallback(() => {
     const selection = xtermRef.current?.getSelection();
@@ -197,6 +131,7 @@ export default function Console() {
     }
   }, []);
 
+  // Initialize terminal
   useEffect(() => {
     if (!terminalRef.current || xtermRef.current) return;
 
@@ -242,21 +177,17 @@ export default function Console() {
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // Send terminal input to KeyleSSH via Socket.IO
+    // Send terminal input to SSH
     term.onData((data) => {
-      if (socketRef.current?.connected) {
-        socketRef.current.emit("data", data);
-      }
+      send(data);
     });
 
+    // Handle terminal resize
     const handleResize = () => {
       fitAddon.fit();
-      // Send resize event to KeyleSSH
-      if (socketRef.current?.connected) {
-        const dims = fitAddon.proposeDimensions();
-        if (dims) {
-          socketRef.current.emit("resize", { rows: dims.rows, cols: dims.cols });
-        }
+      const dims = fitAddon.proposeDimensions();
+      if (dims) {
+        resize(dims.cols, dims.rows);
       }
     };
 
@@ -269,17 +200,41 @@ export default function Console() {
       window.removeEventListener("resize", handleResize);
       term.dispose();
       xtermRef.current = null;
-      socketRef.current?.disconnect();
     };
+  }, [send, resize]);
+
+  // Show key dialog when server data is loaded and we're disconnected
+  // Only auto-show if user hasn't manually dismissed it
+  useEffect(() => {
+    if (server && status === "disconnected" && !showKeyDialog && !userDismissedDialog) {
+      setShowKeyDialog(true);
+    }
+    // Auto-close dialog when connected
+    if (status === "connected" && showKeyDialog) {
+      setShowKeyDialog(false);
+      setUserDismissedDialog(false); // Reset so it can auto-show on next disconnect
+      xtermRef.current?.focus();
+    }
+  }, [server, status, showKeyDialog, userDismissedDialog]);
+
+  // Handle dialog close (user manually closing)
+  const handleDialogOpenChange = useCallback((open: boolean) => {
+    setShowKeyDialog(open);
+    if (!open) {
+      setUserDismissedDialog(true);
+    }
   }, []);
 
-  // Auto-connect when server data is loaded
+  // Show error toast when connection fails
   useEffect(() => {
-    if (server && status === "disconnected") {
-      // Initialize KeyleSSH session first, then connect
-      initKeyleSSHSession();
+    if (error && status === "error") {
+      toast({
+        title: "Connection Error",
+        description: error,
+        variant: "destructive",
+      });
     }
-  }, [server, status, initKeyleSSHSession]);
+  }, [error, status, toast]);
 
   const StatusIcon = statusConfig[status].icon;
 
@@ -323,7 +278,13 @@ export default function Console() {
             className="gap-1.5"
             data-testid="connection-status"
           >
-            <StatusIcon className={`h-3 w-3 ${status === "connecting" ? "animate-spin" : ""}`} />
+            <StatusIcon
+              className={`h-3 w-3 ${
+                status === "connecting" || status === "authenticating"
+                  ? "animate-spin"
+                  : ""
+              }`}
+            />
             {statusConfig[status].label}
           </Badge>
 
@@ -344,18 +305,30 @@ export default function Console() {
               title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
               data-testid="fullscreen-button"
             >
-              {isFullscreen ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
+              {isFullscreen ? (
+                <Minimize className="h-4 w-4" />
+              ) : (
+                <Maximize className="h-4 w-4" />
+              )}
             </Button>
             {status !== "connected" && (
               <Button
                 size="icon"
                 variant="ghost"
                 onClick={handleReconnect}
-                disabled={status === "connecting"}
-                title="Reconnect"
+                disabled={
+                  status === "connecting" || status === "authenticating"
+                }
+                title="Connect"
                 data-testid="reconnect-button"
               >
-                <RefreshCw className={`h-4 w-4 ${status === "connecting" ? "animate-spin" : ""}`} />
+                <RefreshCw
+                  className={`h-4 w-4 ${
+                    status === "connecting" || status === "authenticating"
+                      ? "animate-spin"
+                      : ""
+                  }`}
+                />
               </Button>
             )}
             {status === "connected" && (
@@ -374,16 +347,20 @@ export default function Console() {
       </div>
 
       <div className="flex-1 bg-[#0c0c0c] overflow-hidden relative">
-        <div ref={terminalRef} className="absolute inset-0" data-testid="terminal-container" />
-        
-        {status === "error" && (
+        <div
+          ref={terminalRef}
+          className="absolute inset-0"
+          data-testid="terminal-container"
+        />
+
+        {status === "error" && !showKeyDialog && (
           <div className="absolute inset-0 flex items-center justify-center bg-background/80">
             <div className="text-center space-y-4">
               <WifiOff className="h-12 w-12 text-destructive mx-auto" />
               <div>
                 <h3 className="font-medium">Connection Failed</h3>
                 <p className="text-sm text-muted-foreground mt-1">
-                  Unable to connect to {server?.name}
+                  {error || `Unable to connect to ${server?.name}`}
                 </p>
               </div>
               <Button onClick={handleReconnect} data-testid="retry-button">
@@ -394,6 +371,17 @@ export default function Console() {
           </div>
         )}
       </div>
+
+      {/* Private Key Input Dialog */}
+      <PrivateKeyInput
+        open={showKeyDialog}
+        onOpenChange={handleDialogOpenChange}
+        onSubmit={handleConnect}
+        serverName={server?.name || ""}
+        username={sshUser}
+        isConnecting={status === "connecting" || status === "authenticating"}
+        error={status === "error" ? error : null}
+      />
     </div>
   );
 }

@@ -5,8 +5,9 @@ import { log } from "./index";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
 import { authenticate, requireAdmin, keycloakAdmin, type AuthenticatedRequest } from "./auth";
 
-// SSH connections are now handled by KeyleSSH via Socket.IO proxy
-// See server/index.ts for the proxy configuration
+// SSH connections are handled via WebSocket TCP bridge
+// The browser runs SSH client (using @microsoft/dev-tunnels-ssh)
+// and connects through /ws/tcp to reach SSH servers
 
 export async function registerRoutes(
   httpServer: Server,
@@ -130,6 +131,45 @@ export async function registerRoutes(
     }
   });
 
+  // SSH connection authorization endpoint
+  // Validates user has access to server and returns connection details
+  app.post("/api/ssh/authorize", authenticate, async (req: AuthenticatedRequest, res) => {
+    try {
+      const user = req.user!;
+      const { serverId } = req.body;
+
+      if (!serverId) {
+        res.status(400).json({ message: "serverId is required" });
+        return;
+      }
+
+      const server = await storage.getServer(serverId);
+      if (!server) {
+        res.status(404).json({ message: "Server not found" });
+        return;
+      }
+
+      // Check if user has access to this server (admins have access to all)
+      if (user.role !== "admin" && !user.allowedServers.includes(server.id)) {
+        res.status(403).json({ message: "Access denied to this server" });
+        return;
+      }
+
+      // Return server connection details
+      // The JWT token from the Authorization header will be used for WebSocket auth
+      res.json({
+        host: server.host,
+        port: server.port,
+        serverId: server.id,
+        serverName: server.name,
+        allowedSshUsers: server.sshUsers || [],
+      });
+    } catch (error) {
+      log(`SSH authorize error: ${error}`);
+      res.status(500).json({ message: "Failed to authorize SSH connection" });
+    }
+  });
+
   app.get("/api/admin/servers", authenticate, requireAdmin, async (req: AuthenticatedRequest, res) => {
     try {
       const servers = await storage.getServers();
@@ -176,8 +216,9 @@ export async function registerRoutes(
 
   app.get("/api/admin/users", authenticate, requireAdmin, async (req: AuthenticatedRequest, res) => {
     try {
-      // Fetch users from Keycloak Admin API
-      const users = await keycloakAdmin.getUsers();
+      // Fetch users from Keycloak Admin API using the user's token
+      const token = req.accessToken!;
+      const users = await keycloakAdmin.getUsers(token);
       res.json(users);
     } catch (error) {
       log(`Failed to fetch users from Keycloak: ${error}`);
@@ -189,18 +230,19 @@ export async function registerRoutes(
     try {
       const { role, allowedServers } = req.body;
       const userId = req.params.id;
+      const token = req.accessToken!;
 
       // Update user in Keycloak
       if (role !== undefined) {
-        await keycloakAdmin.updateUserRole(userId, role);
+        await keycloakAdmin.updateUserRole(token, userId, role);
       }
 
       if (allowedServers !== undefined) {
-        await keycloakAdmin.updateUserAttributes(userId, allowedServers);
+        await keycloakAdmin.updateUserAttributes(token, userId, allowedServers);
       }
 
       // Fetch updated user
-      const user = await keycloakAdmin.getUser(userId);
+      const user = await keycloakAdmin.getUser(token, userId);
       if (!user) {
         res.status(404).json({ message: "User not found" });
         return;

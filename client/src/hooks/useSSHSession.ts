@@ -1,0 +1,138 @@
+import { useState, useCallback, useRef, useEffect } from "react";
+import { BrowserSSHClient, SSHConnectionStatus } from "@/lib/sshClient";
+
+interface UseSSHSessionOptions {
+  host: string;
+  port: number;
+  serverId: string;
+  username: string;
+  onData: (data: Uint8Array) => void;
+}
+
+interface UseSSHSessionReturn {
+  connect: (privateKey: string, passphrase?: string) => Promise<void>;
+  disconnect: () => void;
+  send: (data: string) => void;
+  resize: (cols: number, rows: number) => void;
+  setDimensions: (cols: number, rows: number) => void;
+  status: SSHConnectionStatus;
+  error: string | null;
+}
+
+export function useSSHSession({
+  host,
+  port,
+  serverId,
+  username,
+  onData,
+}: UseSSHSessionOptions): UseSSHSessionReturn {
+  const [status, setStatus] = useState<SSHConnectionStatus>("disconnected");
+  const [error, setError] = useState<string | null>(null);
+  const clientRef = useRef<BrowserSSHClient | null>(null);
+
+  // Store current values in refs so connect always has access to latest values
+  const hostRef = useRef(host);
+  const portRef = useRef(port);
+  const serverIdRef = useRef(serverId);
+  const usernameRef = useRef(username);
+  const onDataRef = useRef(onData);
+
+  // Keep refs in sync with props
+  useEffect(() => {
+    hostRef.current = host;
+    portRef.current = port;
+    serverIdRef.current = serverId;
+    usernameRef.current = username;
+    onDataRef.current = onData;
+  }, [host, port, serverId, username, onData]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (clientRef.current) {
+        clientRef.current.disconnect();
+        clientRef.current = null;
+      }
+    };
+  }, []);
+
+  const connect = useCallback(
+    async (privateKey: string, passphrase?: string) => {
+      // Cleanup any existing connection
+      if (clientRef.current) {
+        clientRef.current.disconnect();
+        clientRef.current = null;
+      }
+
+      setError(null);
+
+      // Use refs to get the latest values at call time
+      const currentHost = hostRef.current;
+      const currentPort = portRef.current;
+      const currentServerId = serverIdRef.current;
+      const currentUsername = usernameRef.current;
+      const currentOnData = onDataRef.current;
+
+      // Create new client with current values
+      const client = new BrowserSSHClient({
+        host: currentHost,
+        port: currentPort,
+        serverId: currentServerId,
+        username: currentUsername,
+        onData: currentOnData,
+        onStatusChange: (newStatus) => {
+          setStatus(newStatus);
+        },
+        onError: (errorMessage) => {
+          setError(errorMessage);
+        },
+        onClose: () => {
+          setStatus("disconnected");
+        },
+      });
+
+      clientRef.current = client;
+
+      // Connect
+      await client.connect(privateKey, passphrase);
+    },
+    [] // No deps needed since we use refs
+  );
+
+  const disconnect = useCallback(() => {
+    if (clientRef.current) {
+      clientRef.current.disconnect();
+      clientRef.current = null;
+    }
+    setStatus("disconnected");
+    setError(null);
+  }, []);
+
+  const send = useCallback((data: string) => {
+    if (clientRef.current) {
+      clientRef.current.send(data);
+    }
+  }, []);
+
+  const resize = useCallback((cols: number, rows: number) => {
+    if (clientRef.current) {
+      clientRef.current.resize(cols, rows);
+    }
+  }, []);
+
+  const setDimensions = useCallback((cols: number, rows: number) => {
+    if (clientRef.current) {
+      clientRef.current.setDimensions(cols, rows);
+    }
+  }, []);
+
+  return {
+    connect,
+    disconnect,
+    send,
+    resize,
+    setDimensions,
+    status,
+    error,
+  };
+}
