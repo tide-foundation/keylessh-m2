@@ -20,20 +20,24 @@ KeyleSSH provides:
 - **Backend**: Express.js with WebSocket support
 - **UI Components**: Shadcn/ui
 
+## TideCloak Configuration
+
+The TideCloak adapter is configured in `client/src/tidecloakAdapter.json`. This file contains:
+- Realm and auth server URL
+- Client ID (resource)
+- JWK public key for token verification
+- Client origin auth keys for allowed domains
+
+To use the app from a new domain, add a `client-origin-auth-{origin}` key to your TideCloak client configuration.
+
 ## Environment Variables
 
-Configure these in `.env` or Replit Secrets:
+Configure these in `.env` or Replit Secrets (optional):
 
 ```env
-# API Configuration
-VITE_API_BASE_URL=           # Backend API base URL (leave empty for same-origin)
-VITE_WS_BASE_URL=            # WebSocket base URL (leave empty for same-origin)
-
-# TideCloak Configuration (using @tidecloak/react SDK)
-VITE_TIDECLOAK_URL=          # TideCloak server URL (e.g., https://auth.example.com)
-VITE_TIDECLOAK_REALM=        # TideCloak realm name
-VITE_TIDECLOAK_CLIENT_ID=    # TideCloak client ID (public client)
-
+# API Configuration (leave empty for same-origin)
+VITE_API_BASE_URL=           # Backend API base URL
+VITE_WS_BASE_URL=            # WebSocket base URL
 ```
 
 ## Running the Application

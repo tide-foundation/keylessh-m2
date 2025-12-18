@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react";
 import { TideCloakContextProvider, useTideCloak } from "@tidecloak/react";
 import type { OIDCUser, UserRole, AuthState } from "@shared/schema";
+import adapter from "../tidecloakAdapter.json";
 
 interface AuthContextValue extends AuthState {
   login: () => void;
@@ -12,12 +13,7 @@ interface AuthContextValue extends AuthState {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 const tidecloakConfig = {
-  realm: import.meta.env.VITE_TIDECLOAK_REALM || "",
-  "auth-server-url": import.meta.env.VITE_TIDECLOAK_URL || "",
-  "ssl-required": "external",
-  resource: import.meta.env.VITE_TIDECLOAK_CLIENT_ID || "",
-  "public-client": true,
-  "confidential-port": 0,
+  ...adapter,
   redirectUri: `${window.location.origin}/auth/redirect`,
 };
 
