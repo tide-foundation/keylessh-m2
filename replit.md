@@ -34,8 +34,6 @@ VITE_TIDECLOAK_URL=          # TideCloak server URL (e.g., https://auth.example.
 VITE_TIDECLOAK_REALM=        # TideCloak realm name
 VITE_TIDECLOAK_CLIENT_ID=    # TideCloak client ID (public client)
 
-# Mock Mode
-VITE_USE_MOCK=true           # Set to "true" for demo/development mode (auto-enabled when TIDECLOAK_URL is not set)
 ```
 
 ## Running the Application
