@@ -1,17 +1,16 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { useParams, useLocation, useSearch } from "wouter";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useParams, useSearch } from "wouter";
+import { useQuery } from "@tanstack/react-query";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { io, Socket } from "socket.io-client";
 import "@xterm/xterm/css/xterm.css";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
-import { getWebSocketUrl } from "@/lib/api";
-import { queryClient, apiRequest } from "@/lib/queryClient";
 import {
   ArrowLeft,
   RefreshCw,
@@ -24,7 +23,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { Link } from "wouter";
-import type { ServerWithAccess, Session, ConnectionStatus } from "@shared/schema";
+import type { ServerWithAccess, ConnectionStatus } from "@shared/schema";
 
 const statusConfig: Record<ConnectionStatus, { label: string; color: string; icon: typeof Wifi }> = {
   connecting: { label: "Connecting...", color: "bg-chart-4", icon: Loader2 },
@@ -38,90 +37,146 @@ export default function Console() {
   const search = useSearch();
   const searchParams = new URLSearchParams(search);
   const sshUser = searchParams.get("user") || "root";
-  const existingSessionId = searchParams.get("session");
-  
-  const [, setLocation] = useLocation();
+
   const { toast } = useToast();
 
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const sessionIdRef = useRef<string | null>(existingSessionId);
+  const socketRef = useRef<Socket | null>(null);
 
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [sshStatus, setSshStatus] = useState<string>("");
 
   const { data: server, isLoading: serverLoading } = useQuery<ServerWithAccess>({
     queryKey: ["/api/servers", params.serverId],
   });
 
-  const createSessionMutation = useMutation({
-    mutationFn: async (data: { serverId: string; sshUser: string }) => {
-      const result = await apiRequest("POST", "/api/sessions", data);
-      return result as Session;
-    },
-    onSuccess: (session) => {
-      sessionIdRef.current = session.id;
-      connectWebSocket(session.id);
-    },
-    onError: (error) => {
-      toast({
-        title: "Failed to create session",
-        description: error.message,
-        variant: "destructive",
-      });
-      setStatus("error");
-    },
-  });
-
-  const connectWebSocket = useCallback((sessionId: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.close();
+  const connectToKeyleSSH = useCallback(() => {
+    if (socketRef.current?.connected) {
+      socketRef.current.disconnect();
     }
 
     setStatus("connecting");
-    const wsUrl = getWebSocketUrl(sessionId);
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
 
-    ws.onopen = () => {
+    // Connect to KeyleSSH via Socket.IO (proxied through /ssh)
+    const socket = io({
+      path: "/ssh/socket.io",
+      withCredentials: true,
+      transports: ["websocket", "polling"],
+    });
+
+    socketRef.current = socket;
+
+    // KeyleSSH Socket.IO events
+    socket.on("connect", () => {
       setStatus("connected");
       xtermRef.current?.focus();
-    };
+      // Send initial terminal geometry
+      const dims = fitAddonRef.current?.proposeDimensions();
+      if (dims) {
+        socket.emit("geometry", dims.cols, dims.rows);
+      }
+    });
 
-    ws.onmessage = (event) => {
-      xtermRef.current?.write(event.data);
-    };
+    socket.on("data", (data: string) => {
+      xtermRef.current?.write(data);
+    });
 
-    ws.onerror = () => {
+    socket.on("ssherror", (error: string) => {
       setStatus("error");
       toast({
-        title: "Connection error",
-        description: "Failed to connect to the server",
+        title: "SSH Error",
+        description: error,
         variant: "destructive",
       });
-    };
+    });
 
-    ws.onclose = () => {
+    socket.on("status", (statusMsg: string) => {
+      setSshStatus(statusMsg);
+    });
+
+    socket.on("menu", () => {
+      // KeyleSSH sends this when ready
+      console.log("KeyleSSH menu ready");
+    });
+
+    socket.on("title", (title: string) => {
+      document.title = title;
+    });
+
+    socket.on("reauth", () => {
+      toast({
+        title: "Authentication Required",
+        description: "Please re-authenticate to continue",
+        variant: "destructive",
+      });
+      setStatus("error");
+    });
+
+    socket.on("disconnect", (reason) => {
+      console.log("Socket.IO disconnected:", reason);
       if (status === "connected") {
         setStatus("disconnected");
       }
-    };
+    });
+
+    socket.on("connect_error", (error) => {
+      console.error("Socket.IO connection error:", error);
+      setStatus("error");
+      toast({
+        title: "Connection error",
+        description: "Failed to connect to KeyleSSH",
+        variant: "destructive",
+      });
+    });
   }, [status, toast]);
 
-  const handleReconnect = useCallback(() => {
-    if (sessionIdRef.current) {
-      connectWebSocket(sessionIdRef.current);
-    } else if (params.serverId) {
-      createSessionMutation.mutate({ serverId: params.serverId, sshUser });
+  // Initialize KeyleSSH session with server credentials
+  const initKeyleSSHSession = useCallback(async () => {
+    if (!server) return;
+
+    try {
+      // Make a request to /ssh/ to set up the KeyleSSH session
+      // This sets session.ssh with host/port and gets credentials
+      const response = await fetch(`/ssh/?port=${server.port}`, {
+        credentials: "include",
+        headers: {
+          // KeyleSSH uses basic auth or session-based auth
+          // The host is configured in KeyleSSH's config.json
+        },
+      });
+
+      if (response.ok) {
+        // Session is set up, now connect via Socket.IO
+        connectToKeyleSSH();
+      } else {
+        toast({
+          title: "Session setup failed",
+          description: "Failed to initialize SSH session",
+          variant: "destructive",
+        });
+        setStatus("error");
+      }
+    } catch (error) {
+      console.error("Failed to initialize KeyleSSH session:", error);
+      toast({
+        title: "Connection failed",
+        description: "Failed to connect to KeyleSSH",
+        variant: "destructive",
+      });
+      setStatus("error");
     }
-  }, [params.serverId, sshUser, createSessionMutation, connectWebSocket]);
+  }, [server, connectToKeyleSSH, toast]);
+
+  const handleReconnect = useCallback(() => {
+    initKeyleSSHSession();
+  }, [initKeyleSSHSession]);
 
   const handleDisconnect = useCallback(() => {
-    wsRef.current?.close();
+    socketRef.current?.disconnect();
     setStatus("disconnected");
-    queryClient.invalidateQueries({ queryKey: ["/api/sessions"] });
   }, []);
 
   const handleCopy = useCallback(() => {
@@ -187,18 +242,20 @@ export default function Console() {
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
+    // Send terminal input to KeyleSSH via Socket.IO
     term.onData((data) => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(data);
+      if (socketRef.current?.connected) {
+        socketRef.current.emit("data", data);
       }
     });
 
     const handleResize = () => {
       fitAddon.fit();
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
+      // Send resize event to KeyleSSH
+      if (socketRef.current?.connected) {
         const dims = fitAddon.proposeDimensions();
         if (dims) {
-          wsRef.current.send(JSON.stringify({ type: "resize", cols: dims.cols, rows: dims.rows }));
+          socketRef.current.emit("resize", { rows: dims.rows, cols: dims.cols });
         }
       }
     };
@@ -212,17 +269,17 @@ export default function Console() {
       window.removeEventListener("resize", handleResize);
       term.dispose();
       xtermRef.current = null;
-      wsRef.current?.close();
+      socketRef.current?.disconnect();
     };
   }, []);
 
+  // Auto-connect when server data is loaded
   useEffect(() => {
-    if (server && !sessionIdRef.current && status === "disconnected") {
-      createSessionMutation.mutate({ serverId: params.serverId!, sshUser });
-    } else if (existingSessionId && status === "disconnected") {
-      connectWebSocket(existingSessionId);
+    if (server && status === "disconnected") {
+      // Initialize KeyleSSH session first, then connect
+      initKeyleSSHSession();
     }
-  }, [server, params.serverId, sshUser, existingSessionId]);
+  }, [server, status, initKeyleSSHSession]);
 
   const StatusIcon = statusConfig[status].icon;
 
@@ -294,11 +351,11 @@ export default function Console() {
                 size="icon"
                 variant="ghost"
                 onClick={handleReconnect}
-                disabled={createSessionMutation.isPending || status === "connecting"}
+                disabled={status === "connecting"}
                 title="Reconnect"
                 data-testid="reconnect-button"
               >
-                <RefreshCw className={`h-4 w-4 ${createSessionMutation.isPending ? "animate-spin" : ""}`} />
+                <RefreshCw className={`h-4 w-4 ${status === "connecting" ? "animate-spin" : ""}`} />
               </Button>
             )}
             {status === "connected" && (

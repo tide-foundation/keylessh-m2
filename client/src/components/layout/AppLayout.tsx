@@ -33,8 +33,6 @@ interface AppLayoutProps {
 
 const userNavItems = [
   { title: "Dashboard", url: "/app", icon: Terminal },
-  { title: "Servers", url: "/app/servers", icon: Server },
-  { title: "Sessions", url: "/app/sessions", icon: Activity },
 ];
 
 const adminNavItems = [

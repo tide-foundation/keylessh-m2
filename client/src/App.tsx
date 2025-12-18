@@ -119,18 +119,6 @@ function Router() {
         </ProtectedRoute>
       </Route>
       
-      <Route path="/app/servers">
-        <ProtectedRoute>
-          <Dashboard />
-        </ProtectedRoute>
-      </Route>
-      
-      <Route path="/app/sessions">
-        <ProtectedRoute>
-          <Dashboard />
-        </ProtectedRoute>
-      </Route>
-      
       <Route path="/app/console/:serverId">
         <ConsoleRoute />
       </Route>

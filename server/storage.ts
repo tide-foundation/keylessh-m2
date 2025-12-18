@@ -32,111 +32,6 @@ export class MemStorage implements IStorage {
     this.users = new Map();
     this.servers = new Map();
     this.sessions = new Map();
-    this.seedMockData();
-  }
-
-  private seedMockData() {
-    const mockServers: Server[] = [
-      {
-        id: "server-1",
-        name: "Production Web Server",
-        host: "prod-web-01.example.com",
-        port: 22,
-        environment: "production",
-        tags: ["web", "nginx", "critical"],
-        enabled: true,
-        sshUsers: ["root", "deploy", "www-data"],
-      },
-      {
-        id: "server-2",
-        name: "Staging API Server",
-        host: "staging-api-01.example.com",
-        port: 22,
-        environment: "staging",
-        tags: ["api", "nodejs"],
-        enabled: true,
-        sshUsers: ["root", "node", "deploy"],
-      },
-      {
-        id: "server-3",
-        name: "Development Database",
-        host: "dev-db-01.example.com",
-        port: 22,
-        environment: "development",
-        tags: ["database", "postgres"],
-        enabled: true,
-        sshUsers: ["root", "postgres"],
-      },
-      {
-        id: "server-4",
-        name: "Production Load Balancer",
-        host: "prod-lb-01.example.com",
-        port: 22,
-        environment: "production",
-        tags: ["lb", "haproxy", "critical"],
-        enabled: true,
-        sshUsers: ["root", "admin"],
-      },
-      {
-        id: "server-5",
-        name: "Backup Server",
-        host: "backup-01.example.com",
-        port: 22,
-        environment: "production",
-        tags: ["backup", "storage"],
-        enabled: false,
-        sshUsers: ["root", "backup"],
-      },
-    ];
-
-    const mockUsers: User[] = [
-      {
-        id: "mock-user-1",
-        username: "demo.user",
-        email: "demo@keylessh.dev",
-        role: "admin",
-        allowedServers: ["server-1", "server-2", "server-3", "server-4", "server-5"],
-      },
-      {
-        id: "user-2",
-        username: "john.developer",
-        email: "john@example.com",
-        role: "user",
-        allowedServers: ["server-2", "server-3"],
-      },
-      {
-        id: "user-3",
-        username: "jane.ops",
-        email: "jane@example.com",
-        role: "admin",
-        allowedServers: ["server-1", "server-2", "server-3", "server-4"],
-      },
-    ];
-
-    const mockSessions: Session[] = [
-      {
-        id: "session-1",
-        userId: "mock-user-1",
-        serverId: "server-1",
-        sshUser: "root",
-        status: "active",
-        startedAt: new Date(Date.now() - 3600000),
-        endedAt: null,
-      },
-      {
-        id: "session-2",
-        userId: "user-2",
-        serverId: "server-2",
-        sshUser: "deploy",
-        status: "completed",
-        startedAt: new Date(Date.now() - 86400000),
-        endedAt: new Date(Date.now() - 82800000),
-      },
-    ];
-
-    mockServers.forEach((s) => this.servers.set(s.id, s));
-    mockUsers.forEach((u) => this.users.set(u.id, u));
-    mockSessions.forEach((s) => this.sessions.set(s.id, s));
   }
 
   async getUser(id: string): Promise<User | undefined> {
@@ -149,7 +44,13 @@ export class MemStorage implements IStorage {
 
   async createUser(insertUser: InsertUser): Promise<User> {
     const id = randomUUID();
-    const user: User = { ...insertUser, id };
+    const user: User = {
+      id,
+      username: insertUser.username,
+      email: insertUser.email,
+      role: insertUser.role ?? "user",
+      allowedServers: insertUser.allowedServers ?? [],
+    };
     this.users.set(id, user);
     return user;
   }

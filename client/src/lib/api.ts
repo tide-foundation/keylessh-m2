@@ -1,8 +1,6 @@
 import type { Server, Session, User, ServerWithAccess, ActiveSession } from "@shared/schema";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
-const WS_BASE = import.meta.env.VITE_WS_BASE_URL || "";
-const USE_MOCK = import.meta.env.VITE_USE_MOCK === "true";
 
 async function apiRequest<T>(
   endpoint: string,
@@ -74,11 +72,5 @@ export const api = {
   },
 };
 
-export function getWebSocketUrl(sessionId: string): string {
-  const token = localStorage.getItem("access_token");
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const host = WS_BASE || window.location.host;
-  return `${protocol}//${host}/ws?session=${sessionId}&token=${token}`;
-}
-
-export { USE_MOCK };
+// SSH connections are now handled via Socket.IO to KeyleSSH
+// See Console.tsx for the Socket.IO implementation

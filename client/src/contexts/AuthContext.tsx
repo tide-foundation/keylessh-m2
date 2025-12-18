@@ -31,12 +31,17 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
       if (tidecloak.authenticated) {
         const user: OIDCUser = {
           id: tidecloak.getValueFromIdToken("sub") || "",
-          username: tidecloak.getValueFromIdToken("preferred_username") || 
+          username: tidecloak.getValueFromIdToken("preferred_username") ||
                     tidecloak.getValueFromIdToken("name") || "",
           email: tidecloak.getValueFromIdToken("email") || "",
-          role: tidecloak.hasRealmRole("admin") ? "admin" : "user",
+          role: tidecloak.hasClientRole("tide-realm-admin", "realm-management") ? "admin" : "user",
           allowedServers: (tidecloak.getValueFromIdToken("allowed_servers") as string[]) || [],
         };
+
+        // Store token in localStorage for API calls
+        if (tidecloak.token) {
+          localStorage.setItem("access_token", tidecloak.token);
+        }
 
         setState({
           user,
@@ -45,6 +50,9 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
           isLoading: false,
         });
       } else {
+        // Clear token from localStorage
+        localStorage.removeItem("access_token");
+
         setState({
           user: null,
           accessToken: null,
@@ -60,6 +68,7 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
   }, [tidecloak]);
 
   const logout = useCallback(() => {
+    localStorage.removeItem("access_token");
     tidecloak.logout();
   }, [tidecloak]);
 
@@ -70,7 +79,7 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
   const hasRole = useCallback(
     (role: UserRole) => {
       if (role === "admin") {
-        return tidecloak.hasRealmRole("admin");
+        return tidecloak.hasClientRole("tide-realm-admin", "realm-management");
       }
       return state.isAuthenticated;
     },
