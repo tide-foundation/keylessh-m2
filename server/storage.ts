@@ -1,5 +1,20 @@
-import type { User, InsertUser, Server, InsertServer, Session, InsertSession } from "@shared/schema";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import Database from "better-sqlite3";
+import { eq, desc, inArray } from "drizzle-orm";
 import { randomUUID } from "crypto";
+import { mkdirSync, existsSync } from "fs";
+import { dirname } from "path";
+import {
+  users,
+  servers,
+  sessions,
+  type User,
+  type InsertUser,
+  type Server,
+  type InsertServer,
+  type Session,
+  type InsertSession,
+} from "@shared/schema";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -23,23 +38,63 @@ export interface IStorage {
   endSession(id: string): Promise<boolean>;
 }
 
-export class MemStorage implements IStorage {
-  private users: Map<string, User>;
-  private servers: Map<string, Server>;
-  private sessions: Map<string, Session>;
+// Database path
+const DB_PATH = process.env.DATABASE_URL || "./data/keylessh.db";
 
-  constructor() {
-    this.users = new Map();
-    this.servers = new Map();
-    this.sessions = new Map();
-  }
+// Ensure data directory exists
+const dbDir = dirname(DB_PATH);
+if (!existsSync(dbDir)) {
+  mkdirSync(dbDir, { recursive: true });
+}
 
+// Initialize SQLite database
+const sqlite = new Database(DB_PATH);
+sqlite.pragma("journal_mode = WAL");
+
+// Initialize Drizzle
+const db = drizzle(sqlite);
+
+// Create tables if they don't exist
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    allowed_servers TEXT NOT NULL DEFAULT '[]'
+  );
+
+  CREATE TABLE IF NOT EXISTS servers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 22,
+    environment TEXT NOT NULL DEFAULT 'production',
+    tags TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    ssh_users TEXT NOT NULL DEFAULT '[]'
+  );
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    ssh_user TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER
+  );
+`);
+
+export class SQLiteStorage implements IStorage {
   async getUser(id: string): Promise<User | undefined> {
-    return this.users.get(id);
+    const result = db.select().from(users).where(eq(users.id, id)).get();
+    return result;
   }
 
   async getUserByUsername(username: string): Promise<User | undefined> {
-    return Array.from(this.users.values()).find((user) => user.username === username);
+    const result = db.select().from(users).where(eq(users.username, username)).get();
+    return result;
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {
@@ -49,34 +104,37 @@ export class MemStorage implements IStorage {
       username: insertUser.username,
       email: insertUser.email,
       role: insertUser.role ?? "user",
-      allowedServers: insertUser.allowedServers ?? [],
+      allowedServers: (insertUser.allowedServers ?? []) as string[],
     };
-    this.users.set(id, user);
+    db.insert(users).values(user).run();
     return user;
   }
 
   async getUsers(): Promise<User[]> {
-    return Array.from(this.users.values());
+    return db.select().from(users).all();
   }
 
   async updateUser(id: string, data: Partial<User>): Promise<User | undefined> {
-    const user = this.users.get(id);
-    if (!user) return undefined;
-    const updated = { ...user, ...data, id };
-    this.users.set(id, updated);
+    const existing = await this.getUser(id);
+    if (!existing) return undefined;
+
+    const updated = { ...existing, ...data, id };
+    db.update(users).set(updated).where(eq(users.id, id)).run();
     return updated;
   }
 
   async getServers(): Promise<Server[]> {
-    return Array.from(this.servers.values());
+    return db.select().from(servers).all();
   }
 
   async getServer(id: string): Promise<Server | undefined> {
-    return this.servers.get(id);
+    const result = db.select().from(servers).where(eq(servers.id, id)).get();
+    return result;
   }
 
   async getServersByIds(ids: string[]): Promise<Server[]> {
-    return ids.map((id) => this.servers.get(id)).filter((s): s is Server => !!s);
+    if (ids.length === 0) return [];
+    return db.select().from(servers).where(inArray(servers.id, ids)).all();
   }
 
   async createServer(insertServer: InsertServer): Promise<Server> {
@@ -87,40 +145,44 @@ export class MemStorage implements IStorage {
       host: insertServer.host,
       port: insertServer.port ?? 22,
       environment: insertServer.environment ?? "production",
-      tags: insertServer.tags ?? [],
+      tags: (insertServer.tags ?? []) as string[],
       enabled: insertServer.enabled ?? true,
-      sshUsers: insertServer.sshUsers ?? [],
+      sshUsers: (insertServer.sshUsers ?? []) as string[],
     };
-    this.servers.set(id, server);
+    db.insert(servers).values(server).run();
     return server;
   }
 
   async updateServer(id: string, data: Partial<Server>): Promise<Server | undefined> {
-    const server = this.servers.get(id);
-    if (!server) return undefined;
-    const updated = { ...server, ...data, id };
-    this.servers.set(id, updated);
+    const existing = await this.getServer(id);
+    if (!existing) return undefined;
+
+    const updated = { ...existing, ...data, id };
+    db.update(servers).set(updated).where(eq(servers.id, id)).run();
     return updated;
   }
 
   async deleteServer(id: string): Promise<boolean> {
-    return this.servers.delete(id);
+    const result = db.delete(servers).where(eq(servers.id, id)).run();
+    return result.changes > 0;
   }
 
   async getSessions(): Promise<Session[]> {
-    return Array.from(this.sessions.values()).sort(
-      (a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime()
-    );
+    return db.select().from(sessions).orderBy(desc(sessions.startedAt)).all();
   }
 
   async getSession(id: string): Promise<Session | undefined> {
-    return this.sessions.get(id);
+    const result = db.select().from(sessions).where(eq(sessions.id, id)).get();
+    return result;
   }
 
   async getSessionsByUserId(userId: string): Promise<Session[]> {
-    return Array.from(this.sessions.values())
-      .filter((s) => s.userId === userId)
-      .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+    return db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.userId, userId))
+      .orderBy(desc(sessions.startedAt))
+      .all();
   }
 
   async createSession(insertSession: InsertSession): Promise<Session> {
@@ -134,25 +196,27 @@ export class MemStorage implements IStorage {
       startedAt: new Date(),
       endedAt: null,
     };
-    this.sessions.set(id, session);
+    db.insert(sessions).values(session).run();
     return session;
   }
 
   async updateSession(id: string, data: Partial<Session>): Promise<Session | undefined> {
-    const session = this.sessions.get(id);
-    if (!session) return undefined;
-    const updated = { ...session, ...data, id };
-    this.sessions.set(id, updated);
+    const existing = await this.getSession(id);
+    if (!existing) return undefined;
+
+    const updated = { ...existing, ...data, id };
+    db.update(sessions).set(updated).where(eq(sessions.id, id)).run();
     return updated;
   }
 
   async endSession(id: string): Promise<boolean> {
-    const session = this.sessions.get(id);
-    if (!session) return false;
-    session.status = "completed";
-    session.endedAt = new Date();
-    return true;
+    const result = db
+      .update(sessions)
+      .set({ status: "completed", endedAt: new Date() })
+      .where(eq(sessions.id, id))
+      .run();
+    return result.changes > 0;
   }
 }
 
-export const storage = new MemStorage();
+export const storage = new SQLiteStorage();

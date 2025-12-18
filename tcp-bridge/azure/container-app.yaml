@@ -1,0 +1,59 @@
+# Azure Container Apps configuration
+# Deploy with: az containerapp create --yaml container-app.yaml
+
+name: keylessh-tcp-bridge
+type: Microsoft.App/containerApps
+location: eastus
+properties:
+  managedEnvironmentId: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.App/managedEnvironments/<ENVIRONMENT_NAME>
+
+  configuration:
+    # Enable ingress for WebSocket connections
+    ingress:
+      external: true
+      targetPort: 8080
+      transport: http
+      # WebSocket support
+      clientCertificateMode: ignore
+
+    # Secrets
+    secrets:
+      - name: bridge-secret
+        value: <YOUR_BRIDGE_SECRET>
+
+  template:
+    containers:
+      - name: tcp-bridge
+        image: <ACR_NAME>.azurecr.io/keylessh-tcp-bridge:latest
+        resources:
+          cpu: 0.25
+          memory: 0.5Gi
+        env:
+          - name: BRIDGE_SECRET
+            secretRef: bridge-secret
+          - name: PORT
+            value: "8080"
+        probes:
+          - type: liveness
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          - type: readiness
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+
+    # Auto-scaling configuration
+    scale:
+      minReplicas: 0  # Scale to zero when no connections
+      maxReplicas: 100  # Scale up to 100 instances
+      rules:
+        # Scale based on concurrent HTTP connections (WebSocket = HTTP upgrade)
+        - name: http-connections
+          http:
+            metadata:
+              concurrentRequests: "10"  # 10 SSH sessions per instance

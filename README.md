@@ -229,6 +229,70 @@ npm start
 npm run check
 ```
 
+## Local Testing
+
+### Testing Everything Together (Default Mode)
+
+By default, the main server handles TCP bridging locally. This is the simplest setup for development:
+
+```bash
+# Terminal 1: Start the main server
+npm run dev
+
+# The app runs at http://localhost:3000
+# WebSocket bridge is at ws://localhost:3000/ws/tcp
+```
+
+Then:
+1. Open http://localhost:3000 in your browser
+2. Login with TideCloak
+3. Navigate to a server console
+4. Enter your SSH private key
+5. Connect to the SSH server
+
+### Testing TCP Bridge Separately
+
+To test the TCP bridge microservice independently (simulates production architecture):
+
+```bash
+# Terminal 1: Start the TCP bridge
+cd tcp-bridge
+npm install
+BRIDGE_SECRET=test-secret npm run dev
+# Runs on http://localhost:8080
+
+# Terminal 2: Start the main server with external bridge
+BRIDGE_URL=ws://localhost:8080 BRIDGE_SECRET=test-secret npm run dev
+# Runs on http://localhost:3000
+```
+
+This setup mimics production where:
+- Main server handles authentication and creates signed session tokens
+- TCP bridge receives tokens and manages SSH connections
+
+### Testing SSH Connection Manually
+
+You can test the WebSocket-TCP bridge directly using `wscat`:
+
+```bash
+# Install wscat
+npm install -g wscat
+
+# Connect to bridge (local mode, requires valid JWT)
+wscat -c "ws://localhost:3000/ws/tcp?host=your-ssh-server.com&port=22&serverId=server-id&token=YOUR_JWT_TOKEN"
+```
+
+### Health Check
+
+```bash
+# Check main server
+curl http://localhost:3000/api/health
+
+# Check TCP bridge (when running separately)
+curl http://localhost:8080/health
+# Returns: {"status":"ok","connections":0}
+```
+
 ## SSH Connection Flow
 
 1. **User navigates to** `/app/console/:serverId?user=username`
@@ -275,6 +339,61 @@ The TideCloak adapter configuration is in `client/src/tidecloakAdapter.json`:
 4. Click **Save Changes**
 
 This updates the `allowed_servers` attribute in TideCloak, which gets included in their JWT token on next login.
+
+## Scalable Deployment with Azure Container Apps
+
+For production deployments with many concurrent SSH sessions, the TCP bridge can be deployed as a separate, auto-scaling microservice.
+
+### Architecture
+
+```
+┌────────┐    ┌─────────────────┐    ┌─────────────────────┐    ┌──────────┐
+│Browser │───▶│  Main Server    │───▶│ Azure Container App │───▶│SSH Server│
+│   WS   │    │  (JWT + Auth)   │    │   (TCP Bridge)      │    │          │
+└────────┘    └─────────────────┘    │   Scales 0 → 100    │    └──────────┘
+                                     └─────────────────────┘
+```
+
+- **Main Server**: Handles JWT validation, API, creates signed session tokens
+- **TCP Bridge**: Stateless container that pipes WebSocket ↔ TCP
+- **Auto-scaling**: 0 instances when idle, scales based on concurrent connections
+
+### Deploy TCP Bridge to Azure
+
+```bash
+cd tcp-bridge
+
+# Set your bridge secret (used to sign session tokens)
+export BRIDGE_SECRET=$(openssl rand -base64 32)
+
+# Deploy to Azure Container Apps
+./azure/deploy.sh
+```
+
+### Configure Main Server
+
+After deployment, add these environment variables to your main server:
+
+```env
+BRIDGE_URL=wss://keylessh-tcp-bridge.<region>.azurecontainerapps.io
+BRIDGE_SECRET=<same-secret-from-deployment>
+```
+
+### Scaling Configuration
+
+The bridge auto-scales based on concurrent connections:
+- **Min replicas**: 0 (scales to zero when no connections)
+- **Max replicas**: 100 (adjust in `azure/container-app.yaml`)
+- **Connections per instance**: 10 (each SSH session = 1 connection)
+
+This means:
+- 0 users = 0 instances (no cost)
+- 50 users = 5 instances
+- 500 users = 50 instances
+
+### Local Development
+
+By default (no `BRIDGE_URL` set), the server handles TCP bridging locally. This is fine for development and small deployments.
 
 ## License
 

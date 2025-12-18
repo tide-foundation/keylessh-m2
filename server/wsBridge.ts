@@ -2,16 +2,46 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createConnection, Socket } from "net";
 import type { Server, IncomingMessage } from "http";
 import type { Duplex } from "stream";
+import { createHmac } from "crypto";
 import { log } from "./index";
+
+// External bridge configuration
+const BRIDGE_URL = process.env.BRIDGE_URL; // e.g., wss://keylessh-tcp-bridge.azurecontainerapps.io
+const BRIDGE_SECRET = process.env.BRIDGE_SECRET || "change-me-in-production";
+const USE_EXTERNAL_BRIDGE = !!BRIDGE_URL;
 
 interface ConnectionInfo {
   ws: WebSocket;
   tcp: Socket | null;
+  remoteWs: WebSocket | null;
   host: string;
   port: number;
 }
 
 const connections = new Map<WebSocket, ConnectionInfo>();
+
+// Create signed session token for external bridge
+function createSessionToken(
+  host: string,
+  port: number,
+  serverId: string,
+  userId: string
+): string {
+  const payload = {
+    host,
+    port,
+    serverId,
+    userId,
+    exp: Date.now() + 60000, // 1 minute expiry
+  };
+
+  const payloadStr = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = createHmac("sha256", BRIDGE_SECRET)
+    .update(payloadStr)
+    .digest("base64url");
+
+  return `${payloadStr}.${signature}`;
+}
 
 // JWT payload interface
 interface JWTPayload {
@@ -133,86 +163,157 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
 
     log(`WebSocket TCP bridge: connecting to ${host}:${port} for user ${payload.sub}`);
 
-    // Create TCP connection to target
-    const tcp = createConnection({ host, port }, () => {
-      log(`TCP connected to ${host}:${port}`);
-      // Notify client that TCP connection is established
-      ws.send(JSON.stringify({ type: "connected" }));
-    });
+    if (USE_EXTERNAL_BRIDGE) {
+      // === EXTERNAL BRIDGE MODE ===
+      // Create session token and connect to external bridge
+      const sessionToken = createSessionToken(host, port, serverId, payload.sub);
+      const bridgeWsUrl = `${BRIDGE_URL}?token=${sessionToken}`;
 
-    // Store connection info
-    connections.set(ws, { ws, tcp, host, port });
+      log(`Connecting to external bridge: ${BRIDGE_URL}`);
 
-    // Handle TCP data -> WebSocket
-    tcp.on("data", (data: Buffer) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(data);
-      }
-    });
+      const remoteWs = new WebSocket(bridgeWsUrl);
 
-    // Handle TCP errors
-    tcp.on("error", (err: Error) => {
-      log(`TCP error for ${host}:${port}: ${err.message}`);
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "error", message: err.message }));
-        ws.close(4002, `TCP error: ${err.message}`);
-      }
-    });
+      // Store connection info
+      connections.set(ws, { ws, tcp: null, remoteWs, host, port });
 
-    // Handle TCP close
-    tcp.on("close", () => {
-      log(`TCP closed for ${host}:${port}`);
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.close(1000, "TCP connection closed");
-      }
-      connections.delete(ws);
-    });
+      remoteWs.on("open", () => {
+        log(`Connected to external bridge for ${host}:${port}`);
+      });
 
-    // Handle WebSocket messages -> TCP
-    ws.on("message", (data: Buffer | string) => {
-      const conn = connections.get(ws);
-      if (conn?.tcp && !conn.tcp.destroyed) {
-        // Forward binary data to TCP
-        if (Buffer.isBuffer(data)) {
-          conn.tcp.write(data);
-        } else if (typeof data === "string") {
-          // Check if it's a control message (JSON)
-          try {
-            const msg = JSON.parse(data);
-            // Handle control messages if needed
-            if (msg.type === "ping") {
-              ws.send(JSON.stringify({ type: "pong" }));
-              return;
-            }
-          } catch {
-            // Not JSON, treat as raw data
-          }
-          conn.tcp.write(data);
+      remoteWs.on("message", (data: Buffer | string) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(data);
         }
-      }
-    });
+      });
 
-    // Handle WebSocket close
-    ws.on("close", () => {
-      const conn = connections.get(ws);
-      if (conn?.tcp) {
-        conn.tcp.destroy();
-      }
-      connections.delete(ws);
-      log(`WebSocket closed for ${host}:${port}`);
-    });
+      remoteWs.on("error", (err: Error) => {
+        log(`External bridge error: ${err.message}`);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "error", message: err.message }));
+          ws.close(4002, `Bridge error: ${err.message}`);
+        }
+      });
 
-    // Handle WebSocket errors
-    ws.on("error", (err: Error) => {
-      log(`WebSocket error for ${host}:${port}: ${err.message}`);
-      const conn = connections.get(ws);
-      if (conn?.tcp) {
-        conn.tcp.destroy();
-      }
-      connections.delete(ws);
-    });
+      remoteWs.on("close", () => {
+        log(`External bridge closed for ${host}:${port}`);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.close(1000, "Bridge connection closed");
+        }
+        connections.delete(ws);
+      });
+
+      // Forward client messages to bridge
+      ws.on("message", (data: Buffer | string) => {
+        const conn = connections.get(ws);
+        if (conn?.remoteWs && conn.remoteWs.readyState === WebSocket.OPEN) {
+          conn.remoteWs.send(data);
+        }
+      });
+
+      ws.on("close", () => {
+        const conn = connections.get(ws);
+        if (conn?.remoteWs) {
+          conn.remoteWs.close();
+        }
+        connections.delete(ws);
+        log(`WebSocket closed for ${host}:${port}`);
+      });
+
+      ws.on("error", (err: Error) => {
+        log(`WebSocket error for ${host}:${port}: ${err.message}`);
+        const conn = connections.get(ws);
+        if (conn?.remoteWs) {
+          conn.remoteWs.close();
+        }
+        connections.delete(ws);
+      });
+    } else {
+      // === LOCAL BRIDGE MODE ===
+      // Create TCP connection to target
+      const tcp = createConnection({ host, port }, () => {
+        log(`TCP connected to ${host}:${port}`);
+        // Notify client that TCP connection is established
+        ws.send(JSON.stringify({ type: "connected" }));
+      });
+
+      // Store connection info
+      connections.set(ws, { ws, tcp, remoteWs: null, host, port });
+
+      // Handle TCP data -> WebSocket
+      tcp.on("data", (data: Buffer) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(data);
+        }
+      });
+
+      // Handle TCP errors
+      tcp.on("error", (err: Error) => {
+        log(`TCP error for ${host}:${port}: ${err.message}`);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "error", message: err.message }));
+          ws.close(4002, `TCP error: ${err.message}`);
+        }
+      });
+
+      // Handle TCP close
+      tcp.on("close", () => {
+        log(`TCP closed for ${host}:${port}`);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.close(1000, "TCP connection closed");
+        }
+        connections.delete(ws);
+      });
+
+      // Handle WebSocket messages -> TCP
+      ws.on("message", (data: Buffer | string) => {
+        const conn = connections.get(ws);
+        if (conn?.tcp && !conn.tcp.destroyed) {
+          // Forward binary data to TCP
+          if (Buffer.isBuffer(data)) {
+            conn.tcp.write(data);
+          } else if (typeof data === "string") {
+            // Check if it's a control message (JSON)
+            try {
+              const msg = JSON.parse(data);
+              // Handle control messages if needed
+              if (msg.type === "ping") {
+                ws.send(JSON.stringify({ type: "pong" }));
+                return;
+              }
+            } catch {
+              // Not JSON, treat as raw data
+            }
+            conn.tcp.write(data);
+          }
+        }
+      });
+
+      // Handle WebSocket close
+      ws.on("close", () => {
+        const conn = connections.get(ws);
+        if (conn?.tcp) {
+          conn.tcp.destroy();
+        }
+        connections.delete(ws);
+        log(`WebSocket closed for ${host}:${port}`);
+      });
+
+      // Handle WebSocket errors
+      ws.on("error", (err: Error) => {
+        log(`WebSocket error for ${host}:${port}: ${err.message}`);
+        const conn = connections.get(ws);
+        if (conn?.tcp) {
+          conn.tcp.destroy();
+        }
+        connections.delete(ws);
+      });
+    }
   });
 
-  log("WebSocket TCP bridge initialized on /ws/tcp");
+  if (USE_EXTERNAL_BRIDGE) {
+    log(`WebSocket TCP bridge initialized on /ws/tcp (external: ${BRIDGE_URL})`);
+  } else {
+    log("WebSocket TCP bridge initialized on /ws/tcp (local mode)");
+  }
   return wss;
 }
