@@ -88,7 +88,7 @@ sqlite.exec(`
     ended_at INTEGER
   );
 
-  -- Approval tables (matching ideed-swarm structure)
+  -- Approval tables
   CREATE TABLE IF NOT EXISTS pending_approvals (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL CHECK(type IN ('user_create', 'user_update', 'user_delete', 'role_assign', 'role_remove')),

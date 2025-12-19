@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useIsFetching } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -36,6 +36,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { api } from "@/lib/api";
+import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { Users, Pencil, Search, Shield, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check } from "lucide-react";
 import type { AdminUser } from "@shared/schema";
 
@@ -69,9 +70,15 @@ export default function AdminUsers() {
     email: "",
   });
 
-  const { data: users, isLoading: usersLoading } = useQuery<AdminUser[]>({
+  const { data: users, isLoading: usersLoading, refetch: refetchUsers } = useQuery<AdminUser[]>({
     queryKey: ["/api/admin/users"],
     queryFn: api.admin.users.list,
+  });
+  const isFetchingUsers = useIsFetching({ queryKey: ["/api/admin/users"] }) > 0;
+  const { secondsRemaining, refreshNow } = useAutoRefresh({
+    intervalSeconds: 15,
+    refresh: () => refetchUsers(),
+    isBlocked: isFetchingUsers,
   });
 
   const { data: rolesData } = useQuery({
@@ -86,6 +93,7 @@ export default function AdminUsers() {
       api.admin.users.updateProfile(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to update user profile", description: error.message, variant: "destructive" });
@@ -97,6 +105,7 @@ export default function AdminUsers() {
       api.admin.users.updateRoles(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to update user roles", description: error.message, variant: "destructive" });
@@ -108,6 +117,7 @@ export default function AdminUsers() {
       api.admin.users.add(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
       setCreatingUser(false);
       setCreateFormData({ username: "", firstName: "", lastName: "", email: "" });
       toast({ title: "User created successfully" });
@@ -121,6 +131,7 @@ export default function AdminUsers() {
     mutationFn: (userId: string) => api.admin.users.delete(userId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
       setDeletingUser(null);
       setEditingUser(null);
       toast({ title: "User deleted successfully" });
@@ -246,10 +257,21 @@ export default function AdminUsers() {
             Manage user accounts, roles, and permissions
           </p>
         </div>
-        <Button onClick={() => setCreatingUser(true)} data-testid="add-user-button">
-          <Plus className="h-4 w-4 mr-2" />
-          Add User
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => void refreshNow()}
+            disabled={isFetchingUsers}
+            data-testid="refresh-users"
+            title="Refresh now"
+          >
+            Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
+          </Button>
+          <Button onClick={() => setCreatingUser(true)} data-testid="add-user-button">
+            <Plus className="h-4 w-4 mr-2" />
+            Add User
+          </Button>
+        </div>
       </div>
 
       <Card>

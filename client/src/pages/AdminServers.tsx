@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { useIsFetching } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -33,6 +34,7 @@ import {
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { Plus, Pencil, Trash2, Server, Search } from "lucide-react";
 import type { Server as ServerType } from "@shared/schema";
 
@@ -197,8 +199,14 @@ export default function AdminServers() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingServer, setEditingServer] = useState<ServerType | null>(null);
 
-  const { data: servers, isLoading } = useQuery<ServerType[]>({
+  const { data: servers, isLoading, refetch } = useQuery<ServerType[]>({
     queryKey: ["/api/admin/servers"],
+  });
+  const isFetching = useIsFetching({ queryKey: ["/api/admin/servers"] }) > 0;
+  const { secondsRemaining, refreshNow } = useAutoRefresh({
+    intervalSeconds: 15,
+    refresh: () => refetch(),
+    isBlocked: isFetching,
   });
 
   const createMutation = useMutation({
@@ -217,6 +225,7 @@ export default function AdminServers() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/servers"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/servers"] });
       setIsDialogOpen(false);
       toast({ title: "Server created successfully" });
     },
@@ -241,6 +250,7 @@ export default function AdminServers() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/servers"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/servers"] });
       setEditingServer(null);
       setIsDialogOpen(false);
       toast({ title: "Server updated successfully" });
@@ -256,6 +266,7 @@ export default function AdminServers() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/servers"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/servers"] });
       toast({ title: "Server deleted successfully" });
     },
     onError: (error) => {
@@ -299,6 +310,16 @@ export default function AdminServers() {
             Add, edit, and remove SSH servers
           </p>
         </div>
+
+        <Button
+          variant="outline"
+          onClick={() => void refreshNow()}
+          disabled={isFetching}
+          data-testid="refresh-servers"
+          title="Refresh now"
+        >
+          Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
+        </Button>
 
         <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
           <DialogTrigger asChild>

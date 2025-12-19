@@ -1,5 +1,5 @@
 import { useAuth } from "@/contexts/AuthContext";
-import { useQuery } from "@tanstack/react-query";
+import { useIsFetching, useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -7,8 +7,9 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Server, Terminal, Clock, Activity, ArrowRight, Wifi, WifiOff, HelpCircle } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
+import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 
 function ServerCard({ server }: { server: ServerWithAccess }) {
   const [selectedUser, setSelectedUser] = useState<string>(server.allowedSshUsers[0] || "");
@@ -158,12 +159,26 @@ function SessionItem({ session }: { session: ActiveSession }) {
 export default function Dashboard() {
   const { user } = useAuth();
   
-  const { data: servers, isLoading: serversLoading } = useQuery<ServerWithAccess[]>({
+  const { data: servers, isLoading: serversLoading, refetch: refetchServers } = useQuery<ServerWithAccess[]>({
     queryKey: ["/api/servers"],
   });
 
-  const { data: sessions, isLoading: sessionsLoading } = useQuery<ActiveSession[]>({
+  const { data: sessions, isLoading: sessionsLoading, refetch: refetchSessions } = useQuery<ActiveSession[]>({
     queryKey: ["/api/sessions"],
+  });
+
+  const isFetchingServers = useIsFetching({ queryKey: ["/api/servers"] }) > 0;
+  const isFetchingSessions = useIsFetching({ queryKey: ["/api/sessions"] }) > 0;
+  const isFetching = isFetchingServers || isFetchingSessions;
+
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refetchServers(), refetchSessions()]);
+  }, [refetchServers, refetchSessions]);
+
+  const { secondsRemaining, refreshNow } = useAutoRefresh({
+    intervalSeconds: 15,
+    refresh: refreshAll,
+    isBlocked: isFetching,
   });
 
   const activeSessions = sessions?.filter((s) => s.status === "active") || [];
@@ -171,13 +186,24 @@ export default function Dashboard() {
 
   return (
     <div className="p-6 space-y-8">
-      <div className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight" data-testid="dashboard-title">
-          Welcome back, {user?.username}
-        </h1>
-        <p className="text-muted-foreground">
-          Connect to your servers and manage your SSH sessions
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight" data-testid="dashboard-title">
+            Welcome back, {user?.username}
+          </h1>
+          <p className="text-muted-foreground">
+            Connect to your servers and manage your SSH sessions
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          onClick={() => void refreshNow()}
+          disabled={isFetching}
+          data-testid="refresh-dashboard"
+          title="Refresh now"
+        >
+          Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
+        </Button>
       </div>
 
       {activeSessions.length > 0 && (

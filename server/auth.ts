@@ -104,7 +104,7 @@ export function requireAdmin(
   next();
 }
 
-// Admin User type matching ideed-swarm structure
+// Admin User type (TideCloak Admin API shape)
 export interface AdminUser {
   id: string;
   firstName: string;
@@ -115,7 +115,7 @@ export interface AdminUser {
   linked: boolean;
 }
 
-// Admin Role type matching ideed-swarm structure
+// Admin Role type (TideCloak Admin API shape)
 export interface AdminRole {
   id: string;
   name: string;

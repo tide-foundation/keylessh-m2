@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useIsFetching } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -36,6 +36,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { api } from "@/lib/api";
+import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { KeyRound, Pencil, Plus, Trash2, Search } from "lucide-react";
 import type { AdminRole } from "@shared/schema";
 
@@ -50,9 +51,15 @@ export default function AdminRoles() {
     description: "",
   });
 
-  const { data: rolesData, isLoading: rolesLoading } = useQuery({
+  const { data: rolesData, isLoading: rolesLoading, refetch: refetchRoles } = useQuery({
     queryKey: ["/api/admin/roles"],
     queryFn: api.admin.roles.list,
+  });
+  const isFetchingRoles = useIsFetching({ queryKey: ["/api/admin/roles"] }) > 0;
+  const { secondsRemaining, refreshNow } = useAutoRefresh({
+    intervalSeconds: 15,
+    refresh: () => refetchRoles(),
+    isBlocked: isFetchingRoles,
   });
 
   const roles = rolesData?.roles || [];
@@ -61,6 +68,7 @@ export default function AdminRoles() {
     mutationFn: (data: { name: string; description?: string }) => api.admin.roles.create(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/roles"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/roles"] });
       setCreatingRole(false);
       setFormData({ name: "", description: "" });
       toast({ title: "Role created successfully" });
@@ -74,6 +82,7 @@ export default function AdminRoles() {
     mutationFn: (data: { name: string; description?: string }) => api.admin.roles.update(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/roles"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/roles"] });
       setEditingRole(null);
       toast({ title: "Role updated successfully" });
     },
@@ -86,6 +95,7 @@ export default function AdminRoles() {
     mutationFn: (roleName: string) => api.admin.roles.delete(roleName),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/roles"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/roles"] });
       setDeletingRole(null);
       setEditingRole(null);
       toast({ title: "Role deleted successfully" });
@@ -150,10 +160,21 @@ export default function AdminRoles() {
             Create and manage user roles for access control
           </p>
         </div>
-        <Button onClick={handleCreate} data-testid="add-role-button">
-          <Plus className="h-4 w-4 mr-2" />
-          Add Role
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => void refreshNow()}
+            disabled={isFetchingRoles}
+            data-testid="refresh-roles"
+            title="Refresh now"
+          >
+            Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
+          </Button>
+          <Button onClick={handleCreate} data-testid="add-role-button">
+            <Plus className="h-4 w-4 mr-2" />
+            Add Role
+          </Button>
+        </div>
       </div>
 
       <Card>

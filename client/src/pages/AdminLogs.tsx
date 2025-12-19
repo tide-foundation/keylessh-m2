@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useIsFetching, useQuery } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -18,6 +18,8 @@ import {
 import { ScrollText, Activity } from "lucide-react";
 import { api, type TidecloakEvent } from "@/lib/api";
 import { AdminSessionHistoryContent } from "@/pages/AdminSessions";
+import { queryClient } from "@/lib/queryClient";
+import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 
 type LogsTab = "access" | "sessions";
 
@@ -185,10 +187,25 @@ export default function AdminLogs() {
     return tab === "sessions" ? "sessions" : "access";
   }, [search]);
 
-  const { data: accessEvents, isLoading: accessEventsLoading } = useQuery({
+  const { data: accessEvents, isLoading: accessEventsLoading, refetch: refetchAccess } = useQuery({
     queryKey: ["/api/admin/logs/access", page, pageSize],
     queryFn: () => api.admin.logs.access(pageSize, page * pageSize),
     enabled: tabFromUrl === "access",
+  });
+  const isFetchingAccess = useIsFetching({ queryKey: ["/api/admin/logs/access"] }) > 0;
+  const isFetchingSessions = useIsFetching({ queryKey: ["/api/admin/sessions"] }) > 0;
+  const isFetching = tabFromUrl === "access" ? isFetchingAccess : isFetchingSessions;
+
+  const { secondsRemaining, refreshNow } = useAutoRefresh({
+    intervalSeconds: 15,
+    refresh: async () => {
+      if (tabFromUrl === "access") {
+        await refetchAccess();
+        return;
+      }
+      await queryClient.refetchQueries({ queryKey: ["/api/admin/sessions"] });
+    },
+    isBlocked: isFetching,
   });
 
   useEffect(() => {
@@ -216,14 +233,25 @@ export default function AdminLogs() {
 
   return (
     <div className="p-6 space-y-6">
-      <div className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
-          <ScrollText className="h-6 w-6" />
-          Logs
-        </h1>
-        <p className="text-muted-foreground">
-          Review access changes and SSH session activity
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
+            <ScrollText className="h-6 w-6" />
+            Logs
+          </h1>
+          <p className="text-muted-foreground">
+            Review access changes and SSH session activity
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          onClick={() => void refreshNow()}
+          disabled={isFetching}
+          data-testid="refresh-logs"
+          title="Refresh now"
+        >
+          Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
+        </Button>
       </div>
 
       <Tabs value={tabFromUrl} onValueChange={handleTabChange}>

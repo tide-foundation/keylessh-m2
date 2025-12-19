@@ -116,7 +116,7 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
   );
 
   // Tide enclave approval function - opens popup for cryptographic signing
-  // Uses IAMService._tc from @tidecloak/js like ideed-swarm does
+  // Uses IAMService._tc from @tidecloak/js
   const approveTideRequests = useCallback(
     async (requests: TideApprovalRequest[]): Promise<TideApprovalResponse[]> => {
       // Access the underlying TideCloak instance via IAMService._tc

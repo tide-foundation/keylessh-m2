@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useIsFetching, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -7,6 +7,8 @@ import type { Server as ServerType, AdminUser, ActiveSession } from "@shared/sch
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { ADMIN_ROLE_SET } from "@shared/config/roles";
+import { useAutoRefresh } from "@/hooks/useAutoRefresh";
+import { useCallback } from "react";
 
 function StatCard({
   title,
@@ -57,16 +59,31 @@ function StatCardSkeleton() {
 }
 
 export default function AdminDashboard() {
-  const { data: servers, isLoading: serversLoading } = useQuery<ServerType[]>({
+  const { data: servers, isLoading: serversLoading, refetch: refetchServers } = useQuery<ServerType[]>({
     queryKey: ["/api/admin/servers"],
   });
 
-  const { data: users, isLoading: usersLoading } = useQuery<AdminUser[]>({
+  const { data: users, isLoading: usersLoading, refetch: refetchUsers } = useQuery<AdminUser[]>({
     queryKey: ["/api/admin/users"],
   });
 
-  const { data: sessions, isLoading: sessionsLoading } = useQuery<ActiveSession[]>({
+  const { data: sessions, isLoading: sessionsLoading, refetch: refetchSessions } = useQuery<ActiveSession[]>({
     queryKey: ["/api/admin/sessions"],
+  });
+
+  const isFetchingServers = useIsFetching({ queryKey: ["/api/admin/servers"] }) > 0;
+  const isFetchingUsers = useIsFetching({ queryKey: ["/api/admin/users"] }) > 0;
+  const isFetchingSessions = useIsFetching({ queryKey: ["/api/admin/sessions"] }) > 0;
+  const isFetching = isFetchingServers || isFetchingUsers || isFetchingSessions;
+
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refetchServers(), refetchUsers(), refetchSessions()]);
+  }, [refetchServers, refetchUsers, refetchSessions]);
+
+  const { secondsRemaining, refreshNow } = useAutoRefresh({
+    intervalSeconds: 15,
+    refresh: refreshAll,
+    isBlocked: isFetching,
   });
 
   const isLoading = serversLoading || usersLoading || sessionsLoading;
@@ -89,6 +106,15 @@ export default function AdminDashboard() {
             System overview and management
           </p>
         </div>
+        <Button
+          variant="outline"
+          onClick={() => void refreshNow()}
+          disabled={isFetching}
+          data-testid="refresh-admin-dashboard"
+          title="Refresh now"
+        >
+          Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
+        </Button>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

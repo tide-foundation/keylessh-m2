@@ -1,5 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
-import { useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useIsFetching } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -31,6 +30,7 @@ import { api } from "@/lib/api";
 import { queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 
 type PageSizeMode = "auto" | "manual";
 
@@ -47,14 +47,21 @@ export function AdminActiveSessionsContent({ embedded = false }: { embedded?: bo
   const [terminatingSession, setTerminatingSession] = useState<ActiveSession | null>(null);
   const { toast } = useToast();
 
-  const { data: sessions, isLoading } = useQuery<ActiveSession[]>({
+  const { data: sessions, isLoading, refetch } = useQuery<ActiveSession[]>({
     queryKey: ["/api/admin/sessions"],
+  });
+  const isFetchingSessions = useIsFetching({ queryKey: ["/api/admin/sessions"] }) > 0;
+  const { secondsRemaining, refreshNow } = useAutoRefresh({
+    intervalSeconds: 10,
+    refresh: () => refetch(),
+    isBlocked: isFetchingSessions,
   });
 
   const terminateMutation = useMutation({
     mutationFn: (sessionId: string) => api.admin.sessions.terminate(sessionId),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/sessions"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/sessions"] });
       toast({
         title: "Session terminated",
         description: result.terminated ? "Connection was disconnected." : "No active connection was found, session marked completed.",
@@ -96,14 +103,25 @@ export function AdminActiveSessionsContent({ embedded = false }: { embedded?: bo
   return (
     <div className={cn("space-y-6", !embedded && "p-6")}>
       {!embedded && (
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-sessions-title">
-            <Activity className="h-6 w-6" />
-            Manage Sessions
-          </h1>
-          <p className="text-muted-foreground">
-            View currently active SSH sessions and terminate if needed
-          </p>
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1">
+            <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-sessions-title">
+              <Activity className="h-6 w-6" />
+              Manage Sessions
+            </h1>
+            <p className="text-muted-foreground">
+              View currently active SSH sessions and terminate if needed
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            onClick={() => void refreshNow()}
+            disabled={isFetchingSessions}
+            data-testid="refresh-admin-sessions"
+            title="Refresh now"
+          >
+            Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
+          </Button>
         </div>
       )}
 

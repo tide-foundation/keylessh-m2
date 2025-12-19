@@ -22,6 +22,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { queryClient } from "@/lib/queryClient";
 import { api, AccessApproval } from "@/lib/api";
+import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { CheckSquare, X, Upload, User, Shield, FileKey, Eye } from "lucide-react";
 
 type TabType = "access" | "policies";
@@ -53,13 +54,13 @@ function AccessApprovalsTab() {
   const [isLoading, setIsLoading] = useState(false);
 
   const fetchAccessApprovals = useCallback(async () => {
-    setApprovals([]);
     setIsLoading(true);
     try {
       const data = await api.admin.accessApprovals.list();
       setApprovals(data);
       // Invalidate query cache so badge count updates
       queryClient.invalidateQueries({ queryKey: ["/api/admin/access-approvals"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/access-approvals"] });
     } catch (error) {
       console.error("Error fetching access approvals:", error);
       toast({
@@ -72,10 +73,16 @@ function AccessApprovalsTab() {
     }
   }, [toast]);
 
+  const { secondsRemaining, refreshNow } = useAutoRefresh({
+    intervalSeconds: 15,
+    refresh: fetchAccessApprovals,
+    isBlocked: isLoading,
+  });
+
   // Fetch approvals on mount and when vuid changes
   useEffect(() => {
-    fetchAccessApprovals();
-  }, [vuid, fetchAccessApprovals]);
+    void refreshNow();
+  }, [vuid, refreshNow]);
 
   const handleCommit = async (id: string) => {
     const approval = approvals.find((a) => a.id === id);
@@ -89,7 +96,7 @@ function AccessApprovalsTab() {
       toast({ title: "Access approval committed successfully" });
       // Small delay to allow TideCloak to process the change
       await new Promise((resolve) => setTimeout(resolve, 500));
-      await fetchAccessApprovals();
+      await refreshNow();
     } catch (error) {
       console.error("Error committing access approval:", error);
       toast({
@@ -141,14 +148,14 @@ function AccessApprovalsTab() {
         toast({ title: "Access request approved successfully" });
         // Small delay to allow TideCloak to process the change
         await new Promise((resolve) => setTimeout(resolve, 500));
-        await fetchAccessApprovals();
+        await refreshNow();
       } else if (response.denied) {
         // Submit rejection
         await api.admin.accessApprovals.reject(approval.retrievalInfo);
         toast({ title: "Access request denied" });
         // Small delay to allow TideCloak to process the change
         await new Promise((resolve) => setTimeout(resolve, 500));
-        await fetchAccessApprovals();
+        await refreshNow();
       } else {
         // Still pending - no response from enclave
         toast({ title: "No response from approval enclave", variant: "destructive" });
@@ -175,7 +182,7 @@ function AccessApprovalsTab() {
       toast({ title: "Access request cancelled successfully" });
       // Small delay to allow TideCloak to process the change
       await new Promise((resolve) => setTimeout(resolve, 500));
-      await fetchAccessApprovals();
+      await refreshNow();
     } catch (error) {
       console.error("Error cancelling access request:", error);
       toast({
@@ -196,8 +203,24 @@ function AccessApprovalsTab() {
     });
   };
 
-  if (isLoading) {
+  const refreshControls = (
+    <div className="p-4 border-b border-border flex items-center justify-end">
+      <Button
+        variant="outline"
+        onClick={() => void refreshNow()}
+        disabled={isLoading}
+        data-testid="refresh-approvals"
+        title="Refresh now"
+      >
+        Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
+      </Button>
+    </div>
+  );
+
+  if (isLoading && approvals.length === 0) {
     return (
+      <div>
+        {refreshControls}
       <div className="p-4 space-y-3">
         {[1, 2, 3].map((i) => (
           <div key={i} className="flex items-center gap-4">
@@ -210,104 +233,111 @@ function AccessApprovalsTab() {
           </div>
         ))}
       </div>
+      </div>
     );
   }
 
   if (!approvals || approvals.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-center">
-        <User className="h-12 w-12 text-muted-foreground mb-4" />
-        <h3 className="font-medium">No pending access requests</h3>
-        <p className="text-sm text-muted-foreground mt-1">
-          User access change requests will appear here.
-        </p>
+      <div>
+        {refreshControls}
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <User className="h-12 w-12 text-muted-foreground mb-4" />
+          <h3 className="font-medium">No pending access requests</h3>
+          <p className="text-sm text-muted-foreground mt-1">
+            User access change requests will appear here.
+          </p>
+        </div>
       </div>
     );
   }
 
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>User</TableHead>
-          <TableHead>Role</TableHead>
-          <TableHead>Client</TableHead>
-          <TableHead>Created</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead className="text-right">Actions</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {approvals.map((approval) => (
-          <TableRow key={approval.id}>
-            <TableCell>
-              <div className="flex items-center gap-2">
-                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 text-primary">
-                  <User className="h-4 w-4" />
-                </div>
-                <span className="font-medium">{approval.username}</span>
-              </div>
-            </TableCell>
-            <TableCell>
-              <div className="flex items-center gap-2">
-                <Shield className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm">{approval.role}</span>
-              </div>
-            </TableCell>
-            <TableCell>
-              <span className="text-sm text-muted-foreground">{approval.clientId}</span>
-            </TableCell>
-            <TableCell>
-              <span className="text-sm text-muted-foreground">{formatDate(approval.timestamp)}</span>
-            </TableCell>
-            <TableCell>
-              <div className="flex items-center gap-2">
-                <Badge
-                  variant="outline"
-                  className={
-                    approval.commitReady
-                      ? "bg-green-50 text-green-700 border-green-200"
-                      : "bg-yellow-50 text-yellow-700 border-yellow-200"
-                  }
-                >
-                  {approval.commitReady ? "Ready to Commit" : "Pending Review"}
-                </Badge>
-                {approval.rejectionFound && (
-                  <span title="Rejection found - investigate in logs page">🚩</span>
-                )}
-              </div>
-            </TableCell>
-            <TableCell className="text-right">
-              <div className="flex justify-end gap-1">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() =>
-                    approval.commitReady ? handleCommit(approval.id) : handleReview(approval.id)
-                  }
-                  title={approval.commitReady ? "Commit access change" : "Review access request"}
-                  className={approval.commitReady ? "text-cyan-600" : ""}
-                >
-                  {approval.commitReady ? (
-                    <Upload className="h-4 w-4" />
-                  ) : (
-                    <Eye className="h-4 w-4" />
-                  )}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => handleCancel(approval.id)}
-                  title="Cancel access request"
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              </div>
-            </TableCell>
+    <div>
+      {refreshControls}
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>User</TableHead>
+            <TableHead>Role</TableHead>
+            <TableHead>Client</TableHead>
+            <TableHead>Created</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead className="text-right">Actions</TableHead>
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+        </TableHeader>
+        <TableBody>
+          {approvals.map((approval) => (
+            <TableRow key={approval.id}>
+              <TableCell>
+                <div className="flex items-center gap-2">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 text-primary">
+                    <User className="h-4 w-4" />
+                  </div>
+                  <span className="font-medium">{approval.username}</span>
+                </div>
+              </TableCell>
+              <TableCell>
+                <div className="flex items-center gap-2">
+                  <Shield className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-sm">{approval.role}</span>
+                </div>
+              </TableCell>
+              <TableCell>
+                <span className="text-sm text-muted-foreground">{approval.clientId}</span>
+              </TableCell>
+              <TableCell>
+                <span className="text-sm text-muted-foreground">{formatDate(approval.timestamp)}</span>
+              </TableCell>
+              <TableCell>
+                <div className="flex items-center gap-2">
+                  <Badge
+                    variant="outline"
+                    className={
+                      approval.commitReady
+                        ? "bg-green-50 text-green-700 border-green-200"
+                        : "bg-yellow-50 text-yellow-700 border-yellow-200"
+                    }
+                  >
+                    {approval.commitReady ? "Ready to Commit" : "Pending Review"}
+                  </Badge>
+                  {approval.rejectionFound && (
+                    <span title="Rejection found - investigate in logs page">🚩</span>
+                  )}
+                </div>
+              </TableCell>
+              <TableCell className="text-right">
+                <div className="flex justify-end gap-1">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() =>
+                      approval.commitReady ? handleCommit(approval.id) : handleReview(approval.id)
+                    }
+                    title={approval.commitReady ? "Commit access change" : "Review access request"}
+                    className={approval.commitReady ? "text-cyan-600" : ""}
+                  >
+                    {approval.commitReady ? (
+                      <Upload className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleCancel(approval.id)}
+                    title="Cancel access request"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
   );
 }
 
