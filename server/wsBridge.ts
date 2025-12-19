@@ -5,6 +5,7 @@ import type { Duplex } from "stream";
 import { createHmac } from "crypto";
 import { log } from "./logger";
 import { storage } from "./storage";
+import { verifyTideCloakToken, type TokenPayload } from "./lib/auth/tideJWT";
 
 // External bridge configuration
 const BRIDGE_URL = process.env.BRIDGE_URL; // e.g., wss://keylessh-tcp-bridge.azurecontainerapps.io
@@ -93,26 +94,7 @@ function createSessionToken(
   return `${payloadStr}.${signature}`;
 }
 
-// JWT payload interface
-interface JWTPayload {
-  sub: string;
-  exp: number;
-  allowed_servers?: string[];
-  realm_access?: { roles: string[] };
-  resource_access?: { [client: string]: { roles: string[] } };
-}
-
-// Decode JWT without verification (same as auth.ts)
-function decodeJWT(token: string): JWTPayload | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    const payload = Buffer.from(parts[1], "base64url").toString("utf-8");
-    return JSON.parse(payload);
-  } catch {
-    return null;
-  }
-}
+type JWTPayload = TokenPayload;
 
 // Extract token from request (Authorization header or query param)
 function extractToken(req: IncomingMessage): string | null {
@@ -132,12 +114,9 @@ function extractToken(req: IncomingMessage): string | null {
   return null;
 }
 
-function validateToken(payload: JWTPayload): boolean {
-  // Check expiration
-  if (payload.exp * 1000 < Date.now()) {
-    return false;
-  }
-  return true;
+async function verifyJwt(token: string): Promise<JWTPayload | null> {
+  // Verifies signature + issuer + exp using TideCloak JWKS from config.
+  return await verifyTideCloakToken(token, []);
 }
 
 export function setupWSBridge(httpServer: Server): WebSocketServer {
@@ -181,16 +160,17 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
         return;
       }
 
-      const payload = decodeJWT(token);
+      const payload = await verifyJwt(token);
       if (!payload) {
-        log("WebSocket connection rejected: invalid token");
-        ws.close(4001, "Invalid token");
+        log("WebSocket connection rejected: invalid or expired token");
+        ws.close(4001, "Invalid or expired token");
         return;
       }
 
-      if (!validateToken(payload)) {
-        log("WebSocket connection rejected: expired token");
-        ws.close(4001, "Invalid or expired token");
+      const userId = payload.sub || "";
+      if (!userId) {
+        log("WebSocket connection rejected: missing sub");
+        ws.close(4001, "Invalid token");
         return;
       }
 
@@ -206,7 +186,7 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
         ws.close(4004, "Session is not active");
         return;
       }
-      if (session.userId !== payload.sub || session.serverId !== serverId) {
+      if (session.userId !== userId || session.serverId !== serverId) {
         log(`WebSocket connection rejected: session mismatch ${sessionId}`);
         ws.close(4003, "Session does not match user/server");
         return;
@@ -231,12 +211,12 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
       }
 
       trackSessionSocket(sessionId, ws);
-      log(`WebSocket TCP bridge: connecting to ${host}:${port} for user ${payload.sub} session ${sessionId}`);
+      log(`WebSocket TCP bridge: connecting to ${host}:${port} for user ${userId} session ${sessionId}`);
 
       if (USE_EXTERNAL_BRIDGE) {
         // === EXTERNAL BRIDGE MODE ===
         // Create session token and connect to external bridge
-        const sessionToken = createSessionToken(host, port, serverId, payload.sub);
+        const sessionToken = createSessionToken(host, port, serverId, userId);
         const bridgeWsUrl = `${BRIDGE_URL}?token=${sessionToken}`;
 
         log(`Connecting to external bridge: ${BRIDGE_URL}`);
@@ -244,7 +224,7 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
         const remoteWs = new WebSocket(bridgeWsUrl);
 
         // Store connection info
-        connections.set(ws, { ws, tcp: null, remoteWs, host, port, serverId, userId: payload.sub, sessionId });
+        connections.set(ws, { ws, tcp: null, remoteWs, host, port, serverId, userId, sessionId });
 
         remoteWs.on("open", () => {
           log(`Connected to external bridge for ${host}:${port}`);
@@ -299,7 +279,7 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
         });
 
         // Store connection info
-        connections.set(ws, { ws, tcp, remoteWs: null, host, port, serverId, userId: payload.sub, sessionId });
+        connections.set(ws, { ws, tcp, remoteWs: null, host, port, serverId, userId, sessionId });
 
         // Handle TCP data -> WebSocket
         tcp.on("data", (data: Buffer) => {

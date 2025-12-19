@@ -21,7 +21,7 @@ A secure, multi-user web-based SSH console with OIDC authentication. SSH encrypt
 │           ▼                    ▼                           ▼                 │
 │  ┌─────────────────────────────────────────────────────────────────────────┐ │
 │  │                         WebSocket Connection                             │ │
-│  │                    wss://host/ws/tcp?host=X&port=Y                       │ │
+│  │        wss://host/ws/tcp?host=X&port=Y&serverId=Z&sessionId=S            │ │
 │  └─────────────────────────────────────────────────────────────────────────┘ │
 │                                      │                                       │
 │   🔒 Private Key NEVER leaves here   │   (Only encrypted SSH traffic)        │
@@ -35,10 +35,10 @@ A secure, multi-user web-based SSH console with OIDC authentication. SSH encrypt
 │  ┌─────────────────┐  ┌──────────────────┐  ┌─────────────────────────────┐ │
 │  │   REST API      │  │  JWT Middleware  │  │   WebSocket-TCP Bridge      │ │
 │  │                 │  │                  │  │                             │ │
-│  │  /api/servers   │  │  - Decode Token  │  │  - Validate JWT             │ │
-│  │  /api/sessions  │  │  - Check Expiry  │  │  - Check Server Access      │ │
-│  │  /api/admin/*   │  │  - Extract User  │  │  - Create TCP Socket        │ │
-│  │                 │  │  - Check Roles   │  │  - Bidirectional Pipe       │ │
+│  │  /api/servers   │  │  - Verify JWT    │  │  - Create TCP Socket        │ │
+│  │  /api/sessions  │  │  - Check Roles   │  │  - Pipe raw bytes           │ │
+│  │  /api/admin/*   │  │  - Validate      │  │  - Optional external bridge │ │
+│  │                 │  │    sessionId     │  │                             │ │
 │  └────────┬────────┘  └────────┬─────────┘  └──────────────┬──────────────┘ │
 │           │                    │                           │                 │
 │           ▼                    │                           ▼                 │
@@ -68,6 +68,11 @@ A secure, multi-user web-based SSH console with OIDC authentication. SSH encrypt
 └─────────────────────────────────┘      └─────────────────────────────────────┘
 ```
 
+This app always requires a WebSocket→TCP bridge to make SSH connections from the browser.
+
+By default, that bridge runs inside the main Express server (`server/wsBridge.ts`) which validates the user's JWT + `sessionId` before opening a TCP socket.
+For larger deployments you can configure an external bridge service (`tcp-bridge/`) by setting `BRIDGE_URL` (the browser still connects to the main server at `/ws/tcp`; the main server forwards only encrypted bytes to `tcp-bridge/` using a short-lived signed session token — the external bridge does not validate JWTs).
+
 ## Security Model
 
 ### Private Key Security
@@ -78,9 +83,9 @@ A secure, multi-user web-based SSH console with OIDC authentication. SSH encrypt
 
 ### Authentication Flow
 ```
-┌──────────┐     ┌──────────────┐     ┌───────────┐     ┌─────────────┐
-│  User    │────▶│  TideCloak   │────▶│  Backend  │────▶│ SSH Server  │
-└──────────┘     └──────────────┘     └───────────┘     └─────────────┘
+┌──────────┐     ┌──────────────┐     ┌───────────┐     ┌──────────────┐     ┌─────────────┐
+│  User    │────▶│  TideCloak   │────▶│  Backend  │────▶│ TCP Bridge    │────▶│ SSH Server  │
+└──────────┘     └──────────────┘     └───────────┘     └──────────────┘     └─────────────┘
      │                  │                   │                  │
      │  1. Login        │                   │                  │
      │─────────────────▶│                   │                  │
@@ -99,7 +104,7 @@ A secure, multi-user web-based SSH console with OIDC authentication. SSH encrypt
      │─────────────────────────────────────▶│                  │
      │                  │                   │                  │
      │                  │                   │  6. TCP Connect  │
-     │                  │                   │─────────────────▶│
+     │                  │                   │─────────────────▶│  (bridge can be embedded or external)
      │                  │                   │                  │
      │  7. SSH Handshake (encrypted, browser handles crypto)   │
      │◀───────────────────────────────────────────────────────▶│
@@ -277,8 +282,8 @@ BRIDGE_URL=ws://localhost:8080 BRIDGE_SECRET=test-secret npm run dev
 ```
 
 This setup mimics production where:
-- Main server handles authentication and creates signed session tokens
-- TCP bridge receives tokens and manages SSH connections
+- Main server verifies JWTs, authorizes the target server, and creates short-lived signed session tokens for the external bridge
+- TCP bridge only validates that signed token and forwards raw bytes to the SSH server (it does not talk to TideCloak)
 
 ### Testing SSH Connection Manually
 
