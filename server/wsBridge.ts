@@ -6,6 +6,7 @@ import { createHmac } from "crypto";
 import { log } from "./logger";
 import { storage } from "./storage";
 import { verifyTideCloakToken, type TokenPayload } from "./lib/auth/tideJWT";
+import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
 
 // External bridge configuration
 const BRIDGE_URL = process.env.BRIDGE_URL; // e.g., wss://keylessh-tcp-bridge.azurecontainerapps.io
@@ -189,6 +190,14 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
       if (session.userId !== userId || session.serverId !== serverId) {
         log(`WebSocket connection rejected: session mismatch ${sessionId}`);
         ws.close(4003, "Session does not match user/server");
+        return;
+      }
+
+      // Enforce SSH username allowlist from JWT roles/claims (all users)
+      const allowed = getAllowedSshUsersFromToken(payload);
+      if (!allowed.includes(session.sshUser)) {
+        log(`WebSocket connection rejected: ssh user not allowed '${session.sshUser}' for user ${userId}`);
+        ws.close(4003, `Not allowed to SSH as '${session.sshUser}'`);
         return;
       }
 

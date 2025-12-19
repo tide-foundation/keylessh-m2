@@ -56,6 +56,7 @@ import {
   GetClientEvents,
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
+import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
 
 // SSH connections are handled via WebSocket TCP bridge
 // The browser runs SSH client (using @microsoft/dev-tunnels-ssh)
@@ -72,6 +73,7 @@ export async function registerRoutes(
   app.get("/api/servers", authenticate, async (req: AuthenticatedRequest, res) => {
     try {
       const user = req.user!;
+      const allowedSshUsersFromToken = getAllowedSshUsersFromToken(req.tokenPayload);
 
       let servers;
       if (user.role === "admin") {
@@ -87,7 +89,7 @@ export async function registerRoutes(
 
       const serversWithAccess: ServerWithAccess[] = servers.map((server) => ({
         ...server,
-        allowedSshUsers: server.sshUsers || [],
+        allowedSshUsers: (server.sshUsers || []).filter((u) => allowedSshUsersFromToken.includes(u)),
         status: healthStatusMap.get(server.id) || "unknown",
       }));
 
@@ -100,6 +102,7 @@ export async function registerRoutes(
   app.get("/api/servers/:id", authenticate, async (req: AuthenticatedRequest, res) => {
     try {
       const user = req.user!;
+      const allowedSshUsersFromToken = getAllowedSshUsersFromToken(req.tokenPayload);
       const server = await storage.getServer(req.params.id);
 
       if (!server) {
@@ -117,7 +120,7 @@ export async function registerRoutes(
 
       const serverWithAccess: ServerWithAccess = {
         ...server,
-        allowedSshUsers: server.sshUsers || [],
+        allowedSshUsers: (server.sshUsers || []).filter((u) => allowedSshUsersFromToken.includes(u)),
         status,
       };
 
@@ -152,6 +155,7 @@ export async function registerRoutes(
     try {
       const user = req.user!;
       const { serverId, sshUser } = req.body;
+      const allowedSshUsersFromToken = getAllowedSshUsersFromToken(req.tokenPayload);
 
       const server = await storage.getServer(serverId);
       if (!server) {
@@ -161,6 +165,20 @@ export async function registerRoutes(
 
       if (user.role !== "admin" && !server.enabled) {
         res.status(404).json({ message: "Server not found" });
+        return;
+      }
+
+      const serverSshUsers = server.sshUsers || [];
+      if (!serverSshUsers.includes(sshUser)) {
+        res.status(400).json({ message: `SSH user '${sshUser}' is not allowed for this server` });
+        return;
+      }
+
+      if (!allowedSshUsersFromToken.includes(sshUser)) {
+        res.status(403).json({
+          message: `Not allowed to SSH as '${sshUser}'`,
+          allowedSshUsers: serverSshUsers.filter((u) => allowedSshUsersFromToken.includes(u)),
+        });
         return;
       }
 
@@ -209,6 +227,7 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.user!;
+        const allowedSshUsersFromToken = getAllowedSshUsersFromToken(req.tokenPayload);
         const { serverId } = req.body;
 
         if (!serverId) {
@@ -234,7 +253,7 @@ export async function registerRoutes(
           port: server.port,
           serverId: server.id,
           serverName: server.name,
-          allowedSshUsers: server.sshUsers || [],
+          allowedSshUsers: (server.sshUsers || []).filter((u) => allowedSshUsersFromToken.includes(u)),
         });
       } catch (error) {
         log(`SSH authorize error: ${error}`);

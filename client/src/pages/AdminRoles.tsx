@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useMutation, useIsFetching } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -46,10 +47,18 @@ export default function AdminRoles() {
   const [editingRole, setEditingRole] = useState<AdminRole | null>(null);
   const [creatingRole, setCreatingRole] = useState(false);
   const [deletingRole, setDeletingRole] = useState<AdminRole | null>(null);
+  const [createAsSshRole, setCreateAsSshRole] = useState(true);
   const [formData, setFormData] = useState<{ name: string; description: string }>({
     name: "",
     description: "",
   });
+
+  const normalizeSshRoleName = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    if (/^ssh[:\-]/i.test(trimmed)) return trimmed;
+    return `ssh:${trimmed}`;
+  };
 
   const { data: rolesData, isLoading: rolesLoading, refetch: refetchRoles } = useQuery({
     queryKey: ["/api/admin/roles"],
@@ -115,6 +124,7 @@ export default function AdminRoles() {
 
   const handleCreate = () => {
     setFormData({ name: "", description: "" });
+    setCreateAsSshRole(true);
     setCreatingRole(true);
   };
 
@@ -130,8 +140,13 @@ export default function AdminRoles() {
 
   const handleCreateSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    const name = createAsSshRole ? normalizeSshRoleName(formData.name) : formData.name.trim();
+    if (!name) {
+      toast({ title: "Role name is required", variant: "destructive" });
+      return;
+    }
     createMutation.mutate({
-      name: formData.name,
+      name,
       description: formData.description || undefined,
     });
   };
@@ -148,6 +163,11 @@ export default function AdminRoles() {
       (role.description?.toLowerCase().includes(search.toLowerCase()) ?? false)
   );
 
+  const sshRoleCount = useMemo(
+    () => roles.filter((r) => /^ssh[:\-]/i.test(r.name)).length,
+    [roles]
+  );
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -158,6 +178,10 @@ export default function AdminRoles() {
           </h1>
           <p className="text-muted-foreground">
             Create and manage user roles for access control
+          </p>
+          <p className="text-xs text-muted-foreground">
+            SSH username roles use the format <span className="font-mono">ssh:&lt;username&gt;</span> (e.g.{" "}
+            <span className="font-mono">ssh:root</span>) — {sshRoleCount} configured.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -222,7 +246,14 @@ export default function AdminRoles() {
                         <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10">
                           <KeyRound className="h-4 w-4 text-primary" />
                         </div>
-                        <p className="font-medium">{role.name}</p>
+                        <div className="flex items-center gap-2">
+                          <p className="font-medium">{role.name}</p>
+                          {/^(ssh[:\-])/i.test(role.name) && (
+                            <Badge variant="outline" className="text-xs label-info">
+                              SSH
+                            </Badge>
+                          )}
+                        </div>
                       </div>
                     </TableCell>
                     <TableCell>
@@ -336,13 +367,34 @@ export default function AdminRoles() {
           <form onSubmit={handleCreateSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="roleName">Role Name</Label>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="createAsSshRole"
+                  checked={createAsSshRole}
+                  onCheckedChange={(v) => setCreateAsSshRole(Boolean(v))}
+                />
+                <Label htmlFor="createAsSshRole" className="text-sm font-normal">
+                  SSH role (auto-prefix <span className="font-mono">ssh:</span>)
+                </Label>
+              </div>
               <Input
                 id="roleName"
                 value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                placeholder="e.g., developer"
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  setFormData({
+                    ...formData,
+                    name: createAsSshRole ? normalizeSshRoleName(raw) : raw,
+                  });
+                }}
+                placeholder={createAsSshRole ? "e.g., root" : "e.g., developer"}
                 required
               />
+              {createAsSshRole && (
+                <p className="text-xs text-muted-foreground">
+                  This will create a role like <span className="font-mono">ssh:root</span>, which grants SSH username access.
+                </p>
+              )}
             </div>
 
             <div className="space-y-2">

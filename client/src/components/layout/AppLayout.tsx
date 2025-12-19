@@ -24,8 +24,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Terminal, Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare } from "lucide-react";
+import { Terminal, Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw } from "lucide-react";
 import type { ReactNode } from "react";
+import { useToast } from "@/hooks/use-toast";
 
 interface AppLayoutProps {
   children: ReactNode;
@@ -46,7 +47,8 @@ const adminNavItems = [
 ];
 
 export function AppLayout({ children }: AppLayoutProps) {
-  const { user, logout, hasRole } = useAuth();
+  const { user, logout, hasRole, refreshToken } = useAuth();
+  const { toast } = useToast();
   const [location] = useLocation();
   const isAdmin = hasRole("admin");
 
@@ -147,6 +149,25 @@ export function AppLayout({ children }: AppLayoutProps) {
                     {user?.role === "admin" ? "Administrator" : "User"}
                   </Badge>
                 </div>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => {
+                    void (async () => {
+                      const ok = await refreshToken();
+                      toast({
+                        title: ok ? "Token refreshed" : "Token refresh unavailable",
+                        description: ok
+                          ? "Your roles/claims have been updated for this session."
+                          : "If your roles just changed, try a full page reload.",
+                        variant: ok ? "default" : "destructive",
+                      });
+                    })();
+                  }}
+                  data-testid="refresh-token-button"
+                >
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  Refresh token
+                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={logout} className="text-destructive focus:text-destructive" data-testid="logout-button">
                   <LogOut className="mr-2 h-4 w-4" />

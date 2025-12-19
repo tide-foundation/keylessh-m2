@@ -13,6 +13,7 @@ import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 
 function ServerCard({ server }: { server: ServerWithAccess }) {
   const [selectedUser, setSelectedUser] = useState<string>(server.allowedSshUsers[0] || "");
+  const hasAnySshUser = server.allowedSshUsers.length > 0;
 
   return (
     <Card className="group" data-testid={`server-card-${server.id}`}>
@@ -65,7 +66,7 @@ function ServerCard({ server }: { server: ServerWithAccess }) {
           <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
             SSH User
           </label>
-          <Select value={selectedUser} onValueChange={setSelectedUser}>
+          <Select value={selectedUser} onValueChange={setSelectedUser} disabled={!hasAnySshUser}>
             <SelectTrigger className="w-full" data-testid={`select-ssh-user-${server.id}`}>
               <SelectValue placeholder="Select SSH user" />
             </SelectTrigger>
@@ -77,6 +78,12 @@ function ServerCard({ server }: { server: ServerWithAccess }) {
               ))}
             </SelectContent>
           </Select>
+          {!hasAnySshUser && (
+            <p className="text-xs text-muted-foreground">
+              No SSH usernames are permitted for your account on this server. Ask an admin to grant a role like{" "}
+              <span className="font-mono">ssh:{server.sshUsers?.[0] || "root"}</span>.
+            </p>
+          )}
         </div>
 
         <Link href={`/app/console/${server.id}?user=${selectedUser}`}>

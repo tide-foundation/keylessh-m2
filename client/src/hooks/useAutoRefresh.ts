@@ -12,6 +12,11 @@ export function useAutoRefresh(options: {
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
 
+  const isBlockedRef = useRef(isBlocked);
+  useEffect(() => {
+    isBlockedRef.current = isBlocked;
+  }, [isBlocked]);
+
   const [nextRefreshAt, setNextRefreshAt] = useState(() => Date.now() + intervalSeconds * 1000);
   const [now, setNow] = useState(() => Date.now());
 
@@ -28,17 +33,17 @@ export function useAutoRefresh(options: {
 
   const runRefresh = useCallback(async () => {
     if (!enabled) return;
-    if (blockWhile && isBlocked) return;
+    if (blockWhile && isBlockedRef.current) return;
     await refreshRef.current();
     setNextRefreshAt(Date.now() + intervalSeconds * 1000);
-  }, [enabled, blockWhile, isBlocked, intervalSeconds]);
+  }, [enabled, blockWhile, intervalSeconds]);
 
   useEffect(() => {
     if (!enabled) return;
-    if (blockWhile && isBlocked) return;
+    if (blockWhile && isBlockedRef.current) return;
     if (now < nextRefreshAt) return;
     void runRefresh();
-  }, [enabled, blockWhile, isBlocked, now, nextRefreshAt, runRefresh]);
+  }, [enabled, blockWhile, now, nextRefreshAt, runRefresh]);
 
   const refreshNow = useCallback(async () => {
     await runRefresh();

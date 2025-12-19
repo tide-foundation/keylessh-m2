@@ -119,6 +119,19 @@ For larger deployments you can configure an external bridge service (`tcp-bridge
 | `user` | View enabled servers and start SSH sessions |
 | `admin` | Access all servers, manage users, manage servers |
 
+### SSH Username Allowlist (JWT Claim)
+
+To SSH as a specific OS user (e.g. `root`), the authenticated user's JWT must include that username in an allowlist claim.
+
+- Supported token mappings:
+  - Claim names: `ssh_users`, `sshUsers`, `allowed_ssh_users`, `allowedSshUsers`
+  - Role names (recommended): `ssh:<username>` or `ssh-<username>` (e.g. `ssh:root`)
+- Enforced in both:
+  - `POST /api/sessions` (session creation)
+  - `/ws/tcp` (WebSocket TCP bridge)
+
+This rule applies to everyone (including admins). If the token does not include the requested SSH user, the connection is denied.
+
 Admin role is determined by the `tide-realm-admin` client role under `realm-management` in TideCloak.
 
 ## Tech Stack

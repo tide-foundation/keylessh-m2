@@ -27,6 +27,7 @@ interface TideApprovalResponse {
 interface AuthContextValue extends AuthState {
   login: () => void;
   logout: () => void;
+  refreshToken: () => Promise<boolean>;
   getToken: () => string | null;
   hasRole: (role: UserRole) => boolean;
   vuid: string;
@@ -50,47 +51,50 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
   });
   const [vuid, setVuid] = useState<string>("");
 
-  useEffect(() => {
-    if (!tidecloak.isInitializing) {
-      if (tidecloak.authenticated) {
-        const user: OIDCUser = {
-          id: tidecloak.getValueFromIdToken("sub") || "",
-          username: tidecloak.getValueFromIdToken("preferred_username") ||
-                    tidecloak.getValueFromIdToken("name") || "",
-          email: tidecloak.getValueFromIdToken("email") || "",
-          role: tidecloak.hasClientRole("tide-realm-admin", "realm-management") ? "admin" : "user",
-          allowedServers: (tidecloak.getValueFromIdToken("allowed_servers") as string[]) || [],
-        };
+  const syncFromTidecloak = useCallback(() => {
+    if (tidecloak.isInitializing) return;
 
-        // Store token in localStorage for API calls
-        if (tidecloak.token) {
-          localStorage.setItem("access_token", tidecloak.token);
-        }
+    if (tidecloak.authenticated) {
+      const user: OIDCUser = {
+        id: tidecloak.getValueFromIdToken("sub") || "",
+        username:
+          tidecloak.getValueFromIdToken("preferred_username") ||
+          tidecloak.getValueFromIdToken("name") ||
+          "",
+        email: tidecloak.getValueFromIdToken("email") || "",
+        role: tidecloak.hasClientRole("tide-realm-admin", "realm-management") ? "admin" : "user",
+        allowedServers: (tidecloak.getValueFromIdToken("allowed_servers") as string[]) || [],
+      };
 
-        // Get vuid from token
-        const tokenVuid = tidecloak.getValueFromIdToken("vuid");
-        setVuid(tokenVuid || "");
-
-        setState({
-          user,
-          accessToken: tidecloak.token || null,
-          isAuthenticated: true,
-          isLoading: false,
-        });
-      } else {
-        // Clear token from localStorage
-        localStorage.removeItem("access_token");
-        setVuid("");
-
-        setState({
-          user: null,
-          accessToken: null,
-          isAuthenticated: false,
-          isLoading: false,
-        });
+      if (tidecloak.token) {
+        localStorage.setItem("access_token", tidecloak.token);
       }
+
+      const tokenVuid = tidecloak.getValueFromIdToken("vuid");
+      setVuid(tokenVuid || "");
+
+      setState({
+        user,
+        accessToken: tidecloak.token || null,
+        isAuthenticated: true,
+        isLoading: false,
+      });
+      return;
     }
-  }, [tidecloak.isInitializing, tidecloak.authenticated, tidecloak]);
+
+    localStorage.removeItem("access_token");
+    setVuid("");
+    setState({
+      user: null,
+      accessToken: null,
+      isAuthenticated: false,
+      isLoading: false,
+    });
+  }, [tidecloak]);
+
+  useEffect(() => {
+    syncFromTidecloak();
+  }, [syncFromTidecloak]);
 
   const login = useCallback(() => {
     tidecloak.login();
@@ -100,6 +104,26 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
     localStorage.removeItem("access_token");
     tidecloak.logout();
   }, [tidecloak]);
+
+  const refreshToken = useCallback(async (): Promise<boolean> => {
+    if (!tidecloak.authenticated) return false;
+
+    try {
+      const updater = (tidecloak as any).updateToken as undefined | ((minValidity: number) => Promise<boolean>);
+      if (typeof updater !== "function") {
+        // Fallback: force a reload so the user can get an updated token from the IdP.
+        window.location.reload();
+        return false;
+      }
+
+      await updater(0);
+      syncFromTidecloak();
+      return true;
+    } catch (err) {
+      console.error("Failed to refresh token:", err);
+      return false;
+    }
+  }, [tidecloak, syncFromTidecloak]);
 
   const getToken = useCallback(() => {
     return tidecloak.token || null;
@@ -165,7 +189,7 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
   );
 
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, getToken, hasRole, vuid, approveTideRequests }}>
+    <AuthContext.Provider value={{ ...state, login, logout, refreshToken, getToken, hasRole, vuid, approveTideRequests }}>
       {children}
     </AuthContext.Provider>
   );
