@@ -15,6 +15,21 @@ export default defineConfig({
       },
     }),
   ],
+  optimizeDeps: {
+    esbuildOptions: {
+      plugins: [
+        {
+          name: "externalize-node-rsa",
+          setup(build) {
+            build.onResolve({ filter: /^node-rsa$/ }, () => ({
+              path: "node-rsa",
+              external: true,
+            }));
+          },
+        },
+      ],
+    },
+  },
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "client", "src"),

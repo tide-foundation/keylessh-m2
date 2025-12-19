@@ -31,17 +31,17 @@ function ServerCard({ server }: { server: ServerWithAccess }) {
           </div>
           <div className="flex items-center gap-2">
             {server.status === "online" ? (
-              <Badge variant="outline" className="gap-1.5 bg-green-50 text-green-700 border-green-200">
+              <Badge variant="outline" className="gap-1.5 label-success">
                 <Wifi className="h-3 w-3" />
                 Online
               </Badge>
             ) : server.status === "offline" ? (
-              <Badge variant="secondary" className="gap-1.5 bg-red-50 text-red-700 border-red-200">
+              <Badge variant="outline" className="gap-1.5 label-danger">
                 <WifiOff className="h-3 w-3" />
                 Offline
               </Badge>
             ) : (
-              <Badge variant="secondary" className="gap-1.5">
+              <Badge variant="outline" className="gap-1.5">
                 <HelpCircle className="h-3 w-3" />
                 Unknown
               </Badge>

@@ -58,7 +58,7 @@ export function AppLayout({ children }: AppLayoutProps) {
   return (
     <SidebarProvider style={style as React.CSSProperties}>
       <div className="flex h-screen w-full bg-background">
-        <Sidebar className="border-r border-sidebar-border">
+        <Sidebar className="border-r border-sidebar-border iso-surface">
           <SidebarHeader className="p-4 border-b border-sidebar-border">
             <Link href="/app" className="flex items-center gap-3">
               <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary">
@@ -177,14 +177,14 @@ export function AppLayout({ children }: AppLayoutProps) {
             </div>
 
             <div className="flex items-center gap-4">
-              <Badge variant="outline" className="hidden sm:flex gap-1.5 items-center">
+              <Badge variant="outline" className="hidden sm:flex gap-1.5 items-center label-success">
                 <span className="h-2 w-2 rounded-full bg-chart-2 animate-pulse" />
                 Online
               </Badge>
             </div>
           </header>
 
-          <main className="flex-1 overflow-auto bg-background">
+          <main className="flex-1 overflow-auto bg-background iso-canvas">
             {children}
           </main>
         </div>

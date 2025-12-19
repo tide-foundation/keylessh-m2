@@ -58,6 +58,15 @@ export default function Console() {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const pendingOutputRef = useRef<Uint8Array[]>([]);
+
+  const writeToTerminal = useCallback((data: Uint8Array) => {
+    if (!xtermRef.current) {
+      pendingOutputRef.current.push(data);
+      return;
+    }
+    xtermRef.current.write(data);
+  }, []);
 
   const [showKeyDialog, setShowKeyDialog] = useState(false);
   const [userDismissedDialog, setUserDismissedDialog] = useState(false);
@@ -76,11 +85,7 @@ export default function Console() {
       port: server?.port || 22,
       serverId: params.serverId || "",
       username: sshUser,
-      onData: useCallback((data: Uint8Array) => {
-        if (xtermRef.current) {
-          xtermRef.current.write(data);
-        }
-      }, []),
+      onData: writeToTerminal,
     });
 
   const prevStatusRef = useRef<SSHConnectionStatus>("disconnected");
@@ -90,14 +95,28 @@ export default function Console() {
   const handleConnect = useCallback(
     async (privateKey: string, passphrase?: string) => {
       try {
-        // Set initial terminal dimensions before connecting
+        // Clear terminal and pending output for fresh connection
+        if (xtermRef.current) {
+          xtermRef.current.clear();
+          xtermRef.current.reset();
+        }
+        pendingOutputRef.current = [];
+
+        // Set initial terminal dimensions before connecting (persisted in hook)
         const dims = fitAddonRef.current?.proposeDimensions();
-        if (dims) {
+        if (dims?.cols && dims?.rows) {
           setDimensions(dims.cols, dims.rows);
+        } else {
+          setDimensions(80, 24);
         }
 
         await connect(privateKey, passphrase);
         setShowKeyDialog(false);
+
+        // Re-fit and focus terminal after connection
+        if (fitAddonRef.current) {
+          fitAddonRef.current.fit();
+        }
         xtermRef.current?.focus();
       } catch (err) {
         // Error is handled by the hook and displayed in the dialog
@@ -175,10 +194,33 @@ export default function Console() {
     term.loadAddon(webLinksAddon);
 
     term.open(terminalRef.current);
-    fitAddon.fit();
+    const fitNow = () => {
+      fitAddon.fit();
+      const dims = fitAddon.proposeDimensions();
+      if (dims?.cols && dims?.rows) {
+        setDimensions(dims.cols, dims.rows);
+        resize(dims.cols, dims.rows);
+      }
+    };
+
+    fitNow();
+    window.requestAnimationFrame(fitNow);
+    window.setTimeout(fitNow, 50);
+    if ("fonts" in document) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (document as any).fonts?.ready?.then(() => fitNow()).catch(() => undefined);
+    }
 
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
+
+    // Flush any output that arrived before xterm was initialized
+    if (pendingOutputRef.current.length > 0) {
+      for (const chunk of pendingOutputRef.current) {
+        term.write(chunk);
+      }
+      pendingOutputRef.current = [];
+    }
 
     // Send terminal input to SSH
     term.onData((data) => {
@@ -187,11 +229,7 @@ export default function Console() {
 
     // Handle terminal resize
     const handleResize = () => {
-      fitAddon.fit();
-      const dims = fitAddon.proposeDimensions();
-      if (dims) {
-        resize(dims.cols, dims.rows);
-      }
+      fitNow();
     };
 
     const resizeObserver = new ResizeObserver(handleResize);
@@ -203,8 +241,25 @@ export default function Console() {
       window.removeEventListener("resize", handleResize);
       term.dispose();
       xtermRef.current = null;
+      fitAddonRef.current = null;
     };
-  }, [send, resize]);
+  }, [send, resize, setDimensions, serverLoading]);
+
+  // After connecting / closing dialog, re-fit multiple times (helps when first fit ran before fonts/layout were ready)
+  useEffect(() => {
+    if (status !== "connected") return;
+    const fit = () => {
+      if (fitAddonRef.current && xtermRef.current) {
+        fitAddonRef.current.fit();
+        // Also refresh the terminal to ensure proper rendering
+        xtermRef.current.refresh(0, xtermRef.current.rows - 1);
+      }
+    };
+    fit();
+    window.requestAnimationFrame(fit);
+    window.setTimeout(fit, 50);
+    window.setTimeout(fit, 150);
+  }, [status]);
 
   // Show key dialog when server data is loaded and we're disconnected
   // Only auto-show if user hasn't manually dismissed it
@@ -371,12 +426,14 @@ export default function Console() {
         </div>
       </div>
 
-      <div className="flex-1 bg-[#0c0c0c] overflow-hidden relative">
-        <div
-          ref={terminalRef}
-          className="absolute inset-0"
-          data-testid="terminal-container"
-        />
+      <div className="flex-1 bg-[#0c0c0c] overflow-hidden relative p-3 sm:p-4">
+        <div className="terminal-surface h-full w-full rounded-xl border border-white/10 bg-[#0c0c0c] overflow-hidden relative">
+          <div
+            ref={terminalRef}
+            className="absolute inset-3"
+            data-testid="terminal-container"
+          />
+        </div>
 
         {disconnectedWithReason && !showKeyDialog && (
           <div className="absolute inset-0 flex items-center justify-center bg-background/80">

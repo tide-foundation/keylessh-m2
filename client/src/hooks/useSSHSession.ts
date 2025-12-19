@@ -29,6 +29,8 @@ export function useSSHSession({
   const [status, setStatus] = useState<SSHConnectionStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
   const clientRef = useRef<BrowserSSHClient | null>(null);
+  const initialColsRef = useRef<number>(80);
+  const initialRowsRef = useRef<number>(24);
 
   // Store current values in refs so connect always has access to latest values
   const hostRef = useRef(host);
@@ -92,6 +94,7 @@ export function useSSHSession({
       });
 
       clientRef.current = client;
+      client.setDimensions(initialColsRef.current, initialRowsRef.current);
 
       // Connect
       await client.connect(privateKey, passphrase);
@@ -121,6 +124,8 @@ export function useSSHSession({
   }, []);
 
   const setDimensions = useCallback((cols: number, rows: number) => {
+    initialColsRef.current = cols;
+    initialRowsRef.current = rows;
     if (clientRef.current) {
       clientRef.current.setDimensions(cols, rows);
     }
