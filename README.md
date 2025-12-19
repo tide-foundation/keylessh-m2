@@ -44,7 +44,7 @@ A secure, multi-user web-based SSH console with OIDC authentication. SSH encrypt
 │           ▼                    │                           ▼                 │
 │  ┌─────────────────┐           │            ┌─────────────────────────────┐ │
 │  │  Storage        │           │            │   TCP Socket                │ │
-│  │  (In-Memory)    │           │            │   Raw Bytes ←→ SSH Server   │ │
+│  │  (SQLite)       │           │            │   Raw Bytes ←→ SSH Server   │ │
 │  │                 │           │            └──────────────┬──────────────┘ │
 │  │  - Servers      │           │                           │                 │
 │  │  - Sessions     │           │                           │                 │
@@ -62,8 +62,8 @@ A secure, multi-user web-based SSH console with OIDC authentication. SSH encrypt
 │  - User Authentication          │      │   - Authenticates with public key   │
 │  - JWT Token Issuance           │      │   - Opens shell session             │
 │  - Role Management              │      │   - Sends/receives data             │
-│  - User Attributes              │      │                                     │
-│    (allowed_servers)            │      │   Example: 192.168.1.100:22         │
+│  - User Claims + Roles          │      │                                     │
+│    (OIDC + client roles)        │      │   Example: 192.168.1.100:22         │
 │                                 │      │                                     │
 └─────────────────────────────────┘      └─────────────────────────────────────┘
 ```
@@ -87,8 +87,7 @@ A secure, multi-user web-based SSH console with OIDC authentication. SSH encrypt
      │                  │                   │                  │
      │  2. JWT Token    │                   │                  │
      │◀─────────────────│                   │                  │
-     │  (includes roles,│                   │                  │
-     │   allowed_servers)                   │                  │
+     │  (includes roles)                    │                  │
      │                  │                   │                  │
      │  3. API Request + Bearer Token       │                  │
      │─────────────────────────────────────▶│                  │
@@ -112,7 +111,7 @@ A secure, multi-user web-based SSH console with OIDC authentication. SSH encrypt
 ### Role-Based Access Control
 | Role | Permissions |
 |------|-------------|
-| `user` | Access only servers in their `allowedServers` list |
+| `user` | View enabled servers and start SSH sessions |
 | `admin` | Access all servers, manage users, manage servers |
 
 Admin role is determined by the `tide-realm-admin` client role under `realm-management` in TideCloak.
@@ -133,7 +132,7 @@ Admin role is determined by the `tide-realm-admin` client role under `realm-mana
 ### Backend
 - **Express.js** - HTTP server
 - **ws** - WebSocket server
-- **JWT** - Token validation (decoded, not verified - TideCloak handles verification)
+- **JWT** - Token verification via TideCloak JWKS
 
 ## Project Structure
 
@@ -159,14 +158,17 @@ Admin role is determined by the `tide-realm-admin` client role under `realm-mana
 │       │   ├── AdminDashboard.tsx
 │       │   ├── AdminServers.tsx
 │       │   ├── AdminUsers.tsx
-│       │   └── AdminSessions.tsx
+│       │   ├── AdminRoles.tsx
+│       │   ├── AdminApprovals.tsx
+│       │   ├── AdminSessions.tsx
+│       │   └── AdminLogs.tsx
 │       └── tidecloakAdapter.json # TideCloak configuration
 ├── server/
 │   ├── index.ts                  # Express app setup
 │   ├── routes.ts                 # API endpoints
 │   ├── auth.ts                   # JWT middleware + Keycloak Admin API
 │   ├── wsBridge.ts               # WebSocket-TCP bridge
-│   └── storage.ts                # In-memory data store
+│   └── storage.ts                # SQLite data store
 └── shared/
     └── schema.ts                 # Shared TypeScript types
 ```
@@ -176,9 +178,9 @@ Admin role is determined by the `tide-realm-admin` client role under `realm-mana
 ### User Endpoints (Authenticated)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/servers` | List servers user can access |
+| GET | `/api/servers` | List enabled servers |
 | GET | `/api/servers/:id` | Get server details |
-| GET | `/api/sessions` | List user's active sessions |
+| GET | `/api/sessions` | List user's sessions (active + completed) |
 | POST | `/api/sessions` | Create new session record |
 | DELETE | `/api/sessions/:id` | End session |
 | POST | `/api/ssh/authorize` | Authorize SSH connection |
@@ -191,13 +193,21 @@ Admin role is determined by the `tide-realm-admin` client role under `realm-mana
 | PATCH | `/api/admin/servers/:id` | Update server |
 | DELETE | `/api/admin/servers/:id` | Delete server |
 | GET | `/api/admin/users` | List all users (from TideCloak) |
-| PATCH | `/api/admin/users/:id` | Update user role/access |
-| GET | `/api/admin/sessions` | List all sessions |
+| POST | `/api/admin/users` | Update user roles |
+| PUT | `/api/admin/users` | Update user profile |
+| DELETE | `/api/admin/users` | Delete user |
+| POST | `/api/admin/users/add` | Create user |
+| GET | `/api/admin/sessions` | List all sessions (active + completed) |
+| POST | `/api/admin/sessions/:id/terminate` | Terminate an active session |
+| GET | `/api/admin/logs/access` | TideCloak user events for this client |
+| GET | `/api/admin/roles` | List client roles |
+| GET | `/api/admin/roles/all` | List all roles |
+| POST | `/api/admin/approvals` | Create approval / cast decision |
 
 ### WebSocket
 | Endpoint | Description |
 |----------|-------------|
-| `ws://host/ws/tcp?host=X&port=Y&serverId=Z&token=T` | TCP bridge for SSH |
+| `ws://host/ws/tcp?host=X&port=Y&serverId=Z&sessionId=S&token=T` | TCP bridge for SSH (requires a pre-created session record) |
 
 ## Environment Variables
 
@@ -278,8 +288,8 @@ You can test the WebSocket-TCP bridge directly using `wscat`:
 # Install wscat
 npm install -g wscat
 
-# Connect to bridge (local mode, requires valid JWT)
-wscat -c "ws://localhost:3000/ws/tcp?host=your-ssh-server.com&port=22&serverId=server-id&token=YOUR_JWT_TOKEN"
+# Connect to bridge (local mode, requires valid JWT + a valid sessionId created via POST /api/sessions)
+wscat -c "ws://localhost:3000/ws/tcp?host=your-ssh-server.com&port=22&serverId=server-id&sessionId=session-id&token=YOUR_JWT_TOKEN"
 ```
 
 ### Health Check
@@ -298,14 +308,16 @@ curl http://localhost:8080/health
 1. **User navigates to** `/app/console/:serverId?user=username`
 2. **Frontend fetches** server details from API
 3. **Private key dialog** appears - user pastes/uploads their SSH private key
-4. **Frontend opens WebSocket** to `/ws/tcp` with server connection params
-5. **Backend validates JWT**, checks user has access to server
-6. **Backend opens TCP socket** to SSH server (e.g., 192.168.1.100:22)
-7. **Browser's SSH library** performs handshake over WebSocket
+4. **Frontend creates a session record** via `POST /api/sessions` (serverId + sshUser)
+5. **Frontend opens WebSocket** to `/ws/tcp` including the returned `sessionId`
+6. **Backend verifies JWT** and validates the `sessionId` belongs to the token user + serverId
+   - The bridge also enforces that `host:port` matches the configured server record
+7. **Backend opens TCP socket** to SSH server (e.g., 192.168.1.100:22)
+8. **Browser's SSH library** performs handshake over WebSocket
    - Key exchange, authentication all happen in browser
    - Backend just forwards encrypted bytes
-8. **Shell channel opened**, bound to xterm.js terminal
-9. **User interacts** with remote shell
+9. **Shell channel opened**, bound to xterm.js terminal
+10. **User interacts** with remote shell
 
 ## TideCloak Configuration
 
@@ -329,16 +341,7 @@ The TideCloak adapter configuration is in `client/src/tidecloakAdapter.json`:
 4. To allow admins to manage users via API, also assign `view-users` and `manage-users` roles
 
 ### User Attributes
-- `allowed_servers`: Array of server IDs the user can access
-
-## Adding Server Access for Users
-
-1. Go to **Admin > Users** in the app
-2. Click the **edit button** on a user
-3. Check the **servers** they should access
-4. Click **Save Changes**
-
-This updates the `allowed_servers` attribute in TideCloak, which gets included in their JWT token on next login.
+This app relies on standard OIDC claims (sub/username/email) and TideCloak roles for authorization.
 
 ## Scalable Deployment with Azure Container Apps
 
