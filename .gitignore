@@ -10,3 +10,8 @@ data/
 *.db
 *.db-wal
 *.db-shm
+
+# Environment (keep .env.example, ignore local .env)
+.env
+.env.local
+.env.*.local

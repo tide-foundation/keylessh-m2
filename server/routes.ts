@@ -7,63 +7,111 @@ import type { ServerWithAccess, ActiveSession, ServerStatus, Server as ServerTyp
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
 import { getHomeOrkUrl } from "./lib/auth/tidecloakConfig";
+import { spawn } from "child_process";
+
+// Forseti compiler configuration from environment
+// COMPILER_IMAGE: Published Docker image (default: ghcr.io/tide-foundation/forseti-compiler:latest)
+// COMPILER_CONTAINER: Local container name (e.g., "Ork-1") - overrides COMPILER_IMAGE if set
+const COMPILER_IMAGE = process.env.COMPILER_IMAGE || "ghcr.io/tide-foundation/forseti-compiler:latest";
+const COMPILER_CONTAINER = process.env.COMPILER_CONTAINER;
 
 /**
- * Compiles Forseti contract source code using Ork's /Forseti/Compile/preview API.
- * This guarantees the contractId matches exactly what Ork will compute at runtime.
+ * Compiles Forseti contract source code using the forseti-compile Docker image.
+ * Uses published image by default, or local container if COMPILER_CONTAINER is set.
  */
 async function compileForsetiContract(
   source: string,
   options: { validate?: boolean; entryType?: string } = {}
 ): Promise<{ success: boolean; contractId?: string; sdkVersion?: string; error?: string; validated?: boolean }> {
   const startTime = Date.now();
-  const orkUrl = getHomeOrkUrl() || "http://localhost:1001";
 
   logForseti("▶ Compile Start", {
     entryType: options.entryType || "auto",
     validate: options.validate ?? false,
     sourceLen: source.length,
+    compiler: COMPILER_CONTAINER || COMPILER_IMAGE,
   });
 
-  try {
-    const response = await fetch(`${orkUrl}/Forseti/Compile/preview`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source }),
-    });
-
-    const elapsed = Date.now() - startTime;
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ message: `HTTP ${response.status}` }));
-      const errorMsg = errorData.message || errorData.error || `Ork returned ${response.status}`;
-      logForseti("✗ Compile Failed", { error: errorMsg, elapsed: `${elapsed}ms` });
-      return { success: false, error: errorMsg };
+  return new Promise((resolve) => {
+    // Build args for the compiler
+    const compilerArgs = ["--json"];
+    if (options.validate) {
+      compilerArgs.push("--validate");
+    }
+    if (options.entryType) {
+      compilerArgs.push("--entry-type", options.entryType);
     }
 
-    const result = await response.json();
-    const contractId = result.contractId;
-    const sdkVersion = result.sdkVersion || "1.0.0";
+    // Use local container if specified, otherwise use published image
+    const dockerArgs = COMPILER_CONTAINER
+      ? ["exec", "-i", COMPILER_CONTAINER, "dotnet", "/opt/forseti-compile/ContractCompiler.dll", ...compilerArgs]
+      : ["run", "-i", "--rm", COMPILER_IMAGE, ...compilerArgs];
 
-    logForseti("✓ Compile Success", {
-      contractId: contractId?.substring(0, 16) + "...",
-      sdkVersion,
-      validated: options.validate ?? false,
-      elapsed: `${elapsed}ms`,
+    const proc = spawn("docker", dockerArgs, {
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
-    return {
-      success: true,
-      contractId,
-      sdkVersion,
-      validated: options.validate ?? false,
-    };
-  } catch (error) {
-    const elapsed = Date.now() - startTime;
-    const errorMsg = error instanceof Error ? error.message : "Unknown error";
-    logForseti("✗ Compile Failed", { error: errorMsg, elapsed: `${elapsed}ms` });
-    return { success: false, error: `Failed to call Ork compile endpoint: ${errorMsg}` };
-  }
+    let stdout = "";
+    let stderr = "";
+
+    // Write source to stdin and close it
+    proc.stdin.write(source);
+    proc.stdin.end();
+
+    proc.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    proc.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    proc.on("close", (code) => {
+      const elapsed = Date.now() - startTime;
+
+      try {
+        // Parse JSON output from the tool (handles both PascalCase and camelCase)
+        const raw = JSON.parse(stdout.trim());
+        const result = {
+          success: raw.Success ?? raw.success,
+          contractId: raw.ContractId ?? raw.contractId,
+          sdkVersion: raw.SdkVersion ?? raw.sdkVersion ?? "1.0.0",
+          error: raw.Error ?? raw.error,
+          validated: raw.Validated ?? raw.validated ?? false,
+        };
+
+        if (!result.success) {
+          logForseti("✗ Compile Failed", { error: result.error, elapsed: `${elapsed}ms` });
+          resolve({ success: false, error: result.error });
+          return;
+        }
+
+        logForseti("✓ Compile Success", {
+          contractId: result.contractId?.substring(0, 16) + "...",
+          sdkVersion: result.sdkVersion,
+          validated: result.validated,
+          elapsed: `${elapsed}ms`,
+        });
+
+        resolve({
+          success: true,
+          contractId: result.contractId,
+          sdkVersion: result.sdkVersion,
+          validated: result.validated,
+        });
+      } catch (parseError) {
+        const errorMsg = stderr || stdout || `Exit code ${code}`;
+        logForseti("✗ Compile Failed", { error: errorMsg, elapsed: `${elapsed}ms` });
+        resolve({ success: false, error: `Compiler error: ${errorMsg}` });
+      }
+    });
+
+    proc.on("error", (error) => {
+      const elapsed = Date.now() - startTime;
+      logForseti("✗ Compile Failed", { error: error.message, elapsed: `${elapsed}ms` });
+      resolve({ success: false, error: `Failed to run forseti-compile in Docker: ${error.message}` });
+    });
+  });
 }
 
 // Use createRequire for heimdall-tide (CJS module with broken ESM exports)

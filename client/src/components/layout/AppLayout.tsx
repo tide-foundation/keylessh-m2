@@ -36,15 +36,36 @@ const userNavItems = [
   { title: "Dashboard", url: "/app", icon: Terminal },
 ];
 
-const adminNavItems = [
-  { title: "Admin Dashboard", url: "/admin", icon: Shield },
-  { title: "Manage Servers", url: "/admin/servers", icon: Server },
-  { title: "Manage Users", url: "/admin/users", icon: Users },
-  { title: "Manage Roles", url: "/admin/roles", icon: KeyRound },
-  { title: "Policy Templates", url: "/admin/policy-templates", icon: FileCode },
-  { title: "Approvals", url: "/admin/approvals", icon: CheckSquare },
-  { title: "Manage Sessions", url: "/admin/sessions", icon: Activity },
-  { title: "Logs", url: "/admin/logs", icon: ScrollText },
+// Admin nav organized by logical groups for better UX
+const adminNavGroups = [
+  {
+    label: "Overview",
+    items: [
+      { title: "Dashboard", url: "/admin", icon: Shield },
+    ],
+  },
+  {
+    label: "Infrastructure",
+    items: [
+      { title: "Servers", url: "/admin/servers", icon: Server },
+      { title: "Sessions", url: "/admin/sessions", icon: Activity },
+    ],
+  },
+  {
+    label: "Identity & Access",
+    items: [
+      { title: "Users", url: "/admin/users", icon: Users },
+      { title: "Roles", url: "/admin/roles", icon: KeyRound },
+      { title: "Policies", url: "/admin/policy-templates", icon: FileCode },
+    ],
+  },
+  {
+    label: "Security",
+    items: [
+      { title: "Approvals", url: "/admin/approvals", icon: CheckSquare },
+      { title: "Audit Logs", url: "/admin/logs", icon: ScrollText },
+    ],
+  },
 ];
 
 export function AppLayout({ children }: AppLayoutProps) {
@@ -100,13 +121,17 @@ export function AppLayout({ children }: AppLayoutProps) {
             </SidebarGroup>
 
             {isAdmin && (
-              <SidebarGroup className="mt-4">
-                <SidebarGroupLabel className="text-xs font-medium uppercase tracking-wide text-muted-foreground px-2 py-2">
-                  Administration
+              <div className="my-3 mx-2 border-t border-sidebar-border" />
+            )}
+
+            {isAdmin && adminNavGroups.map((group) => (
+              <SidebarGroup key={group.label} className="mt-2">
+                <SidebarGroupLabel className="text-xs font-medium uppercase tracking-wide text-muted-foreground px-2 py-1.5">
+                  {group.label}
                 </SidebarGroupLabel>
                 <SidebarGroupContent>
                   <SidebarMenu>
-                    {adminNavItems.map((item) => (
+                    {group.items.map((item) => (
                       <SidebarMenuItem key={item.title}>
                         <SidebarMenuButton
                           asChild
@@ -123,7 +148,7 @@ export function AppLayout({ children }: AppLayoutProps) {
                   </SidebarMenu>
                 </SidebarGroupContent>
               </SidebarGroup>
-            )}
+            ))}
           </SidebarContent>
 
           <SidebarFooter className="p-4 border-t border-sidebar-border">
