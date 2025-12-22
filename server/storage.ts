@@ -101,8 +101,7 @@ sqlite.exec(`
     environment TEXT NOT NULL DEFAULT 'production',
     tags TEXT NOT NULL DEFAULT '[]',
     enabled INTEGER NOT NULL DEFAULT 1,
-    ssh_users TEXT NOT NULL DEFAULT '[]',
-    health_check_url TEXT
+    ssh_users TEXT NOT NULL DEFAULT '[]'
   );
 
   CREATE TABLE IF NOT EXISTS sessions (
@@ -244,17 +243,6 @@ sqlite.exec(`
 `);
 
 // Lightweight migrations for existing DBs (CREATE TABLE IF NOT EXISTS doesn't alter).
-try {
-  const serverColumns = sqlite
-    .prepare(`PRAGMA table_info(servers)`)
-    .all() as Array<{ name: string }>;
-  const hasHealthCheckUrl = serverColumns.some((c) => c.name === "health_check_url");
-  if (!hasHealthCheckUrl) {
-    sqlite.prepare(`ALTER TABLE servers ADD COLUMN health_check_url TEXT`).run();
-  }
-} catch {
-  // Ignore migration errors; queries will surface issues.
-}
 
 try {
   const sessionColumns = sqlite
@@ -347,7 +335,6 @@ export class SQLiteStorage implements IStorage {
       tags: (insertServer.tags ?? []) as string[],
       enabled: insertServer.enabled ?? true,
       sshUsers: (insertServer.sshUsers ?? []) as string[],
-      healthCheckUrl: insertServer.healthCheckUrl ?? null,
     };
     db.insert(servers).values(server).run();
     return server;

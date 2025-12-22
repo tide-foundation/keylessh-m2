@@ -85,6 +85,9 @@ export function TerminalSession({
     queryKey: ["/api/servers", serverId],
   });
 
+  const serverIsDisabled = server ? !server.enabled : false;
+  const serverIsOffline = server ? server.status === "offline" : false;
+
   const { connect, disconnect, send, resize, setDimensions, status, error } = useSSHSession({
     host: server?.host || "",
     port: server?.port || 22,
@@ -110,6 +113,15 @@ export function TerminalSession({
 
   const handleConnect = useCallback(async () => {
     try {
+      if (serverLoading || !server) {
+        toast({ title: "Loading server info", description: "Please try again in a moment." });
+        return;
+      }
+      if (serverIsDisabled) {
+        toast({ title: "Server disabled", description: "This server is disabled and cannot be connected to.", variant: "destructive" });
+        return;
+      }
+
       if (xtermRef.current) {
         xtermRef.current.clear();
         xtermRef.current.reset();
@@ -140,7 +152,7 @@ export function TerminalSession({
     } catch (err) {
       console.error("Connection failed:", err);
     }
-  }, [connect, setDimensions]);
+  }, [connect, server, serverIsDisabled, serverLoading, setDimensions, toast]);
 
   const handleReconnect = useCallback(() => {
     setShowKeyDialog(true);
@@ -356,7 +368,7 @@ export function TerminalSession({
               Disconnect
             </Button>
           ) : (
-            <Button size="sm" onClick={() => setShowKeyDialog(true)} disabled={serverLoading}>
+            <Button size="sm" onClick={() => setShowKeyDialog(true)} disabled={serverLoading || serverIsDisabled}>
               <RefreshCw className="h-4 w-4 mr-2" />
               Connect
             </Button>
@@ -370,6 +382,11 @@ export function TerminalSession({
         {status !== "connected" && (
           <div className="absolute inset-0 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
             <div className="text-center space-y-3 max-w-md px-4">
+              {(serverIsDisabled || serverIsOffline) && (
+                <div className="text-sm font-medium">
+                  {serverIsDisabled ? "Server disabled" : "Server appears offline"}
+                </div>
+              )}
               <div className="text-sm font-medium">
                 {status === "connecting" || status === "authenticating"
                   ? "Connecting…"
@@ -388,11 +405,28 @@ export function TerminalSession({
                 <Button
                   size="sm"
                   onClick={() => setShowKeyDialog(true)}
-                  disabled={serverLoading || status === "connecting" || status === "authenticating"}
+                  disabled={
+                    serverLoading ||
+                    serverIsDisabled ||
+                    serverIsOffline ||
+                    status === "connecting" ||
+                    status === "authenticating"
+                  }
                 >
                   <RefreshCw className={`h-4 w-4 mr-2 ${status === "connecting" || status === "authenticating" ? "animate-spin" : ""}`} />
                   {status === "error" || disconnectedWithReason ? "Reconnect" : "Connect"}
                 </Button>
+                {serverIsOffline && !serverIsDisabled && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setShowKeyDialog(true)}
+                    disabled={serverLoading || status === "connecting" || status === "authenticating"}
+                    title="Status checks can be wrong; try connecting anyway."
+                  >
+                    Try anyway
+                  </Button>
+                )}
                 {onCloseTab && (
                   <Button size="sm" variant="outline" onClick={handleCloseTabClick}>
                     <X className="h-4 w-4 mr-2" />

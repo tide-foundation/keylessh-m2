@@ -36,7 +36,7 @@ import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { Plus, Pencil, Trash2, Server, Search } from "lucide-react";
-import type { Server as ServerType } from "@shared/schema";
+import type { Server as ServerType, ServerStatus } from "@shared/schema";
 import { api } from "@/lib/api";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
 
@@ -48,7 +48,6 @@ interface ServerFormData {
   tags: string;
   sshUsers: string;
   enabled: boolean;
-  healthCheckUrl: string;
 }
 
 const defaultFormData: ServerFormData = {
@@ -59,7 +58,6 @@ const defaultFormData: ServerFormData = {
   tags: "",
   sshUsers: "root",
   enabled: true,
-  healthCheckUrl: "",
 };
 
 function ServerForm({
@@ -159,20 +157,6 @@ function ServerForm({
         />
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="healthCheckUrl">Health Check URL (optional)</Label>
-        <Input
-          id="healthCheckUrl"
-          value={formData.healthCheckUrl}
-          onChange={(e) => setFormData({ ...formData, healthCheckUrl: e.target.value })}
-          placeholder="http://192.168.1.100:8080/health"
-          data-testid="input-server-health-check"
-        />
-        <p className="text-xs text-muted-foreground">
-          API endpoint to check if server is online. If not set, status will show as unknown.
-        </p>
-      </div>
-
       <div className="flex items-center justify-between">
         <Label htmlFor="enabled">Enabled</Label>
         <Switch
@@ -205,6 +189,12 @@ export default function AdminServers() {
     queryKey: ["/api/admin/servers"],
   });
 
+  const { data: serverStatusData, refetch: refetchServerStatus } = useQuery<{
+    statuses: Record<string, ServerStatus>;
+  }>({
+    queryKey: ["/api/admin/servers/status"],
+  });
+
   const { data: serverLimit, refetch: refetchServerLimit } = useQuery({
     queryKey: ["/api/admin/license/check/server"],
     queryFn: () => api.admin.license.checkLimit("server"),
@@ -212,7 +202,7 @@ export default function AdminServers() {
   const isFetching = useIsFetching({ queryKey: ["/api/admin/servers"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
-    refresh: () => Promise.all([refetch(), refetchServerLimit()]),
+    refresh: () => Promise.all([refetch(), refetchServerStatus(), refetchServerLimit()]),
     isBlocked: isFetching,
   });
 
@@ -226,12 +216,12 @@ export default function AdminServers() {
         tags: data.tags.split(",").map((t) => t.trim()).filter(Boolean),
         sshUsers: data.sshUsers.split(",").map((u) => u.trim()).filter(Boolean),
         enabled: data.enabled,
-        healthCheckUrl: data.healthCheckUrl || null,
       };
       return apiRequest("POST", "/api/admin/servers", serverData);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/servers"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/servers/status"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/license/check/server"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/servers"] });
       setIsDialogOpen(false);
@@ -252,12 +242,12 @@ export default function AdminServers() {
         tags: data.tags.split(",").map((t) => t.trim()).filter(Boolean),
         sshUsers: data.sshUsers.split(",").map((u) => u.trim()).filter(Boolean),
         enabled: data.enabled,
-        healthCheckUrl: data.healthCheckUrl || null,
       };
       return apiRequest("PATCH", `/api/admin/servers/${id}`, serverData);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/servers"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/servers/status"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/servers"] });
       setEditingServer(null);
       setIsDialogOpen(false);
@@ -274,6 +264,7 @@ export default function AdminServers() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/servers"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/servers/status"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/license/check/server"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/servers"] });
       toast({ title: "Server deleted successfully" });
@@ -306,6 +297,8 @@ export default function AdminServers() {
       server.name.toLowerCase().includes(search.toLowerCase()) ||
       server.host.toLowerCase().includes(search.toLowerCase())
   );
+
+  const statusById = serverStatusData?.statuses || {};
 
   return (
     <div className="p-6 space-y-6">
@@ -364,7 +357,6 @@ export default function AdminServers() {
                       tags: editingServer.tags?.join(", ") || "",
                       sshUsers: editingServer.sshUsers?.join(", ") || "",
                       enabled: editingServer.enabled,
-                      healthCheckUrl: editingServer.healthCheckUrl || "",
                     }
                   : undefined
               }
@@ -456,9 +448,25 @@ export default function AdminServers() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={server.enabled ? "default" : "secondary"}>
-                        {server.enabled ? "Enabled" : "Disabled"}
-                      </Badge>
+                      {server.enabled ? (
+                        <Badge
+                          variant={
+                            statusById[server.id] === "online"
+                              ? "default"
+                              : statusById[server.id] === "offline"
+                                ? "destructive"
+                                : "secondary"
+                          }
+                        >
+                          {statusById[server.id] === "online"
+                            ? "Online"
+                            : statusById[server.id] === "offline"
+                              ? "Offline"
+                              : "Unknown"}
+                        </Badge>
+                      ) : (
+                        <Badge variant="secondary">Disabled</Badge>
+                      )}
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1">

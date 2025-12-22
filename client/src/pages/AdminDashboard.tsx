@@ -3,12 +3,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Server, Users, Activity, Shield, TrendingUp, AlertTriangle } from "lucide-react";
-import type { Server as ServerType, AdminUser, ActiveSession } from "@shared/schema";
+import type { Server as ServerType, AdminUser, ActiveSession, ServerStatus } from "@shared/schema";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { ADMIN_ROLE_SET } from "@shared/config/roles";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { useCallback } from "react";
+import { api } from "@/lib/api";
+import type { LicenseInfo } from "@/lib/api";
 
 function StatCard({
   title,
@@ -63,6 +65,12 @@ export default function AdminDashboard() {
     queryKey: ["/api/admin/servers"],
   });
 
+  const { data: serverStatusData, isLoading: serverStatusLoading, refetch: refetchServerStatus } = useQuery<{
+    statuses: Record<string, ServerStatus>;
+  }>({
+    queryKey: ["/api/admin/servers/status"],
+  });
+
   const { data: users, isLoading: usersLoading, refetch: refetchUsers } = useQuery<AdminUser[]>({
     queryKey: ["/api/admin/users"],
   });
@@ -71,14 +79,29 @@ export default function AdminDashboard() {
     queryKey: ["/api/admin/sessions"],
   });
 
+  const { data: accessApprovals } = useQuery({
+    queryKey: ["/api/admin/access-approvals"],
+    queryFn: api.admin.accessApprovals.list,
+  });
+
+  const { data: pendingPolicies } = useQuery({
+    queryKey: ["/api/admin/ssh-policies/pending"],
+    queryFn: api.admin.sshPolicies.listPending,
+  });
+
+  const { data: licenseInfo } = useQuery<LicenseInfo>({
+    queryKey: ["/api/admin/license"],
+    queryFn: api.admin.license.get,
+  });
+
   const isFetchingServers = useIsFetching({ queryKey: ["/api/admin/servers"] }) > 0;
   const isFetchingUsers = useIsFetching({ queryKey: ["/api/admin/users"] }) > 0;
   const isFetchingSessions = useIsFetching({ queryKey: ["/api/admin/sessions"] }) > 0;
   const isFetching = isFetchingServers || isFetchingUsers || isFetchingSessions;
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([refetchServers(), refetchUsers(), refetchSessions()]);
-  }, [refetchServers, refetchUsers, refetchSessions]);
+    await Promise.all([refetchServers(), refetchServerStatus(), refetchUsers(), refetchSessions()]);
+  }, [refetchServers, refetchServerStatus, refetchUsers, refetchSessions]);
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
@@ -86,13 +109,59 @@ export default function AdminDashboard() {
     isBlocked: isFetching,
   });
 
-  const isLoading = serversLoading || usersLoading || sessionsLoading;
+  const isLoading = serversLoading || serverStatusLoading || usersLoading || sessionsLoading;
 
   const activeSessions = sessions?.filter((s) => s.status === "active") || [];
   const enabledServers = servers?.filter((s) => s.enabled) || [];
   // AdminUser.role is an array of role names - match only known admin roles
   const adminUsers =
     users?.filter((u) => u.role?.some((r) => ADMIN_ROLE_SET.has(r))) || [];
+
+  const statusById = serverStatusData?.statuses || {};
+  const enabledOnlineCount =
+    enabledServers.filter((s) => (statusById[s.id] || "unknown") === "online").length || 0;
+  const enabledOfflineCount =
+    enabledServers.filter((s) => (statusById[s.id] || "unknown") === "offline").length || 0;
+  const enabledUnknownCount =
+    enabledServers.filter((s) => (statusById[s.id] || "unknown") === "unknown").length || 0;
+
+  const accessPendingCount = Array.isArray(accessApprovals) ? accessApprovals.length : 0;
+  const policyPendingCount =
+    pendingPolicies?.policies?.filter((p) => p.status === "pending" || p.status === "approved").length || 0;
+  const licenseStatus = licenseInfo?.subscription?.status || "free";
+  const hasBillingIssue = licenseStatus === "past_due";
+
+  const systemAlerts: Array<{ severity: "critical" | "warning"; message: string; href?: string }> = [];
+  if (enabledOfflineCount > 0) {
+    systemAlerts.push({
+      severity: "critical",
+      message: `${enabledOfflineCount} enabled server(s) are offline`,
+      href: "/admin/servers",
+    });
+  } else if (enabledUnknownCount > 0) {
+    systemAlerts.push({
+      severity: "warning",
+      message: `${enabledUnknownCount} enabled server(s) have unknown status`,
+      href: "/admin/servers",
+    });
+  }
+  if (hasBillingIssue) {
+    systemAlerts.push({
+      severity: "critical",
+      message: "Subscription payment is past due",
+      href: "/admin/license",
+    });
+  }
+  if (accessPendingCount + policyPendingCount > 0) {
+    systemAlerts.push({
+      severity: "warning",
+      message: `${accessPendingCount + policyPendingCount} pending approval(s) require review`,
+      href: "/admin/approvals",
+    });
+  }
+
+  const systemHealthLabel = systemAlerts.some((a) => a.severity === "critical") ? "Degraded" : "Operational";
+  const systemHealthDescription = systemAlerts.length > 0 ? `${systemAlerts.length} alert(s)` : "No active alerts";
 
   return (
     <div className="p-6 space-y-8">
@@ -130,7 +199,7 @@ export default function AdminDashboard() {
             <StatCard
               title="Total Servers"
               value={servers?.length || 0}
-              description={`${enabledServers.length} online`}
+              description={`${enabledOnlineCount} online • ${enabledOfflineCount} offline`}
               icon={Server}
             />
             <StatCard
@@ -147,8 +216,8 @@ export default function AdminDashboard() {
             />
             <StatCard
               title="System Health"
-              value="Operational"
-              description="All systems running"
+              value={systemHealthLabel}
+              description={systemHealthDescription}
               icon={Shield}
             />
           </>
@@ -238,10 +307,20 @@ export default function AdminDashboard() {
             ) : servers && servers.length > 0 ? (
               <div className="space-y-3">
                 {servers.slice(0, 5).map((server) => (
+                  (() => {
+                    const status = server.enabled ? (statusById[server.id] || "unknown") : "unknown";
+                    const label = !server.enabled ? "Disabled" : status === "online" ? "Online" : status === "offline" ? "Offline" : "Unknown";
+                    const badgeVariant =
+                      !server.enabled ? "secondary" : status === "online" ? "default" : status === "offline" ? "destructive" : "secondary";
+                    const iconBg =
+                      !server.enabled ? "bg-muted" : status === "online" ? "bg-chart-2/10" : status === "offline" ? "bg-destructive/10" : "bg-muted";
+                    const iconColor =
+                      !server.enabled ? "text-muted-foreground" : status === "online" ? "text-chart-2" : status === "offline" ? "text-destructive" : "text-muted-foreground";
+                    return (
                   <div key={server.id} className="flex items-center justify-between py-2">
                     <div className="flex items-center gap-3">
-                      <div className={`flex h-8 w-8 items-center justify-center rounded-md ${server.enabled ? "bg-chart-2/10" : "bg-muted"}`}>
-                        <Server className={`h-4 w-4 ${server.enabled ? "text-chart-2" : "text-muted-foreground"}`} />
+                      <div className={`flex h-8 w-8 items-center justify-center rounded-md ${iconBg}`}>
+                        <Server className={`h-4 w-4 ${iconColor}`} />
                       </div>
                       <div>
                         <p className="text-sm font-medium">{server.name}</p>
@@ -250,10 +329,12 @@ export default function AdminDashboard() {
                         </p>
                       </div>
                     </div>
-                    <Badge variant={server.enabled ? "default" : "secondary"} className="text-xs">
-                      {server.enabled ? "Online" : "Offline"}
+                    <Badge variant={badgeVariant as any} className="text-xs">
+                      {label}
                     </Badge>
                   </div>
+                    );
+                  })()
                 ))}
               </div>
             ) : (
@@ -275,11 +356,31 @@ export default function AdminDashboard() {
           <CardDescription>Recent system events and notifications</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="flex flex-col items-center justify-center py-8 text-center">
-            <Shield className="h-8 w-8 text-chart-2 mb-2" />
-            <p className="text-sm font-medium">All systems operational</p>
-            <p className="text-xs text-muted-foreground mt-1">No alerts at this time</p>
-          </div>
+          {systemAlerts.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-8 text-center">
+              <Shield className="h-8 w-8 text-chart-2 mb-2" />
+              <p className="text-sm font-medium">All systems operational</p>
+              <p className="text-xs text-muted-foreground mt-1">No alerts at this time</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {systemAlerts.map((a, i) => (
+                <div key={i} className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Badge variant={a.severity === "critical" ? "destructive" : "secondary"} className="text-xs">
+                      {a.severity === "critical" ? "Critical" : "Warning"}
+                    </Badge>
+                    <span className="text-sm">{a.message}</span>
+                  </div>
+                  {a.href && (
+                    <Link href={a.href}>
+                      <Button size="sm" variant="ghost">Open</Button>
+                    </Link>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>

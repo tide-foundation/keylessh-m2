@@ -49,10 +49,10 @@ export function PrivateKeyInput({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Key className="h-5 w-5" />
-            Connect to SSH
+            Authorize SSH Session
           </DialogTitle>
           <DialogDescription>
-            Connect as <strong>{username}</strong> to <strong>{serverName}</strong> using Tide.
+            Authorize this SSH session with Tide to connect as <strong>{username}</strong> to <strong>{serverName}</strong>.
           </DialogDescription>
         </DialogHeader>
 
@@ -66,8 +66,8 @@ export function PrivateKeyInput({
 
           <Alert>
             <AlertDescription>
-              Uses your Tide session key to sign the SSH authentication challenge.
-              Your private key is securely managed by Tide's distributed enclave network.
+              Tide authorizes and signs the SSH authentication challenge.
+              No SSH private key is stored or created in this app. Tide produces the required signatures on-demand via its decentralized network.
             </AlertDescription>
           </Alert>
 
@@ -113,7 +113,7 @@ export function PrivateKeyInput({
                 Connecting...
               </>
             ) : (
-              "Connect with Tide"
+              "Authorize & Connect"
             )}
           </Button>
         </DialogFooter>

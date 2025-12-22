@@ -19,7 +19,6 @@ export const servers = sqliteTable("servers", {
   tags: text("tags", { mode: "json" }).$type<string[]>().notNull().default([]),
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
   sshUsers: text("ssh_users", { mode: "json" }).$type<string[]>().notNull().default([]),
-  healthCheckUrl: text("health_check_url"),  // Optional health API endpoint
 });
 
 export const sessions = sqliteTable("sessions", {
