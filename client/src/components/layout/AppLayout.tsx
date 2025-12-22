@@ -25,8 +25,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Terminal, Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode, CreditCard } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useToast } from "@/hooks/use-toast";
+import { queryClient } from "@/lib/queryClient";
 
 interface AppLayoutProps {
   children: ReactNode;
@@ -80,6 +81,23 @@ export function AppLayout({ children }: AppLayoutProps) {
   const { toast } = useToast();
   const [location] = useLocation();
   const isAdmin = hasRole("admin");
+  const [isBrowserOnline, setIsBrowserOnline] = useState(() => navigator.onLine);
+
+  // Refresh data when navigating between sections (React Query cache uses long-lived freshness by default).
+  useEffect(() => {
+    void queryClient.invalidateQueries();
+  }, [location]);
+
+  useEffect(() => {
+    const onOnline = () => setIsBrowserOnline(true);
+    const onOffline = () => setIsBrowserOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
 
   const style = {
     "--sidebar-width": "16rem",
@@ -231,9 +249,14 @@ export function AppLayout({ children }: AppLayoutProps) {
             </div>
 
             <div className="flex items-center gap-4">
-              <Badge variant="outline" className="hidden sm:flex gap-1.5 items-center label-success">
-                <span className="h-2 w-2 rounded-full bg-chart-2 animate-pulse" />
-                Online
+              <Badge
+                variant="outline"
+                className={`hidden sm:flex gap-1.5 items-center ${isBrowserOnline ? "label-success" : "label-danger"}`}
+              >
+                <span
+                  className={`h-2 w-2 rounded-full ${isBrowserOnline ? "bg-chart-2" : "bg-destructive"}`}
+                />
+                {isBrowserOnline ? "Online" : "Offline"}
               </Badge>
             </div>
           </header>

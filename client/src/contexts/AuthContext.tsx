@@ -293,8 +293,47 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
         }));
       }
 
+      let intervalId: number | undefined;
+
       try {
-        const response = await tc.requestTideOperatorApproval(requests);
+        // If the user closes the popup enclave, the underlying promise can hang indefinitely.
+        // Race with a popup-closed poll + timeout so the UI can recover.
+        const pendingFallback = requests.map((req) => ({ id: req.id, pending: true as const }));
+
+        let cancelledResolved = false;
+
+        const cancelled = new Promise<null>((resolve) => {
+          const finish = () => {
+            if (cancelledResolved) return;
+            cancelledResolved = true;
+            resolve(null);
+          };
+
+          intervalId = window.setInterval(() => {
+            try {
+              const enclave = (tc as any).approvalEnclave;
+              if (enclave && typeof enclave.enclaveClosed === "function" && enclave.enclaveClosed()) {
+                finish();
+              }
+            } catch {
+              // ignore
+            }
+          }, 250);
+        });
+
+        const raw = await Promise.race([tc.requestTideOperatorApproval(requests), cancelled]);
+
+        if (!raw) {
+          try {
+            (tc as any).approvalEnclave?.close?.();
+          } catch {
+            // ignore
+          }
+          return pendingFallback;
+        }
+
+        const response = raw;
+
         return response.map((res: any) => {
           if (res.status === ApprovalStatus.approved) {
             return {
@@ -321,6 +360,9 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
           id: req.id,
           pending: true,
         }));
+      } finally {
+        // Always clear timers so the page doesn't stay "stuck" if the popup is closed.
+        if (typeof intervalId === "number") window.clearInterval(intervalId);
       }
     },
     []

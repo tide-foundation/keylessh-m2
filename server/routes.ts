@@ -10,6 +10,7 @@ import { createRequire } from "module";
 import { fileURLToPath } from "url";
 import { getHomeOrkUrl } from "./lib/auth/tidecloakConfig";
 import { spawn } from "child_process";
+import { createConnection } from "net";
 
 // Forseti compiler configuration from environment
 // COMPILER_IMAGE: Published Docker image (default: ghcr.io/tide-foundation/forseti-compiler:latest)
@@ -129,26 +130,51 @@ function bytesToBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64");
 }
 
-// Check server health by calling its health check URL
-async function checkServerHealth(server: ServerType): Promise<ServerStatus> {
-  if (!server.healthCheckUrl) {
-    return "unknown";
-  }
+async function checkTcpReachable(host: string, port: number, timeoutMs = 2500): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const socket = createConnection({ host, port });
+    let settled = false;
+    let timeoutId: NodeJS.Timeout | undefined;
+    let bannerTimeoutId: NodeJS.Timeout | undefined;
 
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+    const cleanup = () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (bannerTimeoutId) clearTimeout(bannerTimeoutId);
+      socket.removeAllListeners();
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
+      }
+    };
 
-    const response = await fetch(server.healthCheckUrl, {
-      method: "GET",
-      signal: controller.signal,
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(ok);
+    };
+
+    timeoutId = setTimeout(() => finish(false), timeoutMs);
+
+    socket.once("connect", () => {
+      // Optional banner sniff for extra confidence; do not fail if banner isn't sent immediately.
+      bannerTimeoutId = setTimeout(() => finish(true), 400);
+      socket.once("data", (data: Buffer) => {
+        const banner = data.toString("utf8");
+        void banner; // just a sniff; not strictly required
+        finish(true);
+      });
     });
 
-    clearTimeout(timeoutId);
-    return response.ok ? "online" : "offline";
-  } catch (error) {
-    return "offline";
-  }
+    socket.once("error", () => finish(false));
+  });
+}
+
+// Check server health by calling its health check URL
+async function checkServerHealth(server: ServerType): Promise<ServerStatus> {
+  const ok = await checkTcpReachable(server.host, server.port ?? 22);
+  return ok ? "online" : "offline";
 }
 
 // Check health for multiple servers in parallel
@@ -541,6 +567,25 @@ export async function registerRoutes(
         res.json(servers);
       } catch (error) {
         res.status(500).json({ message: "Failed to fetch servers" });
+      }
+    }
+  );
+
+  app.get(
+    "/api/admin/servers/status",
+    authenticate,
+    requireAdmin,
+    async (_req: AuthenticatedRequest, res) => {
+      try {
+        const servers = await storage.getServers();
+        const healthStatusMap = await checkServersHealth(servers);
+        const statuses: Record<string, ServerStatus> = {};
+        for (const s of servers) {
+          statuses[s.id] = healthStatusMap.get(s.id) || "unknown";
+        }
+        res.json({ statuses });
+      } catch (error) {
+        res.status(500).json({ message: "Failed to fetch server statuses" });
       }
     }
   );

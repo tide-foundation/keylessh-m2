@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useSearch } from "wouter";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ServerWithAccess } from "@shared/schema";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -25,6 +25,7 @@ export default function ConsoleWorkspace() {
   const [, setLocation] = useLocation();
   const search = useSearch();
   const searchParams = useMemo(() => new URLSearchParams(search), [search]);
+  const queryClient = useQueryClient();
 
   const { data: servers } = useQuery<ServerWithAccess[]>({
     queryKey: ["/api/servers"],
@@ -135,7 +136,17 @@ export default function ConsoleWorkspace() {
           </div>
         </div>
       ) : (
-        <Tabs value={activeTabId} onValueChange={setActiveTabId} className="flex-1 min-h-0 flex flex-col">
+        <Tabs
+          value={activeTabId}
+          onValueChange={(nextId) => {
+            setActiveTabId(nextId);
+            const tab = tabs.find((t) => t.id === nextId);
+            if (!tab) return;
+            void queryClient.refetchQueries({ queryKey: ["/api/servers"] });
+            void queryClient.refetchQueries({ queryKey: ["/api/servers", tab.serverId] });
+          }}
+          className="flex-1 min-h-0 flex flex-col"
+        >
           <TabsList className="w-full justify-start overflow-x-auto">
             {tabs.map((tab) => {
               const s = serversById.get(tab.serverId);
