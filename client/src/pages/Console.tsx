@@ -350,7 +350,7 @@ export default function Console() {
           </div>
           <Skeleton className="h-6 w-24" />
         </div>
-        <div className="flex-1 bg-[#0c0c0c] flex items-center justify-center">
+        <div className="flex-1 terminal-surface flex items-center justify-center">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       </div>
@@ -448,8 +448,8 @@ export default function Console() {
         </div>
       </div>
 
-      <div className="flex-1 bg-[#0c0c0c] overflow-hidden relative p-3 sm:p-4">
-        <div className="terminal-surface h-full w-full rounded-xl border border-white/10 bg-[#0c0c0c] overflow-hidden relative">
+      <div className="flex-1 overflow-hidden relative p-3 sm:p-4">
+        <div className="terminal-surface h-full w-full rounded-xl overflow-hidden relative">
           <div
             ref={terminalRef}
             className="absolute inset-3"

@@ -46,6 +46,7 @@ import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { api, type PolicyTemplate, type TemplateParameter } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
+import { RefreshButton } from "@/components/RefreshButton";
 import { useAuth } from "@/contexts/AuthContext";
 import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode } from "lucide-react";
 import type { AdminRole } from "@shared/schema";
@@ -442,15 +443,13 @@ export default function AdminRoles() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
+          <RefreshButton
             onClick={() => void refreshNow()}
-            disabled={isFetchingRoles}
+            isRefreshing={isFetchingRoles}
+            secondsRemaining={secondsRemaining}
             data-testid="refresh-roles"
             title="Refresh now"
-          >
-            Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
-          </Button>
+          />
           <Button onClick={handleCreate} data-testid="add-role-button">
             <Plus className="h-4 w-4 mr-2" />
             Add Role

@@ -10,6 +10,7 @@ import { Server, Terminal, Clock, Activity, ArrowRight, Wifi, WifiOff, HelpCircl
 import { useCallback, useState } from "react";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
+import { RefreshButton } from "@/components/RefreshButton";
 
 function ServerCard({ server }: { server: ServerWithAccess }) {
   const [selectedUser, setSelectedUser] = useState<string>(server.allowedSshUsers[0] || "");
@@ -202,15 +203,13 @@ export default function Dashboard() {
             Connect to your servers and manage your SSH sessions
           </p>
         </div>
-        <Button
-          variant="outline"
+        <RefreshButton
           onClick={() => void refreshNow()}
-          disabled={isFetching}
+          isRefreshing={isFetching}
+          secondsRemaining={secondsRemaining}
           data-testid="refresh-dashboard"
           title="Refresh now"
-        >
-          Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
-        </Button>
+        />
       </div>
 
       {activeSessions.length > 0 && (

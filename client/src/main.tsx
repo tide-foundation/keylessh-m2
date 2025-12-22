@@ -30,18 +30,25 @@ window.onunhandledrejection = (event) => {
 function showRecoveryUI(errorMsg: string) {
   const root = document.getElementById("root");
   if (root && !root.querySelector("[data-recovery-ui]")) {
+    const isDark = document.documentElement.classList.contains("dark");
+    const bg = isDark ? "#09090b" : "#ffffff";
+    const fg = isDark ? "#a1a1aa" : "#3f3f46";
+    const mono = isDark ? "#71717a" : "#52525b";
+    const btnBg = isDark ? "#27272a" : "#f4f4f5";
+    const btnFg = isDark ? "#fafafa" : "#18181b";
+    const btnBorder = isDark ? "#3f3f46" : "#d4d4d8";
     root.innerHTML = `
-      <div data-recovery-ui style="min-height: 100vh; background: #09090b; display: flex; align-items: center; justify-content: center;">
-        <div style="text-align: center; color: #a1a1aa; max-width: 400px; padding: 20px;">
+      <div data-recovery-ui style="min-height: 100vh; background: ${bg}; display: flex; align-items: center; justify-content: center;">
+        <div style="text-align: center; color: ${fg}; max-width: 420px; padding: 20px;">
           <p style="font-size: 14px; font-family: system-ui, sans-serif; margin-bottom: 16px; color: #ef4444;">
             Application failed to load
           </p>
-          <p style="font-size: 12px; font-family: monospace; margin-bottom: 16px; color: #71717a; word-break: break-all;">
+          <p style="font-size: 12px; font-family: monospace; margin-bottom: 16px; color: ${mono}; word-break: break-all;">
             ${errorMsg}
           </p>
           <button
             onclick="localStorage.clear(); sessionStorage.clear(); window.location.href='/login';"
-            style="padding: 8px 16px; background: #27272a; color: #fafafa; border: 1px solid #3f3f46; border-radius: 6px; cursor: pointer; font-size: 14px; font-family: system-ui, sans-serif;"
+            style="padding: 8px 16px; background: ${btnBg}; color: ${btnFg}; border: 1px solid ${btnBorder}; border-radius: 8px; cursor: pointer; font-size: 14px; font-family: system-ui, sans-serif;"
           >
             Clear session and restart
           </button>
@@ -128,14 +135,19 @@ setTimeout(() => {
     console.warn("[main] App initialization timeout - showing recovery option");
     const loader = document.getElementById("initial-loader");
     if (loader) {
+      const isDark = document.documentElement.classList.contains("dark");
+      const fg = isDark ? "#a1a1aa" : "#3f3f46";
+      const btnBg = isDark ? "#27272a" : "#f4f4f5";
+      const btnFg = isDark ? "#fafafa" : "#18181b";
+      const btnBorder = isDark ? "#3f3f46" : "#d4d4d8";
       loader.innerHTML = `
-        <div style="text-align: center; color: #a1a1aa;">
+        <div style="text-align: center; color: ${fg};">
           <p style="font-size: 14px; font-family: system-ui, sans-serif; margin-bottom: 16px;">
             Loading is taking longer than expected...
           </p>
           <button
             onclick="localStorage.clear(); sessionStorage.clear(); window.location.href='/login';"
-            style="padding: 8px 16px; background: #27272a; color: #fafafa; border: 1px solid #3f3f46; border-radius: 6px; cursor: pointer; font-size: 14px; font-family: system-ui, sans-serif;"
+            style="padding: 8px 16px; background: ${btnBg}; color: ${btnFg}; border: 1px solid ${btnBorder}; border-radius: 8px; cursor: pointer; font-size: 14px; font-family: system-ui, sans-serif;"
           >
             Clear session and restart
           </button>

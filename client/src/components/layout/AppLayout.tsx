@@ -24,7 +24,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Terminal, Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode, CreditCard } from "lucide-react";
+import { Terminal, Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode, CreditCard, Sun, Moon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
@@ -41,14 +41,9 @@ const userNavItems = [
 // Admin nav organized by logical groups for better UX
 const adminNavGroups = [
   {
-    label: "Overview",
-    items: [
-      { title: "Dashboard", url: "/admin", icon: Shield },
-    ],
-  },
-  {
     label: "Infrastructure",
     items: [
+      { title: "Dashboard", url: "/admin", icon: Shield },
       { title: "Servers", url: "/admin/servers", icon: Server },
       { title: "Sessions", url: "/admin/sessions", icon: Activity },
     ],
@@ -82,6 +77,15 @@ export function AppLayout({ children }: AppLayoutProps) {
   const [location] = useLocation();
   const isAdmin = hasRole("admin");
   const [isBrowserOnline, setIsBrowserOnline] = useState(() => navigator.onLine);
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    try {
+      const stored = localStorage.getItem("theme");
+      if (stored === "light" || stored === "dark") return stored;
+    } catch {
+      // ignore
+    }
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
 
   // Refresh data when navigating between sections (React Query cache uses long-lived freshness by default).
   useEffect(() => {
@@ -98,6 +102,15 @@ export function AppLayout({ children }: AppLayoutProps) {
       window.removeEventListener("offline", onOffline);
     };
   }, []);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", theme === "dark");
+    try {
+      localStorage.setItem("theme", theme);
+    } catch {
+      // ignore
+    }
+  }, [theme]);
 
   const style = {
     "--sidebar-width": "16rem",
@@ -218,6 +231,14 @@ export function AppLayout({ children }: AppLayoutProps) {
                 >
                   <RefreshCw className="mr-2 h-4 w-4" />
                   Refresh token
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+                  data-testid="theme-toggle"
+                >
+                  {theme === "dark" ? <Sun className="mr-2 h-4 w-4" /> : <Moon className="mr-2 h-4 w-4" />}
+                  {theme === "dark" ? "Light mode" : "Dark mode"}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={logout} className="text-destructive focus:text-destructive" data-testid="logout-button">

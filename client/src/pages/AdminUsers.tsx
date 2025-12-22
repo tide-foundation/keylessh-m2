@@ -40,6 +40,7 @@ import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { Users, Pencil, Search, Shield, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check } from "lucide-react";
 import type { AdminUser } from "@shared/schema";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
+import { RefreshButton } from "@/components/RefreshButton";
 
 interface EditFormData {
   id: string;
@@ -266,15 +267,13 @@ export default function AdminUsers() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
+          <RefreshButton
             onClick={() => void refreshNow()}
-            disabled={isFetchingUsers}
+            isRefreshing={isFetchingUsers}
+            secondsRemaining={secondsRemaining}
             data-testid="refresh-users"
             title="Refresh now"
-          >
-            Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
-          </Button>
+          />
           <Button
             onClick={() => setCreatingUser(true)}
             disabled={userLimit ? !userLimit.allowed : false}

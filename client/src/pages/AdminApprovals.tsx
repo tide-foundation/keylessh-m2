@@ -38,6 +38,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { RefreshButton } from "@/components/RefreshButton";
 
 type TabType = "access" | "policies";
 
@@ -219,15 +220,13 @@ function AccessApprovalsTab() {
 
   const refreshControls = (
     <div className="p-4 border-b border-border flex items-center justify-end">
-      <Button
-        variant="outline"
+      <RefreshButton
         onClick={() => void refreshNow()}
-        disabled={isLoading}
+        isRefreshing={isLoading}
+        secondsRemaining={secondsRemaining}
         data-testid="refresh-approvals"
         title="Refresh now"
-      >
-        Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
-      </Button>
+      />
     </div>
   );
 
@@ -619,15 +618,13 @@ function PolicyApprovalsTab() {
 
   const refreshControls = (
     <div className="p-4 border-b border-border flex items-center justify-end">
-      <Button
-        variant="outline"
+      <RefreshButton
         onClick={() => void refreshNow()}
-        disabled={isFetchingPolicies || isProcessing}
+        isRefreshing={isFetchingPolicies || isProcessing}
+        secondsRemaining={secondsRemaining}
         data-testid="refresh-policies"
         title="Refresh now"
-      >
-        Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
-      </Button>
+      />
     </div>
   );
 

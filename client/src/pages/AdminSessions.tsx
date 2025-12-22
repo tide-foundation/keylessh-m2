@@ -31,6 +31,7 @@ import { queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
+import { RefreshButton } from "@/components/RefreshButton";
 
 type PageSizeMode = "auto" | "manual";
 
@@ -113,15 +114,13 @@ export function AdminActiveSessionsContent({ embedded = false }: { embedded?: bo
               View currently active SSH sessions and terminate if needed
             </p>
           </div>
-          <Button
-            variant="outline"
+          <RefreshButton
             onClick={() => void refreshNow()}
-            disabled={isFetchingSessions}
+            isRefreshing={isFetchingSessions}
+            secondsRemaining={secondsRemaining}
             data-testid="refresh-admin-sessions"
             title="Refresh now"
-          >
-            Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
-          </Button>
+          />
         </div>
       )}
 

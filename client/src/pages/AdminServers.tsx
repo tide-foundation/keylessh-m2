@@ -39,6 +39,7 @@ import { Plus, Pencil, Trash2, Server, Search } from "lucide-react";
 import type { Server as ServerType, ServerStatus } from "@shared/schema";
 import { api } from "@/lib/api";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
+import { RefreshButton } from "@/components/RefreshButton";
 
 interface ServerFormData {
   name: string;
@@ -313,15 +314,13 @@ export default function AdminServers() {
           </p>
         </div>
 
-        <Button
-          variant="outline"
+        <RefreshButton
           onClick={() => void refreshNow()}
-          disabled={isFetching}
+          isRefreshing={isFetching}
+          secondsRemaining={secondsRemaining}
           data-testid="refresh-servers"
           title="Refresh now"
-        >
-          Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
-        </Button>
+        />
 
         <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
           <DialogTrigger asChild>
