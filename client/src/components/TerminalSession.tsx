@@ -1,0 +1,422 @@
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Terminal as XTerm } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
+import "@xterm/xterm/css/xterm.css";
+
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useToast } from "@/hooks/use-toast";
+import { PrivateKeyInput } from "@/components/PrivateKeyInput";
+import { useSSHSession } from "@/hooks/useSSHSession";
+import {
+  base64UrlToBytes,
+  createEd25519KeyPairFromRawPublicKey,
+  formatOpenSshEd25519PublicKey,
+} from "@/lib/sshClient";
+import { createTideSshSigner } from "@/lib/tideSsh";
+import adapter from "../tidecloakAdapter.json";
+import {
+  RefreshCw,
+  Power,
+  Copy,
+  Maximize,
+  Minimize,
+  Wifi,
+  WifiOff,
+  Loader2,
+  Key,
+  X,
+} from "lucide-react";
+import type { ServerWithAccess } from "@shared/schema";
+import type { SSHConnectionStatus } from "@/lib/sshClient";
+
+const statusConfig: Record<
+  SSHConnectionStatus,
+  { label: string; color: string; icon: typeof Wifi }
+> = {
+  connecting: { label: "Connecting...", color: "bg-chart-4", icon: Loader2 },
+  authenticating: {
+    label: "Authenticating...",
+    color: "bg-chart-4",
+    icon: Key,
+  },
+  connected: { label: "Connected", color: "bg-chart-2", icon: Wifi },
+  disconnected: {
+    label: "Disconnected",
+    color: "bg-muted-foreground",
+    icon: WifiOff,
+  },
+  error: { label: "Connection Error", color: "bg-destructive", icon: WifiOff },
+};
+
+export function TerminalSession({
+  serverId,
+  sshUser,
+  isActive = true,
+  onCloseTab,
+}: {
+  serverId: string;
+  sshUser: string;
+  isActive?: boolean;
+  onCloseTab?: () => void;
+}) {
+  const { toast } = useToast();
+
+  const terminalRef = useRef<HTMLDivElement>(null);
+  const xtermRef = useRef<XTerm | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const pendingOutputRef = useRef<Uint8Array[]>([]);
+
+  const writeToTerminal = useCallback((data: Uint8Array) => {
+    if (!xtermRef.current) {
+      pendingOutputRef.current.push(data);
+      return;
+    }
+    xtermRef.current.write(data);
+  }, []);
+
+  const [showKeyDialog, setShowKeyDialog] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const { data: server, isLoading: serverLoading } = useQuery<ServerWithAccess>({
+    queryKey: ["/api/servers", serverId],
+  });
+
+  const { connect, disconnect, send, resize, setDimensions, status, error } = useSSHSession({
+    host: server?.host || "",
+    port: server?.port || 22,
+    serverId,
+    username: sshUser,
+    onData: writeToTerminal,
+  });
+
+  const prevStatusRef = useRef<SSHConnectionStatus>("disconnected");
+  const disconnectedWithReason = status === "disconnected" && !!error;
+  const userInitiatedDisconnectRef = useRef(false);
+
+  const tideSshPublicKey = useMemo(() => {
+    try {
+      const jwkX = adapter?.jwk?.keys?.[0]?.x;
+      if (typeof jwkX !== "string") return null;
+      const rawPublicKey = base64UrlToBytes(jwkX);
+      return formatOpenSshEd25519PublicKey(rawPublicKey, `${sshUser}@keylessh`);
+    } catch {
+      return null;
+    }
+  }, [sshUser]);
+
+  const handleConnect = useCallback(async () => {
+    try {
+      if (xtermRef.current) {
+        xtermRef.current.clear();
+        xtermRef.current.reset();
+      }
+      pendingOutputRef.current = [];
+
+      const dims = fitAddonRef.current?.proposeDimensions();
+      if (dims?.cols && dims?.rows) {
+        setDimensions(dims.cols, dims.rows);
+      } else {
+        setDimensions(80, 24);
+      }
+
+      const jwkX = adapter?.jwk?.keys?.[0]?.x;
+      if (typeof jwkX !== "string") {
+        throw new Error("Missing JWKS Ed25519 public key (adapter.jwk.keys[0].x)");
+      }
+      const rawPublicKey = base64UrlToBytes(jwkX);
+      const keyPair = await createEd25519KeyPairFromRawPublicKey(rawPublicKey);
+
+      await connect({ type: "keypair", keyPair }, createTideSshSigner());
+      setShowKeyDialog(false);
+
+      if (fitAddonRef.current) {
+        fitAddonRef.current.fit();
+      }
+      xtermRef.current?.focus();
+    } catch (err) {
+      console.error("Connection failed:", err);
+    }
+  }, [connect, setDimensions]);
+
+  const handleReconnect = useCallback(() => {
+    setShowKeyDialog(true);
+  }, []);
+
+  const handleDisconnect = useCallback(() => {
+    userInitiatedDisconnectRef.current = true;
+    disconnect();
+  }, [disconnect]);
+
+  const handleCopy = useCallback(() => {
+    const selection = xtermRef.current?.getSelection();
+    if (selection) {
+      navigator.clipboard.writeText(selection);
+      toast({ title: "Copied to clipboard" });
+    }
+  }, [toast]);
+
+  const handleCloseTabClick = useCallback(() => {
+    userInitiatedDisconnectRef.current = true;
+    disconnect();
+    onCloseTab?.();
+  }, [disconnect, onCloseTab]);
+
+  const toggleFullscreen = useCallback(() => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen();
+      setIsFullscreen(true);
+    } else {
+      document.exitFullscreen();
+      setIsFullscreen(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!terminalRef.current || xtermRef.current) return;
+
+    const term = new XTerm({
+      cursorBlink: true,
+      fontSize: 14,
+      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+      theme: {
+        background: "#0c0c0c",
+        foreground: "#d4d4d4",
+        cursor: "#d4d4d4",
+        cursorAccent: "#0c0c0c",
+        selectionBackground: "#264f78",
+        black: "#0c0c0c",
+        red: "#cd3131",
+        green: "#0dbc79",
+        yellow: "#e5e510",
+        blue: "#2472c8",
+        magenta: "#bc3fbc",
+        cyan: "#11a8cd",
+        white: "#e5e5e5",
+        brightBlack: "#666666",
+        brightRed: "#f14c4c",
+        brightGreen: "#23d18b",
+        brightYellow: "#f5f543",
+        brightBlue: "#3b8eea",
+        brightMagenta: "#d670d6",
+        brightCyan: "#29b8db",
+        brightWhite: "#e5e5e5",
+      },
+      allowProposedApi: true,
+    });
+
+    const fitAddon = new FitAddon();
+    const webLinksAddon = new WebLinksAddon();
+
+    term.loadAddon(fitAddon);
+    term.loadAddon(webLinksAddon);
+
+    term.open(terminalRef.current);
+    const fitNow = () => {
+      fitAddon.fit();
+      const dims = fitAddon.proposeDimensions();
+      if (dims?.cols && dims?.rows) {
+        setDimensions(dims.cols, dims.rows);
+        resize(dims.cols, dims.rows);
+      }
+    };
+
+    fitNow();
+    window.requestAnimationFrame(fitNow);
+    window.setTimeout(fitNow, 50);
+    if ("fonts" in document) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (document as any).fonts?.ready?.then(() => fitNow()).catch(() => undefined);
+    }
+
+    xtermRef.current = term;
+    fitAddonRef.current = fitAddon;
+
+    if (pendingOutputRef.current.length > 0) {
+      for (const chunk of pendingOutputRef.current) {
+        term.write(chunk);
+      }
+      pendingOutputRef.current = [];
+    }
+
+    term.onData((data) => {
+      send(data);
+    });
+
+    const handleResize = () => {
+      fitNow();
+    };
+
+    const resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(terminalRef.current);
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      resizeObserver.disconnect();
+      try {
+        term.dispose();
+      } catch {
+        // ignore
+      }
+      xtermRef.current = null;
+      fitAddonRef.current = null;
+    };
+  }, [resize, send, setDimensions]);
+
+  // When a tab becomes active, refit and resize so xterm renders correctly.
+  useEffect(() => {
+    if (!isActive) return;
+    if (status !== "connected") return;
+    const fit = () => {
+      const fitAddon = fitAddonRef.current;
+      const term = xtermRef.current;
+      if (!fitAddon || !term) return;
+      fitAddon.fit();
+      const dims = fitAddon.proposeDimensions();
+      if (dims?.cols && dims?.rows) {
+        setDimensions(dims.cols, dims.rows);
+        resize(dims.cols, dims.rows);
+      }
+      term.refresh(0, term.rows - 1);
+      term.focus();
+    };
+    fit();
+    window.requestAnimationFrame(fit);
+    window.setTimeout(fit, 50);
+    window.setTimeout(fit, 150);
+  }, [isActive, resize, setDimensions, status]);
+
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    if (prev !== status) {
+      if (status === "connected") {
+        userInitiatedDisconnectRef.current = false;
+        toast({ title: "Connected", description: `Connected to ${sshUser}@${server?.name || "server"}` });
+      }
+
+      // Only show a toast for unexpected disconnects (not user-triggered).
+      if (prev === "connected" && status === "disconnected" && error && !userInitiatedDisconnectRef.current) {
+        toast({
+          title: "Disconnected",
+          description: error,
+          variant: "destructive",
+        });
+      }
+
+      prevStatusRef.current = status;
+    }
+  }, [server?.name, sshUser, status, toast]);
+
+  // Important UX: never auto-open the Tide connect modal.
+  // Users should explicitly click Connect/Reconnect to open it.
+
+  const StatusIcon = statusConfig[status].icon;
+
+  return (
+    <div className="flex flex-col gap-4 h-full">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className="gap-2">
+            <span className={`h-2 w-2 rounded-full ${statusConfig[status].color}`} />
+            <StatusIcon className={`h-3.5 w-3.5 ${status === "connecting" || status === "authenticating" ? "animate-spin" : ""}`} />
+            <span>{statusConfig[status].label}</span>
+          </Badge>
+          <div className="text-sm text-muted-foreground">
+            {server?.name ? (
+              <span className="font-medium text-foreground">{server.name}</span>
+            ) : (
+              <Skeleton className="h-4 w-40 inline-block" />
+            )}
+            <span className="ml-2 font-mono text-xs">{sshUser}@{server?.host || "…"}</span>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {onCloseTab && (
+            <Button variant="outline" size="sm" onClick={handleCloseTabClick}>
+              <X className="h-4 w-4 mr-2" />
+              Close tab
+            </Button>
+          )}
+          <Button variant="outline" size="sm" onClick={handleCopy} disabled={status !== "connected"}>
+            <Copy className="h-4 w-4 mr-2" />
+            Copy
+          </Button>
+          <Button variant="outline" size="sm" onClick={toggleFullscreen}>
+            {isFullscreen ? <Minimize className="h-4 w-4 mr-2" /> : <Maximize className="h-4 w-4 mr-2" />}
+            {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+          </Button>
+          {status === "connected" ? (
+            <Button variant="destructive" size="sm" onClick={handleDisconnect}>
+              <Power className="h-4 w-4 mr-2" />
+              Disconnect
+            </Button>
+          ) : (
+            <Button size="sm" onClick={() => setShowKeyDialog(true)} disabled={serverLoading}>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Connect
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <div className="terminal-surface flex-1 min-h-[420px] w-full rounded-xl border border-white/10 bg-[#0c0c0c] overflow-hidden relative">
+        <div ref={terminalRef} className="h-full w-full" data-testid="terminal-container" />
+
+        {status !== "connected" && (
+          <div className="absolute inset-0 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
+            <div className="text-center space-y-3 max-w-md px-4">
+              <div className="text-sm font-medium">
+                {status === "connecting" || status === "authenticating"
+                  ? "Connecting…"
+                  : status === "error"
+                    ? "Connection failed"
+                    : disconnectedWithReason
+                      ? "Session disconnected"
+                      : "Not connected"}
+              </div>
+              {(status === "error" || disconnectedWithReason) && (
+                <div className="text-sm text-muted-foreground">
+                  {error}
+                </div>
+              )}
+              <div className="flex items-center justify-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => setShowKeyDialog(true)}
+                  disabled={serverLoading || status === "connecting" || status === "authenticating"}
+                >
+                  <RefreshCw className={`h-4 w-4 mr-2 ${status === "connecting" || status === "authenticating" ? "animate-spin" : ""}`} />
+                  {status === "error" || disconnectedWithReason ? "Reconnect" : "Connect"}
+                </Button>
+                {onCloseTab && (
+                  <Button size="sm" variant="outline" onClick={handleCloseTabClick}>
+                    <X className="h-4 w-4 mr-2" />
+                    Close
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <PrivateKeyInput
+        open={showKeyDialog}
+        onOpenChange={(open) => {
+          setShowKeyDialog(open);
+        }}
+        onSubmit={() => void handleConnect()}
+        serverName={server?.name || "Server"}
+        username={sshUser}
+        tidePublicKey={tideSshPublicKey}
+        isConnecting={status === "connecting" || status === "authenticating"}
+        error={status === "error" || disconnectedWithReason ? error : null}
+      />
+    </div>
+  );
+}

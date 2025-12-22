@@ -64,8 +64,13 @@ function cleanupConnection(ws: WebSocket, reason?: string) {
   untrackSessionSocket(conn.sessionId, ws);
   connections.delete(ws);
 
-  // Ensure DB session is marked completed to avoid stale "active" sessions.
-  void storage.endSession(conn.sessionId);
+  // Mark DB session completed only when the last WebSocket for this sessionId closes.
+  // This allows multiple browser tabs/windows to attach to the same session without
+  // one tab closing and prematurely ending the session for the others.
+  const remainingSockets = socketsBySessionId.get(conn.sessionId);
+  if (!remainingSockets || remainingSockets.size === 0) {
+    void storage.endSession(conn.sessionId);
+  }
 
   if (reason) {
     log(`Cleaned up session ${conn.sessionId}: ${reason}`);

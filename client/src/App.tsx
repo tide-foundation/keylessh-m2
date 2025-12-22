@@ -1,4 +1,4 @@
-import { Switch, Route, Redirect, useLocation } from "wouter";
+import { Switch, Route, Redirect, useLocation, useParams, useSearch } from "wouter";
 import { useEffect, useState } from "react";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -10,7 +10,7 @@ import { AppLayout } from "@/components/layout/AppLayout";
 import Login from "@/pages/Login";
 import AuthRedirect from "@/pages/AuthRedirect";
 import Dashboard from "@/pages/Dashboard";
-import Console from "@/pages/Console";
+import ConsoleWorkspace from "@/pages/ConsoleWorkspace";
 import AdminDashboard from "@/pages/AdminDashboard";
 import AdminServers from "@/pages/AdminServers";
 import AdminUsers from "@/pages/AdminUsers";
@@ -118,7 +118,36 @@ function AdminRoute({ children }: { children: ReactNode }) {
   return <AppLayout>{children}</AppLayout>;
 }
 
-function ConsoleRoute() {
+function ConsoleLegacyRedirectRoute() {
+  const { isAuthenticated, isLoading } = useAuth();
+  const [, setLocation] = useLocation();
+  const params = useParams<{ serverId: string }>();
+  const search = useSearch();
+
+  useEffect(() => {
+    if (!isLoading && !isAuthenticated) {
+      setLocation("/login");
+      return;
+    }
+    if (!isLoading && isAuthenticated) {
+      const sp = new URLSearchParams(search);
+      const user = sp.get("user") || "root";
+      setLocation(`/app/console?serverId=${encodeURIComponent(params.serverId)}&user=${encodeURIComponent(user)}`);
+    }
+  }, [isLoading, isAuthenticated, setLocation]);
+
+  if (isLoading) {
+    return <LoadingScreen />;
+  }
+
+  if (!isAuthenticated) {
+    return <LoadingScreen />;
+  }
+
+  return <LoadingScreen />;
+}
+
+function ConsoleWorkspaceRoute() {
   const { isAuthenticated, isLoading } = useAuth();
   const [, setLocation] = useLocation();
 
@@ -138,7 +167,7 @@ function ConsoleRoute() {
 
   return (
     <AppLayout>
-      <Console />
+      <ConsoleWorkspace />
     </AppLayout>
   );
 }
@@ -160,7 +189,11 @@ function Router() {
       </Route>
       
       <Route path="/app/console/:serverId">
-        <ConsoleRoute />
+        <ConsoleLegacyRedirectRoute />
+      </Route>
+
+      <Route path="/app/console">
+        <ConsoleWorkspaceRoute />
       </Route>
       
       <Route path="/admin">

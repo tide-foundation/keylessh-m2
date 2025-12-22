@@ -34,6 +34,7 @@ interface AppLayoutProps {
 
 const userNavItems = [
   { title: "Dashboard", url: "/app", icon: Terminal },
+  { title: "Console", url: "/app/console", icon: Terminal },
 ];
 
 // Admin nav organized by logical groups for better UX
