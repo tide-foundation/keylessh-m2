@@ -135,3 +135,305 @@ SSH signing requires the ORK network (Tide's decentralised nodes) for Policy:1 a
 - **"Doken validation failed"**: Ensure the user's doken contains the required role
 - **Connection timeouts**: Verify ORK endpoints are reachable from the browser
 
+## Forseti Contract Compiler
+
+The ContractCompiler tool computes the SHA512 hash (contractId) of compiled Forseti contracts. This hash must match exactly between the client (Keyle-SSH) and the ORK network for policy validation to succeed.
+
+### Why It's Needed
+
+When creating SSH policies, Keyle-SSH compiles the C# contract source code to get a `contractId`. During signing, ORKs independently compile the same source and verify the hash matches. Due to Roslyn compiler determinism requirements, both must use identical:
+
+- .NET runtime assemblies (same version, same paths)
+- SDK version metadata
+- Compilation options
+
+The ContractCompiler tool runs **inside the ORK Docker container** to guarantee hash consistency.
+
+### Prerequisites
+
+- ORK Docker container running (e.g., `Ork-1`)
+- ContractCompiler built into the container at `/opt/forseti-compile/`
+
+The ORK Dockerfiles (`MasterLocalDockerfile`, `Dockerfile-ork`, etc.) include ContractCompiler in the build.
+
+### Usage
+
+The tool is invoked via `docker exec` to run inside the ORK container:
+
+```bash
+# Compile from stdin
+echo 'using Ork.Forseti.Sdk;
+public class MyPolicy : IAccessPolicy {
+    public PolicyDecision Authorize(AccessContext ctx) {
+        return PolicyDecision.Allow();
+    }
+}' | docker exec -i Ork-1 dotnet /opt/forseti-compile/ContractCompiler.dll --json
+
+# Output:
+# {"Success":true,"ContractId":"66F795D1...","SdkVersion":"1.0.0","Validated":false}
+```
+
+### Quick Start
+
+```bash
+# Just run it - Docker pulls automatically on first use
+echo 'using Ork.Forseti.Sdk;
+public class MyPolicy : IAccessPolicy {
+    public PolicyDecision Authorize(AccessContext ctx) {
+        return PolicyDecision.Allow();
+    }
+}' | docker run -i --rm ghcr.io/tide-foundation/forseti-compiler:latest --json
+```
+
+Output:
+```json
+{"Success":true,"ContractId":"66F795D1...","SdkVersion":"1.0.0","Validated":false}
+```
+
+### For App Developers
+
+**No SDK or library needed** - just shell out to Docker from your app:
+
+```typescript
+// Simplest integration - one function
+import { execSync } from "child_process";
+
+function getContractId(source: string): string {
+  const result = execSync(
+    `echo '${source.replace(/'/g, "'\\''")}' | docker run -i --rm ghcr.io/tide-foundation/forseti-compiler:latest --json`,
+    { encoding: "utf-8" }
+  );
+  return JSON.parse(result).ContractId;
+}
+```
+
+Or configure via environment variable:
+
+```env
+FORSETI_COMPILER_IMAGE=ghcr.io/tide-foundation/forseti-compiler:latest
+```
+
+### Code Examples
+
+#### Node.js / TypeScript
+
+```typescript
+import { spawn } from "child_process";
+
+async function compileContract(source: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("docker", [
+      "run", "-i", "--rm",
+      "ghcr.io/tide-foundation/forseti-compiler:latest",
+      "--json"
+    ]);
+
+    let output = "";
+    proc.stdout.on("data", (data) => output += data);
+    proc.stderr.on("data", (data) => console.error(data.toString()));
+
+    proc.on("close", (code) => {
+      if (code !== 0) return reject(new Error(`Compiler exited with ${code}`));
+      const result = JSON.parse(output);
+      if (!result.Success) return reject(new Error(result.Error));
+      resolve(result.ContractId);
+    });
+
+    proc.stdin.write(source);
+    proc.stdin.end();
+  });
+}
+
+// Usage
+const contractId = await compileContract(`
+  using Ork.Forseti.Sdk;
+  public class MyPolicy : IAccessPolicy {
+    public PolicyDecision Authorize(AccessContext ctx) {
+      return PolicyDecision.Allow();
+    }
+  }
+`);
+console.log("Contract ID:", contractId);
+```
+
+#### Python
+
+```python
+import subprocess
+import json
+
+def compile_contract(source: str) -> str:
+    result = subprocess.run(
+        ["docker", "run", "-i", "--rm",
+         "ghcr.io/tide-foundation/forseti-compiler:latest", "--json"],
+        input=source.encode(),
+        capture_output=True
+    )
+    data = json.loads(result.stdout)
+    if not data["Success"]:
+        raise Exception(data["Error"])
+    return data["ContractId"]
+
+# Usage
+contract_id = compile_contract("""
+using Ork.Forseti.Sdk;
+public class MyPolicy : IAccessPolicy {
+    public PolicyDecision Authorize(AccessContext ctx) {
+        return PolicyDecision.Allow();
+    }
+}
+""")
+print(f"Contract ID: {contract_id}")
+```
+
+#### Bash / Shell
+
+```bash
+#!/bin/bash
+compile_contract() {
+  echo "$1" | docker run -i --rm ghcr.io/tide-foundation/forseti-compiler:latest --json
+}
+
+# Usage
+CONTRACT_ID=$(compile_contract 'using Ork.Forseti.Sdk;
+public class MyPolicy : IAccessPolicy {
+  public PolicyDecision Authorize(AccessContext ctx) {
+    return PolicyDecision.Allow();
+  }
+}' | jq -r '.ContractId')
+
+echo "Contract ID: $CONTRACT_ID"
+```
+
+### Persistent Container (Faster)
+
+For frequent compilations, run a persistent container to avoid Docker startup overhead:
+
+```bash
+# Start persistent container
+docker run -d --name forseti-compiler --restart unless-stopped \
+  ghcr.io/tide-foundation/forseti-compiler:latest sleep infinity
+
+# Compile (faster - no container startup)
+echo 'source code' | docker exec -i forseti-compiler dotnet ContractCompiler.dll --json
+
+# Stop when done
+docker stop forseti-compiler && docker rm forseti-compiler
+```
+
+### Building from Source (Alternative)
+
+If you need to build locally:
+
+```bash
+# Build from the ork repository root
+cd /path/to/ork
+docker build -t forseti-compiler -f Tools/ContractCompiler/Dockerfile .
+
+# Run
+echo 'source code' | docker run -i --rm forseti-compiler --json
+```
+
+### Offline Deployment (No Internet)
+
+For air-gapped environments without registry access:
+
+```bash
+# On machine with internet - save the image
+docker pull ghcr.io/tide-foundation/forseti-compiler:latest
+docker save ghcr.io/tide-foundation/forseti-compiler:latest | gzip > forseti-compiler.tar.gz
+
+# Transfer to offline machine (USB, etc.)
+# On offline machine - load and run
+gunzip -c forseti-compiler.tar.gz | docker load
+echo 'source' | docker run -i --rm ghcr.io/tide-foundation/forseti-compiler:latest --json
+```
+
+### Command-Line Options
+
+```
+OPTIONS:
+    --json                Output result as JSON
+    -f, --file <path>     Read source from file (inside container)
+    -s, --source <code>   Provide source code directly
+    -e, --entry-type      Entry type name (validates IAccessPolicy implementation)
+    -v, --validate        Enable full IL vetting (forbidden namespaces, non-determinism)
+    -h, --help            Show help
+```
+
+### Integration with Keyle-SSH
+
+The server compiles contracts when creating SSH policies. Configure via environment:
+
+```env
+# Use published image (recommended)
+COMPILER_IMAGE=ghcr.io/tide-foundation/forseti-compiler:latest
+
+# Or use local ORK container (if running ORK locally)
+COMPILER_CONTAINER=Ork-1
+```
+
+Example integration:
+
+```typescript
+// server/compiler.ts
+import { spawn } from "child_process";
+
+const COMPILER_IMAGE = process.env.COMPILER_IMAGE || "ghcr.io/tide-foundation/forseti-compiler:latest";
+const COMPILER_CONTAINER = process.env.COMPILER_CONTAINER;
+
+export async function compileContract(source: string): Promise<{ contractId: string; sdkVersion: string }> {
+  const args = COMPILER_CONTAINER
+    ? ["exec", "-i", COMPILER_CONTAINER, "dotnet", "/opt/forseti-compile/ContractCompiler.dll", "--json"]
+    : ["run", "-i", "--rm", COMPILER_IMAGE, "--json"];
+
+  const proc = spawn("docker", args);
+
+  let output = "";
+  proc.stdout.on("data", (d) => output += d);
+
+  return new Promise((resolve, reject) => {
+    proc.on("close", (code) => {
+      if (code !== 0) return reject(new Error(`Compiler failed`));
+      const result = JSON.parse(output);
+      if (!result.Success) return reject(new Error(result.Error));
+      resolve({ contractId: result.ContractId, sdkVersion: result.SdkVersion });
+    });
+    proc.stdin.write(source);
+    proc.stdin.end();
+  });
+}
+```
+
+### Hash Mismatch Errors
+
+If you see errors like:
+
+```
+Policy refers to wrong contract. Expected 'ABC123...' but policy has 'DEF456...'
+```
+
+This means the ContractCompiler hash doesn't match what ORK computed. Common causes:
+
+1. **ContractCompiler not in Docker**: Ensure it's running inside the ORK container, not on the host
+2. **Outdated container**: Rebuild with `docker-compose build ork`
+3. **Different source code**: Check for whitespace/encoding differences
+4. **Cached references**: Restart the ORK container after updates
+
+### Verifying Hash Consistency
+
+Test that the published image produces the same hash as ORK:
+
+```bash
+# Published compiler image
+echo 'public class T : Ork.Forseti.Sdk.IAccessPolicy { public Ork.Forseti.Sdk.PolicyDecision Authorize(Ork.Forseti.Sdk.AccessContext c) { return Ork.Forseti.Sdk.PolicyDecision.Allow(); } }' \
+  | docker run -i --rm ghcr.io/tide-foundation/forseti-compiler:latest --json
+
+# ORK Compile API (if running locally)
+curl -s -X POST http://localhost:8080/Forseti/Compile/preview \
+  -H "Content-Type: application/json" \
+  -d '{"source": "public class T : Ork.Forseti.Sdk.IAccessPolicy { public Ork.Forseti.Sdk.PolicyDecision Authorize(Ork.Forseti.Sdk.AccessContext c) { return Ork.Forseti.Sdk.PolicyDecision.Allow(); } }"}'
+```
+
+Both should return identical `contractId` values.
+
