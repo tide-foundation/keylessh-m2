@@ -923,6 +923,14 @@ export class PendingPolicyStorage {
     return !!row;
   }
 
+  // Get user's decision (returns 1 for approval, 0 for rejection, null if no decision)
+  async getUserDecision(policyRequestId: string, userVuid: string): Promise<number | null> {
+    const row = sqlite.prepare(`
+      SELECT decision FROM ssh_policy_decisions WHERE policy_request_id = ? AND user_vuid = ?
+    `).get(policyRequestId, userVuid) as { decision: number } | undefined;
+    return row ? row.decision : null;
+  }
+
   // Update the policy request data (used to store signed/approved request)
   async updatePolicyRequest(id: string, policyRequestData: string): Promise<void> {
     sqlite.prepare(`
@@ -930,36 +938,12 @@ export class PendingPolicyStorage {
     `).run(policyRequestData, id);
   }
 
-  // Revoke a user's decision (remove their vote)
-  async revokeDecision(policyRequestId: string, userVuid: string, userEmail: string): Promise<boolean> {
-    const policy = await this.getPendingPolicy(policyRequestId);
-    if (!policy) throw new Error("Policy not found");
-    if (policy.status === "committed" || policy.status === "cancelled") {
-      throw new Error("Cannot revoke decision on committed or cancelled policy");
-    }
-
+  // Revoke a user's decision (remove their vote) - matches ideed-swarm's RemovePolicyApproval
+  async revokeDecision(policyRequestId: string, userVuid: string): Promise<boolean> {
     const result = sqlite.prepare(`
       DELETE FROM ssh_policy_decisions WHERE policy_request_id = ? AND user_vuid = ?
     `).run(policyRequestId, userVuid);
-
-    if (result.changes > 0) {
-      // Log the revocation
-      sqlite.prepare(`
-        INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, details)
-        VALUES ('revoked', ?, ?, ?, 'User revoked their decision')
-      `).run(policyRequestId, userEmail, policy.roleId);
-
-      // If policy was "approved", check if it should go back to "pending"
-      if (policy.status === "approved") {
-        const updatedPolicy = await this.getPendingPolicy(policyRequestId);
-        if (updatedPolicy && (updatedPolicy.approvalCount || 0) < updatedPolicy.threshold) {
-          await this.updateStatus(policyRequestId, "pending");
-        }
-      }
-
-      return true;
-    }
-    return false;
+    return result.changes > 0;
   }
 
   // Commit a policy (after approval threshold is met)

@@ -900,8 +900,9 @@ export async function registerRoutes(
           return;
         }
 
-        if (policy.status !== "pending") {
-          res.status(400).json({ error: "Policy is not pending" });
+        // Only reject if policy is committed or cancelled - pending/approved can accept new votes
+        if (policy.status === "committed" || policy.status === "cancelled") {
+          res.status(400).json({ error: `Policy is ${policy.status}` });
           return;
         }
 
@@ -955,8 +956,9 @@ export async function registerRoutes(
           return;
         }
 
-        if (policy.status !== "pending") {
-          res.status(400).json({ error: "Policy is not pending" });
+        // Only reject if policy is committed or cancelled
+        if (policy.status === "committed" || policy.status === "cancelled") {
+          res.status(400).json({ error: `Policy is ${policy.status}` });
           return;
         }
 
@@ -1067,6 +1069,7 @@ export async function registerRoutes(
   );
 
   // POST /api/admin/ssh-policies/pending/:id/revoke - Revoke user's decision on a policy
+  // Removes approval signature from PolicySignRequest if the revoked decision was an approval
   app.post(
     "/api/admin/ssh-policies/pending/:id/revoke",
     authenticate,
@@ -1077,13 +1080,54 @@ export async function registerRoutes(
         const userVuid = req.tokenPayload?.vuid || req.user?.id || "unknown";
         const userEmail = req.user?.email || "unknown";
 
-        const success = await pendingPolicyStorage.revokeDecision(id, userVuid, userEmail);
+        // First check if the user's decision was an approval (1) or rejection (0)
+        const decision = await pendingPolicyStorage.getUserDecision(id, userVuid);
+        if (decision === null) {
+          res.status(400).json({ error: "No decision found to revoke" });
+          return;
+        }
+
+        // If it was an approval, we need to remove the approval from the PolicySignRequest
+        if (decision === 1) {
+          const policy = await pendingPolicyStorage.getPendingPolicy(id);
+          if (policy) {
+            try {
+              const request = PolicySignRequest.decode(base64ToBytes(policy.policyRequestData));
+              const removalSuccess = request.removeApproval(userVuid);
+
+              if (!removalSuccess) {
+                log(`Warning: Could not remove approval from request for ${id}, user ${userVuid}`);
+                // Continue anyway - the database decision will still be removed
+              } else {
+                // Update the stored request with approval removed
+                const updatedRequestData = bytesToBase64(request.encode());
+                await pendingPolicyStorage.updatePolicyRequest(id, updatedRequestData);
+                log(`Removed approval from PolicySignRequest for ${id}`);
+              }
+            } catch (decodeError) {
+              log(`Warning: Could not decode policy request for approval removal: ${decodeError}`);
+              // Continue anyway - the database decision will still be removed
+            }
+          }
+        }
+
+        const success = await pendingPolicyStorage.revokeDecision(id, userVuid);
 
         if (success) {
+          // After revoking, check if policy should go back to "pending" status
+          const updatedPolicy = await pendingPolicyStorage.getPendingPolicy(id);
+          if (updatedPolicy && updatedPolicy.status === "approved") {
+            // If approval count dropped below threshold, set back to pending
+            const approvalCount = updatedPolicy.approvalCount || 0;
+            if (approvalCount < updatedPolicy.threshold) {
+              await pendingPolicyStorage.updateStatus(id, "pending");
+              log(`SSH policy ${id} status changed back to pending (approvals: ${approvalCount}/${updatedPolicy.threshold})`);
+            }
+          }
           log(`SSH policy ${id} decision revoked by ${userEmail}`);
           res.json({ message: "Decision revoked successfully" });
         } else {
-          res.status(400).json({ error: "No decision found to revoke" });
+          res.status(400).json({ error: "Failed to revoke decision" });
         }
       } catch (error) {
         log(`Failed to revoke decision: ${error}`);
