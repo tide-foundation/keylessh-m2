@@ -147,7 +147,7 @@ export async function compileForsetiContract(
 
 /**
  * Creates a PolicySignRequest for SSH signing with automatic contract compilation.
- * Compiles the contract first to get the correct contractId from the forseti-compile tool.
+ * Compiles the contract first to get the correct contractId from Ork's API.
  *
  * This ensures the contractId always matches what Ork will compute.
  */
@@ -180,9 +180,11 @@ export async function createSshPolicyRequest(
   const policyBytes = policy.toBytes();
 
   // Create contract transport
+  // Structure: forsetiData[1] = innerPayload = [source, entryType]
   const contractTypeBytes = new TextEncoder().encode("forseti");
   const sourceCodeBytes = new TextEncoder().encode(SSH_FORSETI_CONTRACT);
-  const innerPayload = TideMemory.CreateFromArray([sourceCodeBytes]);
+  const entryTypeBytes = new TextEncoder().encode("SshPolicy");
+  const innerPayload = TideMemory.CreateFromArray([sourceCodeBytes, entryTypeBytes]);
   const forsetiData = TideMemory.CreateFromArray([new Uint8Array(0), innerPayload]);
   const contractTransport = TideMemory.CreateFromArray([contractTypeBytes, forsetiData]);
 
@@ -195,7 +197,7 @@ export async function createSshPolicyRequest(
 
 /**
  * Creates a PolicySignRequest with custom contract code and automatic compilation.
- * Compiles the contract first to get the correct contractId from the forseti-compile tool.
+ * Compiles the contract first to get the correct contractId from Ork's API.
  *
  * Use this when creating policies from templates with custom contract logic.
  */
@@ -215,6 +217,9 @@ export async function createSshPolicyRequestWithCode(
   if (!validated) {
     throw new Error("Contract validation failed - code may contain forbidden operations");
   }
+
+  // Detect entry type from custom code
+  const entryType = detectEntryType(config.contractCode) || "SshPolicy";
 
   // Create policy request with the compiled contractId
   const policyParams = new Map<string, any>();
@@ -236,9 +241,11 @@ export async function createSshPolicyRequestWithCode(
   const policyBytes = policy.toBytes();
 
   // Create contract transport with custom code
+  // Structure: forsetiData[1] = innerPayload = [source, entryType]
   const contractTypeBytes = new TextEncoder().encode("forseti");
   const sourceCodeBytes = new TextEncoder().encode(config.contractCode);
-  const innerPayload = TideMemory.CreateFromArray([sourceCodeBytes]);
+  const entryTypeBytes = new TextEncoder().encode(entryType);
+  const innerPayload = TideMemory.CreateFromArray([sourceCodeBytes, entryTypeBytes]);
   const forsetiData = TideMemory.CreateFromArray([new Uint8Array(0), innerPayload]);
   const contractTransport = TideMemory.CreateFromArray([contractTypeBytes, forsetiData]);
 

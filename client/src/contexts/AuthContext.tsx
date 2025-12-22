@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import { TideCloakContextProvider, useTideCloak } from "@tidecloak/react";
 import { IAMService } from "@tidecloak/js";
 import type { OIDCUser, UserRole, AuthState } from "@shared/schema";
@@ -53,51 +53,78 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
     isLoading: true,
   });
   const [vuid, setVuid] = useState<string>("");
+  const [initError, setInitError] = useState<Error | null>(null);
+  const hasSynced = useRef(false);
 
-  const syncFromTidecloak = useCallback(() => {
-    if (tidecloak.isInitializing) return;
-
-    if (tidecloak.authenticated) {
-      const user: OIDCUser = {
-        id: tidecloak.getValueFromIdToken("sub") || "",
-        username:
-          tidecloak.getValueFromIdToken("preferred_username") ||
-          tidecloak.getValueFromIdToken("name") ||
-          "",
-        email: tidecloak.getValueFromIdToken("email") || "",
-        role: tidecloak.hasClientRole("tide-realm-admin", "realm-management") ? "admin" : "user",
-        allowedServers: (tidecloak.getValueFromIdToken("allowed_servers") as string[]) || [],
-      };
-
-      if (tidecloak.token) {
-        localStorage.setItem("access_token", tidecloak.token);
-      }
-
-      const tokenVuid = tidecloak.getValueFromIdToken("vuid");
-      setVuid(tokenVuid || "");
-
-      setState({
-        user,
-        accessToken: tidecloak.token || null,
-        isAuthenticated: true,
-        isLoading: false,
-      });
+  // Sync auth state from TideCloak - only runs once after initialization
+  useEffect(() => {
+    if (tidecloak.isInitializing) {
       return;
     }
 
-    localStorage.removeItem("access_token");
-    setVuid("");
-    setState({
-      user: null,
-      accessToken: null,
-      isAuthenticated: false,
-      isLoading: false,
-    });
-  }, [tidecloak]);
+    // Only sync once after initialization
+    if (hasSynced.current) {
+      return;
+    }
+    hasSynced.current = true;
 
-  useEffect(() => {
-    syncFromTidecloak();
-  }, [syncFromTidecloak]);
+    // Signal that we've completed initialization (for global timeout)
+    window.__KEYLESSH_READY__ = true;
+
+    try {
+      if (tidecloak.authenticated) {
+        const user: OIDCUser = {
+          id: tidecloak.getValueFromIdToken("sub") || "",
+          username:
+            tidecloak.getValueFromIdToken("preferred_username") ||
+            tidecloak.getValueFromIdToken("name") ||
+            "",
+          email: tidecloak.getValueFromIdToken("email") || "",
+          role: tidecloak.hasClientRole("tide-realm-admin", "realm-management") ? "admin" : "user",
+          allowedServers: (tidecloak.getValueFromIdToken("allowed_servers") as string[]) || [],
+        };
+
+        if (tidecloak.token) {
+          localStorage.setItem("access_token", tidecloak.token);
+        }
+
+        const tokenVuid = tidecloak.getValueFromIdToken("vuid") || "";
+        setVuid(tokenVuid);
+
+        setState({
+          user,
+          accessToken: tidecloak.token || null,
+          isAuthenticated: true,
+          isLoading: false,
+        });
+        return;
+      }
+
+      localStorage.removeItem("access_token");
+      setVuid("");
+      setState({
+        user: null,
+        accessToken: null,
+        isAuthenticated: false,
+        isLoading: false,
+      });
+    } catch (err) {
+      console.error("Auth sync error:", err);
+      setInitError(err instanceof Error ? err : new Error(String(err)));
+      localStorage.removeItem("access_token");
+      setState({
+        user: null,
+        accessToken: null,
+        isAuthenticated: false,
+        isLoading: false,
+      });
+    }
+  }, [tidecloak.isInitializing, tidecloak.authenticated, tidecloak.token, tidecloak]);
+
+  // If there was an init error, throw it to be caught by ErrorBoundary
+  if (initError) {
+    throw initError;
+  }
 
   const login = useCallback(() => {
     tidecloak.login();
@@ -120,13 +147,14 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
       }
 
       await updater(0);
-      syncFromTidecloak();
+      // Reload to pick up new token
+      window.location.reload();
       return true;
     } catch (err) {
       console.error("Failed to refresh token:", err);
       return false;
     }
-  }, [tidecloak, syncFromTidecloak]);
+  }, [tidecloak]);
 
   const getToken = useCallback(() => {
     return tidecloak.token || null;
@@ -262,12 +290,34 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
   );
 }
 
-export function AuthProvider({ children }: { children: ReactNode }) {
+function AuthProviderWithTimeout({ children }: { children: ReactNode }) {
   return (
     <TideCloakContextProvider config={tidecloakConfig}>
       <TideCloakAuthBridge>{children}</TideCloakAuthBridge>
     </TideCloakContextProvider>
   );
+}
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  // Clear any corrupted localStorage on mount if it looks invalid
+  useEffect(() => {
+    try {
+      const token = localStorage.getItem("access_token");
+      if (token) {
+        // Basic JWT format check
+        const parts = token.split(".");
+        if (parts.length !== 3) {
+          console.warn("Invalid token format in localStorage, clearing");
+          localStorage.removeItem("access_token");
+        }
+      }
+    } catch (e) {
+      console.error("Error checking localStorage:", e);
+      localStorage.removeItem("access_token");
+    }
+  }, []);
+
+  return <AuthProviderWithTimeout>{children}</AuthProviderWithTimeout>;
 }
 
 export function useAuth() {

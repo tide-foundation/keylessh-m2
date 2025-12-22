@@ -1,4 +1,4 @@
-import { type Express } from "express";
+import express, { type Express } from "express";
 import { createServer as createViteServer, createLogger } from "vite";
 import { type Server } from "http";
 import viteConfig from "../vite.config";
@@ -30,6 +30,10 @@ export async function setupVite(server: Server, app: Express) {
   });
 
   app.use(vite.middlewares);
+
+  // Serve static files from public folder (Vite doesn't do this in middleware mode)
+  const publicPath = path.resolve(import.meta.dirname, "..", "client", "public");
+  app.use(express.static(publicPath));
 
   app.use("*", async (req, res, next) => {
     const url = req.originalUrl;

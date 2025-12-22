@@ -1,47 +1,68 @@
 import type { Express } from "express";
 import type { Server } from "http";
 import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, type ApprovalType } from "./storage";
-import { log } from "./logger";
-// spawn import removed - now calling Ork's compile endpoint directly
+import { log, logForseti, logError } from "./logger";
 import { terminateSession } from "./wsBridge";
 import type { ServerWithAccess, ActiveSession, ServerStatus, Server as ServerType } from "@shared/schema";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
-
-// Ork URL for Forseti compilation - guarantees hash matches Ork's runtime
-const ORK_URL = process.env.ORK_URL || "http://localhost:1001";
+import { getHomeOrkUrl } from "./lib/auth/tidecloakConfig";
 
 /**
- * Compiles Forseti contract source code by calling Ork's compile endpoint.
- * This guarantees the contractId matches exactly what Ork will compute at runtime,
- * since both use the same runtime environment and SDK version.
+ * Compiles Forseti contract source code using Ork's /Forseti/Compile/preview API.
+ * This guarantees the contractId matches exactly what Ork will compute at runtime.
  */
 async function compileForsetiContract(
   source: string,
   options: { validate?: boolean; entryType?: string } = {}
 ): Promise<{ success: boolean; contractId?: string; sdkVersion?: string; error?: string; validated?: boolean }> {
+  const startTime = Date.now();
+  const orkUrl = getHomeOrkUrl() || "http://localhost:1001";
+
+  logForseti("▶ Compile Start", {
+    entryType: options.entryType || "auto",
+    validate: options.validate ?? false,
+    sourceLen: source.length,
+  });
+
   try {
-    const response = await fetch(`${ORK_URL}/Forseti/Compile/preview`, {
+    const response = await fetch(`${orkUrl}/Forseti/Compile/preview`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ source }),
     });
 
+    const elapsed = Date.now() - startTime;
+
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ message: `HTTP ${response.status}` }));
-      return { success: false, error: error.message || error.error || `Ork returned ${response.status}` };
+      const errorData = await response.json().catch(() => ({ message: `HTTP ${response.status}` }));
+      const errorMsg = errorData.message || errorData.error || `Ork returned ${response.status}`;
+      logForseti("✗ Compile Failed", { error: errorMsg, elapsed: `${elapsed}ms` });
+      return { success: false, error: errorMsg };
     }
 
     const result = await response.json();
+    const contractId = result.contractId;
+    const sdkVersion = result.sdkVersion || "1.0.0";
+
+    logForseti("✓ Compile Success", {
+      contractId: contractId?.substring(0, 16) + "...",
+      sdkVersion,
+      validated: options.validate ?? false,
+      elapsed: `${elapsed}ms`,
+    });
+
     return {
       success: true,
-      contractId: result.contractId,
-      sdkVersion: result.sdkVersion,
-      validated: options.validate ?? false, // Ork's preview doesn't validate, but mark based on request
+      contractId,
+      sdkVersion,
+      validated: options.validate ?? false,
     };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return { success: false, error: `Failed to call Ork compile endpoint: ${message}` };
+  } catch (error) {
+    const elapsed = Date.now() - startTime;
+    const errorMsg = error instanceof Error ? error.message : "Unknown error";
+    logForseti("✗ Compile Failed", { error: errorMsg, elapsed: `${elapsed}ms` });
+    return { success: false, error: `Failed to call Ork compile endpoint: ${errorMsg}` };
   }
 }
 
