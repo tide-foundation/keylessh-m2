@@ -1,10 +1,11 @@
 import { Switch, Route, Redirect, useLocation } from "wouter";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { AppLayout } from "@/components/layout/AppLayout";
 import Login from "@/pages/Login";
 import AuthRedirect from "@/pages/AuthRedirect";
@@ -22,7 +23,23 @@ import NotFound from "@/pages/not-found";
 import { Loader2, Terminal } from "lucide-react";
 import type { ReactNode } from "react";
 
-function LoadingScreen() {
+function LoadingScreen({ showRetry = false }: { showRetry?: boolean }) {
+  const handleClearAndRetry = () => {
+    // Clear all auth-related state
+    localStorage.removeItem("access_token");
+    // Clear TideCloak/OIDC state
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && (key.startsWith("oidc.") || key.startsWith("kc-") || key.includes("tidecloak"))) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach(k => localStorage.removeItem(k));
+    sessionStorage.clear();
+    window.location.href = "/login";
+  };
+
   return (
     <div className="min-h-screen bg-background flex items-center justify-center">
       <div className="flex flex-col items-center gap-4">
@@ -31,6 +48,14 @@ function LoadingScreen() {
         </div>
         <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
         <p className="text-sm text-muted-foreground">Loading KeyleSSH...</p>
+        {showRetry && (
+          <button
+            onClick={handleClearAndRetry}
+            className="mt-4 px-4 py-2 text-sm text-muted-foreground hover:text-foreground border border-border rounded-md hover:bg-accent transition-colors"
+          >
+            Taking too long? Click to restart
+          </button>
+        )}
       </div>
     </div>
   );
@@ -38,7 +63,8 @@ function LoadingScreen() {
 
 function ProtectedRoute({ children }: { children: ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
-  const [location, setLocation] = useLocation();
+  const [, setLocation] = useLocation();
+  const [showRetry, setShowRetry] = useState(false);
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -46,8 +72,17 @@ function ProtectedRoute({ children }: { children: ReactNode }) {
     }
   }, [isLoading, isAuthenticated, setLocation]);
 
+  // Show retry button after 5 seconds of loading
+  useEffect(() => {
+    if (isLoading) {
+      const timeout = setTimeout(() => setShowRetry(true), 5000);
+      return () => clearTimeout(timeout);
+    }
+    setShowRetry(false);
+  }, [isLoading]);
+
   if (isLoading) {
-    return <LoadingScreen />;
+    return <LoadingScreen showRetry={showRetry} />;
   }
 
   if (!isAuthenticated) {
@@ -113,7 +148,7 @@ function Router() {
       <Route path="/">
         <Redirect to="/app" />
       </Route>
-      
+
       <Route path="/login" component={Login} />
       <Route path="/auth/redirect" component={AuthRedirect} />
       
@@ -182,14 +217,16 @@ function Router() {
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <AuthProvider>
-          <Toaster />
-          <Router />
-        </AuthProvider>
-      </TooltipProvider>
-    </QueryClientProvider>
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          <AuthProvider>
+            <Toaster />
+            <Router />
+          </AuthProvider>
+        </TooltipProvider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   );
 }
 

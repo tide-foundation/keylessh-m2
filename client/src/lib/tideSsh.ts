@@ -22,10 +22,15 @@ function decodeBase64Url(input: string): string {
 }
 
 function decodeJwtPayload(token: string): any {
-  const parts = token.split(".");
-  if (parts.length < 2) throw new Error("Invalid JWT");
-  const json = decodeBase64Url(parts[1]);
-  return JSON.parse(json);
+  try {
+    const parts = token.split(".");
+    if (parts.length < 2) throw new Error("Invalid JWT format");
+    const json = decodeBase64Url(parts[1]);
+    return JSON.parse(json);
+  } catch (err) {
+    console.error("Failed to decode JWT payload:", err);
+    throw new Error("Invalid or corrupted JWT token");
+  }
 }
 
 function getTideCloakInstance(): any {
