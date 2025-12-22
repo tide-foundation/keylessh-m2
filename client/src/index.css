@@ -49,8 +49,13 @@
   --iso-shadow: 0 10px 30px hsl(0 0% 0% / 0.08);
   --iso-shadow-tight: 0 6px 18px hsl(0 0% 0% / 0.07);
   --iso-edge: hsl(0 0% 0% / 0.08);
-  --iso-highlight: hsl(0 0% 100% / 0.8);
+  /* Subtle corner sheen; keep low to avoid washing out text */
+  --iso-highlight: hsl(0 0% 100% / 0.14);
   --iso-grid: hsl(0 0% 0% / 0.05);
+  /* Overlays / terminal */
+  --overlay: hsl(0 0% 0% / 0.38);
+  --terminal-bg: #0b0c0f;
+  --terminal-border: hsl(0 0% 100% / 0.10);
   --font-sans: 'Inter', system-ui, sans-serif;
   --font-serif: Georgia, serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
@@ -140,6 +145,9 @@
   --iso-edge: hsl(0 0% 100% / 0.08);
   --iso-highlight: hsl(0 0% 100% / 0.06);
   --iso-grid: hsl(0 0% 100% / 0.06);
+  --overlay: hsl(0 0% 0% / 0.60);
+  --terminal-bg: #07080a;
+  --terminal-border: hsl(0 0% 100% / 0.12);
   --shadow-2xs: 0px 2px 0px 0px hsl(0 0% 0% / 0.00);
   --shadow-xs: 0px 2px 0px 0px hsl(0 0% 0% / 0.00);
   --shadow-sm: 0px 2px 0px 0px hsl(0 0% 0% / 0.00), 0px 1px 2px -1px hsl(0 0% 0% / 0.00);
@@ -376,5 +384,12 @@
   .terminal-surface .xterm-viewport,
   .terminal-surface .xterm-screen {
     border-radius: inherit;
+  }
+
+  /* Terminal container styling (monochrome, consistent across pages) */
+  .terminal-surface {
+    background: var(--terminal-bg);
+    border: 1px solid var(--terminal-border);
+    box-shadow: var(--iso-shadow-tight);
   }
 }

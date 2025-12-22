@@ -11,6 +11,7 @@ import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { useCallback } from "react";
 import { api } from "@/lib/api";
 import type { LicenseInfo } from "@/lib/api";
+import { RefreshButton } from "@/components/RefreshButton";
 
 function StatCard({
   title,
@@ -175,15 +176,13 @@ export default function AdminDashboard() {
             System overview and management
           </p>
         </div>
-        <Button
-          variant="outline"
+        <RefreshButton
           onClick={() => void refreshNow()}
-          disabled={isFetching}
+          isRefreshing={isFetching}
+          secondsRemaining={secondsRemaining}
           data-testid="refresh-admin-dashboard"
           title="Refresh now"
-        >
-          Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
-        </Button>
+        />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

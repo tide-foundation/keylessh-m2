@@ -47,6 +47,7 @@ import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { api, type PolicyTemplate, type TemplateParameter } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
+import { RefreshButton } from "@/components/RefreshButton";
 import { FileCode, Pencil, Plus, Trash2, Search, Code, Variable } from "lucide-react";
 
 const DEFAULT_CS_CODE = `using Ork.Forseti.Sdk;
@@ -250,14 +251,12 @@ export default function AdminPolicyTemplates() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
+          <RefreshButton
             onClick={() => void refreshNow()}
-            disabled={isFetching}
+            isRefreshing={isFetching}
+            secondsRemaining={secondsRemaining}
             title="Refresh now"
-          >
-            Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
-          </Button>
+          />
           {canEdit && (
             <Button onClick={handleCreate}>
               <Plus className="h-4 w-4 mr-2" />

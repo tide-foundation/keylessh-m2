@@ -376,8 +376,8 @@ export function TerminalSession({
         </div>
       </div>
 
-      <div className="terminal-surface flex-1 min-h-[420px] w-full rounded-xl border border-white/10 bg-[#0c0c0c] overflow-hidden relative">
-        <div ref={terminalRef} className="h-full w-full" data-testid="terminal-container" />
+      <div className="terminal-surface flex-1 min-h-[420px] w-full rounded-xl overflow-hidden relative">
+        <div ref={terminalRef} className="absolute inset-3" data-testid="terminal-container" />
 
         {status !== "connected" && (
           <div className="absolute inset-0 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">

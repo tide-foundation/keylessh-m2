@@ -21,6 +21,7 @@ import { api, type TidecloakEvent, type SshPolicyLog } from "@/lib/api";
 import { AdminSessionHistoryContent } from "@/pages/AdminSessions";
 import { queryClient } from "@/lib/queryClient";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
+import { RefreshButton } from "@/components/RefreshButton";
 
 type LogsTab = "access" | "sessions" | "policies";
 
@@ -265,15 +266,13 @@ export default function AdminLogs() {
             Review access changes and SSH session activity
           </p>
         </div>
-        <Button
-          variant="outline"
+        <RefreshButton
           onClick={() => void refreshNow()}
-          disabled={isFetching}
+          isRefreshing={isFetching}
+          secondsRemaining={secondsRemaining}
           data-testid="refresh-logs"
           title="Refresh now"
-        >
-          Refresh{secondsRemaining !== null ? ` (auto in ${secondsRemaining}s)` : ""}
-        </Button>
+        />
       </div>
 
       <Tabs value={tabFromUrl} onValueChange={handleTabChange}>
