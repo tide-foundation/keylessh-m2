@@ -86,7 +86,7 @@ function ServerCard({ server }: { server: ServerWithAccess }) {
           )}
         </div>
 
-        <Link href={`/app/console/${server.id}?user=${selectedUser}`}>
+        <Link href={`/app/console?serverId=${encodeURIComponent(server.id)}&user=${encodeURIComponent(selectedUser)}`}>
           <Button
             className="w-full gap-2"
             disabled={!server.enabled || server.status === "offline" || !selectedUser}
@@ -153,7 +153,7 @@ function SessionItem({ session }: { session: ActiveSession }) {
             Active
           </Badge>
         </div>
-        <Link href={`/app/console/${session.serverId}?user=${encodeURIComponent(session.sshUser)}`}>
+        <Link href={`/app/console?serverId=${encodeURIComponent(session.serverId)}&user=${encodeURIComponent(session.sshUser)}`}>
           <Button size="sm" variant="ghost" data-testid={`reconnect-session-${session.id}`}>
             Reconnect
           </Button>
@@ -291,7 +291,7 @@ export default function Dashboard() {
                     <div className="text-xs text-muted-foreground">
                       {session.endedAt ? new Date(session.endedAt).toLocaleDateString() : ""}
                     </div>
-                    <Link href={`/app/console/${session.serverId}?user=${encodeURIComponent(session.sshUser)}`}>
+                    <Link href={`/app/console?serverId=${encodeURIComponent(session.serverId)}&user=${encodeURIComponent(session.sshUser)}`}>
                       <Button size="sm" variant="ghost" data-testid={`reconnect-recent-session-${session.id}`}>
                         Reconnect
                       </Button>
