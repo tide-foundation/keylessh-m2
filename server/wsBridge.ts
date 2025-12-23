@@ -2,7 +2,6 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createConnection, Socket } from "net";
 import type { Server, IncomingMessage } from "http";
 import type { Duplex } from "stream";
-import { createHmac } from "crypto";
 import { log } from "./logger";
 import { storage, subscriptionStorage } from "./storage";
 import { verifyTideCloakToken, type TokenPayload } from "./lib/auth/tideJWT";
@@ -12,7 +11,6 @@ import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
 
 // External bridge configuration
 const BRIDGE_URL = process.env.BRIDGE_URL; // e.g., wss://keylessh-tcp-bridge.azurecontainerapps.io
-const BRIDGE_SECRET = process.env.BRIDGE_SECRET || "change-me-in-production";
 const USE_EXTERNAL_BRIDGE = !!BRIDGE_URL;
 
 interface ConnectionInfo {
@@ -77,29 +75,6 @@ function cleanupConnection(ws: WebSocket, reason?: string) {
   if (reason) {
     log(`Cleaned up session ${conn.sessionId}: ${reason}`);
   }
-}
-
-// Create signed session token for external bridge
-function createSessionToken(
-  host: string,
-  port: number,
-  serverId: string,
-  userId: string
-): string {
-  const payload = {
-    host,
-    port,
-    serverId,
-    userId,
-    exp: Date.now() + 60000, // 1 minute expiry
-  };
-
-  const payloadStr = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const signature = createHmac("sha256", BRIDGE_SECRET)
-    .update(payloadStr)
-    .digest("base64url");
-
-  return `${payloadStr}.${signature}`;
 }
 
 type JWTPayload = TokenPayload;
@@ -257,9 +232,14 @@ export function setupWSBridge(httpServer: Server): WebSocketServer {
 
       if (USE_EXTERNAL_BRIDGE) {
         // === EXTERNAL BRIDGE MODE ===
-        // Create session token and connect to external bridge
-        const sessionToken = createSessionToken(host, port, serverId, userId);
-        const bridgeWsUrl = `${BRIDGE_URL}?token=${sessionToken}`;
+        // Forward original JWT to external bridge (bridge verifies against JWKS)
+        const bridgeParams = new URLSearchParams({
+          token: token,
+          host: host,
+          port: port.toString(),
+          serverId: serverId,
+        });
+        const bridgeWsUrl = `${BRIDGE_URL}?${bridgeParams.toString()}`;
 
         log(`Connecting to external bridge: ${BRIDGE_URL}`);
 
