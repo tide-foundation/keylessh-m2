@@ -59,9 +59,8 @@ DATABASE_URL=./data/keylessh.db
 COMPILER_IMAGE=ghcr.io/tide-foundation/forseti-compiler:latest  # Published image (default)
 COMPILER_CONTAINER=Ork-1  # Or use local ORK container
 
-# Optional external TCP bridge
+# Optional external TCP bridge (uses same tidecloak.json for JWT verification)
 BRIDGE_URL=wss://<your-bridge-fqdn>
-BRIDGE_SECRET=<shared-secret>
 
 # Debug logging
 DEBUG=true
@@ -83,37 +82,32 @@ Put the main server behind TLS (nginx, Caddy, or a cloud load balancer). WebSock
 
 ## TCP Bridge on Azure Container Apps (Optional, Recommended)
 
-The external bridge is stateless and can scale independently. The main server still validates JWTs and then forwards encrypted bytes to the bridge using a short-lived HMAC token.
+The external bridge is stateless and can scale independently. Both the main server and the bridge independently verify JWTs against the same TideCloak JWKS - no shared secrets required.
 
 ### Prerequisites
 
 - Azure CLI installed (`az`)
 - Logged in (`az login`)
+- `data/tidecloak.json` with your TideCloak client adapter config
 
 ### Deploy
 
 ```bash
 cd tcp-bridge
 
-# Choose or generate the shared secret
-export BRIDGE_SECRET=$(openssl rand -base64 32)
-
 # Deploy (creates RG + ACR + Container Apps env + app)
+# The script reads tidecloak.json and passes it to the container
 ./azure/deploy.sh
 ```
 
-The script prints:
-
-- Bridge URL: `wss://...`
-- `BRIDGE_SECRET`
+The script prints the Bridge URL: `wss://...`
 
 ### Configure the main server
 
-Set these env vars on the main server:
+Set this env var on the main server:
 
 ```env
 BRIDGE_URL=wss://<bridge-fqdn>
-BRIDGE_SECRET=<same secret used for tcp-bridge>
 ```
 
 ### Scaling
@@ -129,7 +123,7 @@ Tune these for your workload.
 ## Production Notes / Caveats
 
 - The current storage is SQLite. If you run multiple main server instances, you'll need shared storage and coordination (not currently supported out of the box).
-- The external bridge does **not** validate JWTs; it only validates the HMAC token from the main server.
+- Both the main server and external bridge independently validate JWTs against the same TideCloak JWKS.
 - Ensure `/ws/tcp` is reachable from browsers; if you change ports/origins, update your proxy rules accordingly.
 
 ## ORK Network / Policy:1 Requirements

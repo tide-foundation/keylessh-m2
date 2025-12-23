@@ -9,10 +9,11 @@ Browser (WebSocket) → TCP Bridge → SSH Server (TCP)
 ```
 
 The bridge:
-1. Accepts WebSocket connections with a signed session token
-2. Opens TCP socket to the specified SSH server
-3. Pipes bytes bidirectionally
-4. Closes both connections when either side disconnects
+1. Accepts WebSocket connections with a JWT token
+2. Verifies the JWT against TideCloak JWKS
+3. Opens TCP socket to the specified SSH server
+4. Pipes bytes bidirectionally
+5. Closes both connections when either side disconnects
 
 ## Architecture
 
@@ -31,17 +32,17 @@ The bridge:
 
 ## Security
 
-- **Session tokens** are signed by the main server using HMAC-SHA256
-- Tokens contain: `host`, `port`, `serverId`, `userId`, `exp`
-- Tokens expire after 1 minute (only used for initial connection)
-- The bridge trusts the main server's signature
+- **JWT tokens** are verified against TideCloak JWKS (no shared secrets)
+- Token verification checks: signature, issuer, expiry, and authorized party (azp)
+- Connection parameters (host, port, serverId) are passed as query parameters
+- The bridge independently validates tokens using the same JWKS as the main server
 
 ## Environment Variables
 
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `PORT` | HTTP/WebSocket port | No (default: 8080) |
-| `BRIDGE_SECRET` | Shared secret with main server | Yes |
+| `TIDECLOAK_CONFIG_PATH` | Path to tidecloak.json config | No (default: ./data/tidecloak.json) |
 
 ## Local Development
 
@@ -50,13 +51,12 @@ npm install
 npm run dev
 ```
 
+Make sure `data/tidecloak.json` exists with your TideCloak client adapter config (same file as main server).
+
 ## Deploy to Azure
 
 ```bash
-# Set the shared secret
-export BRIDGE_SECRET=$(openssl rand -base64 32)
-
-# Deploy
+# Deploy (ensure tidecloak.json is available to the container)
 ./azure/deploy.sh
 ```
 
@@ -72,7 +72,7 @@ curl http://localhost:8080/health
 ### Connection
 
 ```
-WebSocket URL: wss://bridge-host/?token=<session-token>
+WebSocket URL: wss://bridge-host/?token=<jwt>&host=<ssh-host>&port=<ssh-port>&serverId=<server-id>
 ```
 
 ### Messages

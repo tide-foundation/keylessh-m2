@@ -74,9 +74,10 @@ SSH username access is token-based (applies to everyone, including admins).
   - `/ws/tcp` WebSocket endpoint
   - Validates: JWT, session ownership, serverId→host/port mapping, sshUser allowlist
   - Local mode: opens TCP sockets directly
-  - External mode: forwards to `tcp-bridge/` using a short-lived HMAC token (`BRIDGE_URL`, `BRIDGE_SECRET`)
+  - External mode: forwards JWT to `tcp-bridge/` with connection params (`BRIDGE_URL`)
 - `tcp-bridge/src/index.ts`
-  - Does not validate JWTs; only validates HMAC token from main server and forwards raw bytes.
+  - Independently validates JWTs against TideCloak JWKS (same `tidecloak.json` config)
+  - Forwards raw bytes between WebSocket and TCP socket
 
 ### Browser SSH + Terminal (Client)
 

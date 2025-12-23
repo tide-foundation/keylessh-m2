@@ -7,7 +7,9 @@ LOCATION="eastus"
 ENVIRONMENT_NAME="keylessh-env"
 ACR_NAME="keylesshacr"
 APP_NAME="keylessh-tcp-bridge"
-BRIDGE_SECRET="${BRIDGE_SECRET:-$(openssl rand -base64 32)}"
+
+# Path to tidecloak.json config (required for JWT verification)
+TIDECLOAK_CONFIG="${TIDECLOAK_CONFIG:-../../data/tidecloak.json}"
 
 echo "=== KeyleSSH TCP Bridge Deployment ==="
 echo "Resource Group: $RESOURCE_GROUP"
@@ -20,6 +22,16 @@ if ! az account show &> /dev/null; then
     echo "Please login to Azure first: az login"
     exit 1
 fi
+
+# Check if tidecloak.json exists
+if [ ! -f "$TIDECLOAK_CONFIG" ]; then
+    echo "Error: TideCloak config not found at $TIDECLOAK_CONFIG"
+    echo "Please ensure tidecloak.json exists with JWKS configuration"
+    exit 1
+fi
+
+# Read and base64 encode the config for storage as a secret
+TIDECLOAK_CONFIG_B64=$(base64 -w0 "$TIDECLOAK_CONFIG")
 
 # Create resource group if not exists
 echo "Creating resource group..."
@@ -71,8 +83,8 @@ az containerapp create \
     --max-replicas 100 \
     --cpu 0.25 \
     --memory 0.5Gi \
-    --secrets "bridge-secret=$BRIDGE_SECRET" \
-    --env-vars "BRIDGE_SECRET=secretref:bridge-secret" \
+    --secrets "tidecloak-config=$TIDECLOAK_CONFIG_B64" \
+    --env-vars "TIDECLOAK_CONFIG_B64=secretref:tidecloak-config" \
     --scale-rule-name http-connections \
     --scale-rule-type http \
     --scale-rule-http-concurrency 10
@@ -88,8 +100,7 @@ echo "=== Deployment Complete ==="
 echo ""
 echo "TCP Bridge URL: https://$BRIDGE_URL"
 echo ""
-echo "Add these to your main server environment:"
+echo "Add this to your main server environment:"
 echo "  BRIDGE_URL=wss://$BRIDGE_URL"
-echo "  BRIDGE_SECRET=$BRIDGE_SECRET"
 echo ""
 echo "The bridge will scale from 0 to 100 instances based on SSH connections."

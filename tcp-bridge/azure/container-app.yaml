@@ -18,8 +18,8 @@ properties:
 
     # Secrets
     secrets:
-      - name: bridge-secret
-        value: <YOUR_BRIDGE_SECRET>
+      - name: tidecloak-config
+        value: <BASE64_ENCODED_TIDECLOAK_JSON>
 
   template:
     containers:
@@ -29,8 +29,8 @@ properties:
           cpu: 0.25
           memory: 0.5Gi
         env:
-          - name: BRIDGE_SECRET
-            secretRef: bridge-secret
+          - name: TIDECLOAK_CONFIG_B64
+            secretRef: tidecloak-config
           - name: PORT
             value: "8080"
         probes:

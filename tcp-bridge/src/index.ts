@@ -1,51 +1,97 @@
 import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { Socket, connect } from "net";
-import { createHmac } from "crypto";
+import { jwtVerify, createLocalJWKSet, JWTPayload } from "jose";
+import { readFileSync } from "fs";
+import { join } from "path";
 
 const PORT = parseInt(process.env.PORT || "8080");
-const BRIDGE_SECRET = process.env.BRIDGE_SECRET || "change-me-in-production";
+const CONFIG_PATH = process.env.TIDECLOAK_CONFIG_PATH || join(process.cwd(), "data", "tidecloak.json");
+const CONFIG_B64 = process.env.TIDECLOAK_CONFIG_B64; // Base64-encoded config (for Azure deployment)
 
-// Session token structure (signed by main server)
-interface SessionToken {
-  host: string;
-  port: number;
-  serverId: string;
-  userId: string;
-  exp: number;
+// Load TideCloak config with JWKS
+interface TidecloakConfig {
+  realm: string;
+  "auth-server-url": string;
+  resource: string;
+  jwk: {
+    keys: Array<{
+      kid: string;
+      kty: string;
+      alg: string;
+      use: string;
+      crv: string;
+      x: string;
+    }>;
+  };
 }
 
-// Verify and decode session token
-function verifySessionToken(token: string): SessionToken | null {
+let tcConfig: TidecloakConfig | null = null;
+let JWKS: ReturnType<typeof createLocalJWKSet> | null = null;
+
+function loadConfig(): boolean {
   try {
-    const [payload, signature] = token.split(".");
-    if (!payload || !signature) return null;
+    let configData: string;
 
-    // Verify signature
-    const expectedSig = createHmac("sha256", BRIDGE_SECRET)
-      .update(payload)
-      .digest("base64url");
-
-    if (signature !== expectedSig) {
-      console.log("[Bridge] Invalid token signature");
-      return null;
+    // Try base64-encoded env var first (for Azure deployment)
+    if (CONFIG_B64) {
+      configData = Buffer.from(CONFIG_B64, "base64").toString("utf-8");
+      console.log("[Bridge] Loading JWKS from TIDECLOAK_CONFIG_B64 env var");
+    } else {
+      // Fall back to file path
+      configData = readFileSync(CONFIG_PATH, "utf-8");
+      console.log(`[Bridge] Loading JWKS from ${CONFIG_PATH}`);
     }
 
-    const decoded = JSON.parse(
-      Buffer.from(payload, "base64url").toString("utf-8")
-    );
+    tcConfig = JSON.parse(configData) as TidecloakConfig;
 
-    // Check expiration
-    if (decoded.exp < Date.now()) {
-      console.log("[Bridge] Token expired");
-      return null;
+    if (!tcConfig.jwk || !tcConfig.jwk.keys || tcConfig.jwk.keys.length === 0) {
+      console.error("[Bridge] No JWKS keys found in config");
+      return false;
     }
 
-    return decoded as SessionToken;
+    JWKS = createLocalJWKSet(tcConfig.jwk);
+    console.log("[Bridge] JWKS loaded successfully");
+    return true;
   } catch (err) {
-    console.log("[Bridge] Token decode error:", err);
+    console.error("[Bridge] Failed to load config:", err);
+    return false;
+  }
+}
+
+// Verify JWT against JWKS
+async function verifyToken(token: string): Promise<JWTPayload | null> {
+  if (!JWKS || !tcConfig) {
+    console.error("[Bridge] JWKS not initialized");
     return null;
   }
+
+  try {
+    const issuer = tcConfig["auth-server-url"].endsWith("/")
+      ? `${tcConfig["auth-server-url"]}realms/${tcConfig.realm}`
+      : `${tcConfig["auth-server-url"]}/realms/${tcConfig.realm}`;
+
+    const { payload } = await jwtVerify(token, JWKS, {
+      issuer,
+    });
+
+    // Check azp (authorized party) matches our resource
+    if (payload.azp !== tcConfig.resource) {
+      console.log(`[Bridge] AZP mismatch: expected ${tcConfig.resource}, got ${payload.azp}`);
+      return null;
+    }
+
+    return payload;
+  } catch (err) {
+    console.log("[Bridge] JWT verification failed:", err);
+    return null;
+  }
+}
+
+// Load config on startup
+if (!loadConfig()) {
+  console.error("[Bridge] Failed to load TideCloak config. Exiting.");
+  process.exit(1);
 }
 
 // Create HTTP server
@@ -67,9 +113,12 @@ let activeConnections = 0;
 // WebSocket server
 const wss = new WebSocketServer({ server });
 
-wss.on("connection", (ws: WebSocket, req) => {
+wss.on("connection", async (ws: WebSocket, req) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
   const token = url.searchParams.get("token");
+  const host = url.searchParams.get("host");
+  const port = parseInt(url.searchParams.get("port") || "22", 10);
+  const serverId = url.searchParams.get("serverId");
 
   if (!token) {
     console.log("[Bridge] No token provided");
@@ -77,29 +126,37 @@ wss.on("connection", (ws: WebSocket, req) => {
     return;
   }
 
-  // Verify session token
-  const session = verifySessionToken(token);
-  if (!session) {
+  if (!host || !serverId) {
+    console.log("[Bridge] Missing host or serverId");
+    ws.close(4000, "Missing required parameters");
+    return;
+  }
+
+  // Verify JWT
+  const payload = await verifyToken(token);
+  if (!payload) {
     ws.close(4002, "Invalid token");
     return;
   }
 
+  const userId = payload.sub || "unknown";
+
   console.log(
-    `[Bridge] New connection: ${session.userId} -> ${session.host}:${session.port}`
+    `[Bridge] New connection: ${userId} -> ${host}:${port}`
   );
   activeConnections++;
 
   // Open TCP connection to SSH server
   const tcpSocket: Socket = connect({
-    host: session.host,
-    port: session.port,
+    host,
+    port,
   });
 
   let tcpConnected = false;
 
   tcpSocket.on("connect", () => {
     tcpConnected = true;
-    console.log(`[Bridge] TCP connected to ${session.host}:${session.port}`);
+    console.log(`[Bridge] TCP connected to ${host}:${port}`);
 
     // Send connected confirmation
     ws.send(JSON.stringify({ type: "connected" }));

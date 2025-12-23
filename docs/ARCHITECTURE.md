@@ -174,9 +174,7 @@ This applies to everyone (including admins). If the token does not include the r
 KeyleSSH always requires a WebSocket→TCP bridge.
 
 - **Default (embedded):** `/ws/tcp` opens the TCP socket itself.
-- **External (optional):** set `BRIDGE_URL` and the server forwards encrypted bytes to `tcp-bridge/` using a short-lived HMAC-signed token (`BRIDGE_SECRET`).
-
-The external bridge does **not** validate JWTs; JWT validation happens in the main server before forwarding.
+- **External (optional):** set `BRIDGE_URL` and the server forwards the user's JWT to `tcp-bridge/`. Both endpoints independently verify JWTs against the same TideCloak JWKS.
 
 ## Local Testing
 
@@ -190,12 +188,14 @@ npm run dev
 ### External bridge simulation
 
 ```bash
+# Terminal 1: Start the bridge (needs data/tidecloak.json)
 cd tcp-bridge
 npm install
-BRIDGE_SECRET=test-secret npm run dev
+npm run dev
 
+# Terminal 2: Start main server with bridge URL
 cd ..
-BRIDGE_URL=ws://localhost:8080 BRIDGE_SECRET=test-secret npm run dev
+BRIDGE_URL=ws://localhost:8080 npm run dev
 ```
 
 ## TideCloak Notes

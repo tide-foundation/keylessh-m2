@@ -61,8 +61,8 @@ App: `http://localhost:3000`
 PORT=3000
 
 # Optional external TCP bridge (for scaling)
+# Bridge verifies JWTs against same tidecloak.json - no shared secret needed
 BRIDGE_URL=ws://localhost:8080
-BRIDGE_SECRET=change-me-in-production
 
 # SQLite (file path)
 DATABASE_URL=./data/keylessh.db
