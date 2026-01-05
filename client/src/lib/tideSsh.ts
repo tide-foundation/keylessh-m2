@@ -141,7 +141,7 @@ export function createTideSshSigner(): SSHSigner {
     const initializedRequestBytes = await tc.createTideRequest(tideRequest.encode());
 
     console.log(`[TideSsh] Executing sign request...`);
-    const sigs: Uint8Array[] = await tc.executeSignRequest(initializedRequestBytes);
+    const sigs: Uint8Array[] = await tc.executeSignRequest(initializedRequestBytes, true);
 
     const sig = sigs?.[0];
     if (!(sig instanceof Uint8Array)) {
@@ -227,7 +227,7 @@ export function createDynamicTideSshSigner(): SSHSigner {
     }
 
     const initializedRequestBytes = await tc.createTideRequest(tideRequest.encode());
-    const sigs: Uint8Array[] = await tc.executeSignRequest(initializedRequestBytes);
+    const sigs: Uint8Array[] = await tc.executeSignRequest(initializedRequestBytes, true);
 
     const sig = sigs?.[0];
     if (!(sig instanceof Uint8Array)) {

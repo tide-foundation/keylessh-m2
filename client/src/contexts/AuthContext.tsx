@@ -378,7 +378,7 @@ function TideCloakAuthBridge({ children }: { children: ReactNode }) {
         throw new Error("TideCloak executeSignRequest not available");
       }
 
-      return await tc.executeSignRequest(request);
+      return await tc.executeSignRequest(request, true);
     },
     []
   );
