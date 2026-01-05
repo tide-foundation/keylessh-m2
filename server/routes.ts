@@ -9,8 +9,8 @@ import type { ServerWithAccess, ActiveSession, ServerStatus, Server as ServerTyp
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
 import { getHomeOrkUrl } from "./lib/auth/tidecloakConfig";
-import { CompileForsetiContract } from "./lib/tidecloakApi";
 import { createConnection } from "net";
+import { createHash } from "crypto";
 
 // Use createRequire for heimdall-tide (CJS module with broken ESM exports)
 const require = createRequire(import.meta.url || fileURLToPath(new URL(".", import.meta.url)));
@@ -2177,13 +2177,13 @@ export async function registerRoutes(
   // Forseti Contract Compilation
   // ============================================
 
-  // POST /api/forseti/compile - Compile contract and get hash via TideCloak
+  // POST /api/forseti/compile - Compute contract ID (SHA512 hash of source)
   app.post(
     "/api/forseti/compile",
     authenticate,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const { source, validate = true, entryType } = req.body;
+        const { source, entryType } = req.body;
         const token = req.accessToken;
 
         if (!token) {
@@ -2196,41 +2196,33 @@ export async function registerRoutes(
           return;
         }
 
-        logForseti("▶ Compile Start", {
+        logForseti("▶ Computing Contract ID", {
           entryType: entryType || "auto",
-          validate,
           sourceLen: source.length,
         });
 
         const startTime = Date.now();
-        const result = await CompileForsetiContract(source, token, { validate, entryType });
+
+        // Compute SHA512 hash of source code as contract ID
+        const contractId = createHash("sha512")
+          .update(source, "utf8")
+          .digest("hex")
+          .toUpperCase();
+
         const elapsed = Date.now() - startTime;
 
-        if (!result.success) {
-          logForseti("✗ Compile Failed", { error: result.error, elapsed: `${elapsed}ms` });
-          res.status(400).json({
-            success: false,
-            error: result.error,
-          });
-          return;
-        }
-
-        logForseti("✓ Compile Success", {
-          contractId: result.contractId?.substring(0, 16) + "...",
-          sdkVersion: result.sdkVersion,
-          validated: result.validated,
+        logForseti("✓ Contract ID Computed", {
+          contractId: contractId.substring(0, 16) + "...",
           elapsed: `${elapsed}ms`,
         });
 
         res.json({
           success: true,
-          contractId: result.contractId,
-          sdkVersion: result.sdkVersion,
-          validated: result.validated,
+          contractId,
         });
       } catch (error) {
-        log(`Failed to compile contract: ${error}`);
-        res.status(500).json({ error: "Failed to compile contract" });
+        log(`Failed to compute contract ID: ${error}`);
+        res.status(500).json({ error: "Failed to compute contract ID" });
       }
     }
   );

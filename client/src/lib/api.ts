@@ -37,13 +37,11 @@ async function apiRequest<T>(
   return response.json();
 }
 
-// Forseti contract compilation result
+// Forseti contract ID computation result
 export interface ForsetiCompileResult {
   success: boolean;
   contractId?: string;
-  sdkVersion?: string;
   error?: string;
-  validated?: boolean;
 }
 
 // Committed policy result
@@ -56,13 +54,12 @@ export const api = {
   // Forseti contract operations
   forseti: {
     /**
-     * Compiles a Forseti contract and returns its hash (contractId).
-     * The contractId is the SHA512 hash of the compiled DLL.
+     * Computes the contract ID (SHA512 hash) from source code.
      */
-    compile: (source: string, options?: { validate?: boolean; entryType?: string }) =>
+    compile: (source: string) =>
       apiRequest<ForsetiCompileResult>("/api/forseti/compile", {
         method: "POST",
-        body: JSON.stringify({ source, ...options }),
+        body: JSON.stringify({ source }),
       }),
   },
   // SSH policy operations

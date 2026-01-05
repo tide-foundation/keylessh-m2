@@ -126,47 +126,39 @@ export interface SshPolicyConfigWithCode extends SshPolicyConfig {
 }
 
 /**
- * Compiles a Forseti contract and returns its contract ID (SHA512 hash).
+ * Computes the contract ID (SHA512 hash of source code) for a Forseti contract.
  * This ensures the contractId matches exactly what Ork will compute.
  *
  * @param source - The C# source code of the contract
- * @param options - Optional validation settings
- * @returns The compiled contract ID and SDK version
- * @throws Error if compilation fails
+ * @returns The contract ID (SHA512 hash)
+ * @throws Error if computation fails
  */
 export async function compileForsetiContract(
   source: string,
-  options?: { validate?: boolean; entryType?: string }
-): Promise<{ contractId: string; sdkVersion: string; validated: boolean }> {
-  const result = await api.forseti.compile(source, options);
+  _options?: { validate?: boolean; entryType?: string }
+): Promise<{ contractId: string }> {
+  const result = await api.forseti.compile(source);
 
   if (!result.success || !result.contractId) {
-    throw new Error(result.error || "Contract compilation failed");
+    throw new Error(result.error || "Failed to compute contract ID");
   }
 
   return {
     contractId: result.contractId,
-    sdkVersion: result.sdkVersion || "unknown",
-    validated: result.validated || false,
   };
 }
 
 /**
- * Creates a PolicySignRequest for SSH signing with automatic contract compilation.
- * Compiles the contract first to get the correct contractId from Ork's API.
- *
- * This ensures the contractId always matches what Ork will compute.
+ * Creates a PolicySignRequest for SSH signing.
+ * Computes the contract ID (SHA512 hash) from source code.
  */
 export async function createSshPolicyRequest(
   config: SshPolicyConfig
 ): Promise<PolicySignRequest> {
-  // Compile the contract to get the correct contractId
-  const { contractId } = await compileForsetiContract(SSH_FORSETI_CONTRACT, {
-    validate: true,
-    entryType: "SshPolicy",
-  });
+  // Compute the contract ID from source code
+  const { contractId } = await compileForsetiContract(SSH_FORSETI_CONTRACT);
 
-  // Create policy request with the compiled contractId
+  // Create policy request with the contract ID
   const policyParams = new Map<string, any>();
   policyParams.set("role", config.roleName);
   policyParams.set("threshold", config.threshold);
@@ -205,32 +197,21 @@ export async function createSshPolicyRequest(
 }
 
 /**
- * Creates a PolicySignRequest with custom contract code and automatic compilation.
- * Compiles the contract first to get the correct contractId from Ork's API.
+ * Creates a PolicySignRequest with custom contract code.
+ * Computes the contract ID (SHA512 hash) from the source code.
  *
  * Use this when creating policies from templates with custom contract logic.
  */
 export async function createSshPolicyRequestWithCode(
   config: SshPolicyConfigWithCode
-): Promise<{ request: PolicySignRequest; contractId: string; sdkVersion: string }> {
-  // Compile the custom contract to get the contractId
-  const { contractId, sdkVersion, validated } = await compileForsetiContract(
-    config.contractCode,
-    {
-      validate: true,
-      // Try to detect entry type from code, fallback to SshPolicy
-      entryType: detectEntryType(config.contractCode) || "SshPolicy",
-    }
-  );
-
-  if (!validated) {
-    throw new Error("Contract validation failed - code may contain forbidden operations");
-  }
+): Promise<{ request: PolicySignRequest; contractId: string }> {
+  // Compute the contract ID from source code
+  const { contractId } = await compileForsetiContract(config.contractCode);
 
   // Detect entry type from custom code
   const entryType = detectEntryType(config.contractCode) || "SshPolicy";
 
-  // Create policy request with the compiled contractId
+  // Create policy request with the contract ID
   const policyParams = new Map<string, any>();
   policyParams.set("role", config.roleName);
   policyParams.set("threshold", config.threshold);
@@ -265,7 +246,7 @@ export async function createSshPolicyRequestWithCode(
   policyRequest.draft = draftWithContract;
   policyRequest.setCustomExpiry(604800);
 
-  return { request: policyRequest, contractId, sdkVersion };
+  return { request: policyRequest, contractId };
 }
 
 /**
