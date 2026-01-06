@@ -95,6 +95,7 @@ import {
 } from "./auth";
 import {
   GetUserChangeRequests,
+  GetRoleChangeRequests,
   AddApprovalToChangeRequest,
   AddRejectionToChangeRequest,
   CommitChangeRequest,
@@ -1001,16 +1002,23 @@ export async function registerRoutes(
         }
 
         // Delete the role in TideCloak
-        await tidecloakAdmin.deleteRole(token, roleName);
+        const result = await tidecloakAdmin.deleteRole(token, roleName);
 
-        // Also delete any associated SSH policy
-        try {
-          await policyStorage.deletePolicy(roleName);
-        } catch (policyError) {
-          log(`Warning: Role deleted but failed to delete policy: ${policyError}`);
+        // Also delete any associated SSH policy (only if role was actually deleted, not queued for approval)
+        if (!result.approvalCreated) {
+          try {
+            await policyStorage.deletePolicy(roleName);
+          } catch (policyError) {
+            log(`Warning: Role deleted but failed to delete policy: ${policyError}`);
+          }
         }
 
-        res.json({ success: "Role has been deleted!" });
+        // Return appropriate message based on whether an approval was created
+        if (result.approvalCreated) {
+          res.json({ success: "Approval request created", approvalCreated: true });
+        } else {
+          res.json({ success: "Role has been deleted!", approvalCreated: false });
+        }
       } catch (error) {
         log(`Failed to delete role: ${error}`);
         res.status(500).json({ error: "Internal Server Error" });
@@ -1978,6 +1986,210 @@ export async function registerRoutes(
         const errorMsg = error instanceof Error ? error.message : String(error);
         log(`Failed to cancel access request: ${errorMsg}`);
         res.status(500).json({ error: `Failed to cancel access request: ${errorMsg}` });
+      }
+    }
+  );
+
+  // ============================================
+  // Role Approvals API (TideCloak Change Set - Roles)
+  // ============================================
+
+  // GET /api/admin/role-approvals - Get pending role change requests from TideCloak
+  app.get(
+    "/api/admin/role-approvals",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const token = req.accessToken!;
+        const requests = await GetRoleChangeRequests(token);
+
+        // Transform to match frontend expectations
+        const approvals: AccessApproval[] = requests.map((req) => ({
+          id: req.retrievalInfo.changeSetId,
+          requestType: req.data.actionType || req.data.action,
+          status: req.data.status,
+          requestedBy: req.data.userRecord?.[0]?.username || "Unknown",
+          requestedAt: req.data.createdAt || new Date().toISOString(),
+          role: req.data.role,
+          compositeRole: req.data.compositeRole,
+          clientId: req.data.clientId,
+          changeSetType: req.data.changeSetType,
+          userRecords: req.data.userRecord || [],
+          retrievalInfo: req.retrievalInfo,
+        }));
+        res.json(approvals);
+      } catch (error) {
+        log(`Failed to fetch role approvals: ${error}`);
+        res.status(500).json({ message: "Failed to fetch role approvals" });
+      }
+    }
+  );
+
+  // POST /api/admin/role-approvals/raw - Get raw change set request for signing
+  app.post(
+    "/api/admin/role-approvals/raw",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const token = req.accessToken!;
+        const { changeSet } = req.body as { changeSet: ChangeSetRequest };
+
+        if (!changeSet || !changeSet.changeSetId) {
+          res.status(400).json({ error: "Change set information is required" });
+          return;
+        }
+
+        const rawRequests = await GetRawChangeSetRequest(changeSet, token);
+        res.json({ rawRequests });
+      } catch (error) {
+        log(`Failed to get raw role change request: ${error}`);
+        res.status(500).json({ error: "Failed to get raw change request" });
+      }
+    }
+  );
+
+  // POST /api/admin/role-approvals/approve - Approve a role change request
+  app.post(
+    "/api/admin/role-approvals/approve",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const token = req.accessToken!;
+        const { changeSet, signedRequest } = req.body as {
+          changeSet: ChangeSetRequest;
+          signedRequest?: string;
+        };
+
+        if (!changeSet || !changeSet.changeSetId) {
+          res.status(400).json({ error: "Change set information is required" });
+          return;
+        }
+
+        if (signedRequest) {
+          await AddApprovalWithSignedRequest(changeSet, signedRequest, token);
+        } else {
+          await AddApprovalToChangeRequest(changeSet, token);
+        }
+        res.json({ message: "Role change request approved" });
+      } catch (error) {
+        log(`Failed to approve role change request: ${error}`);
+        res.status(500).json({ error: "Failed to approve role change request" });
+      }
+    }
+  );
+
+  // POST /api/admin/role-approvals/approve-with-id - Approve with explicit changeSetId (for multi-request flow)
+  app.post(
+    "/api/admin/role-approvals/approve-with-id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const token = req.accessToken!;
+        const { changeSetId, actionType, changeSetType, signedRequest } = req.body as {
+          changeSetId: string;
+          actionType: string;
+          changeSetType: string;
+          signedRequest: string;
+        };
+
+        if (!changeSetId || !actionType || !changeSetType || !signedRequest) {
+          res.status(400).json({ error: "changeSetId, actionType, changeSetType, and signedRequest are required" });
+          return;
+        }
+
+        const changeSet: ChangeSetRequest = {
+          changeSetId,
+          actionType,
+          changeSetType,
+        };
+
+        await AddApprovalWithSignedRequest(changeSet, signedRequest, token);
+        res.json({ message: "Role change request approved" });
+      } catch (error) {
+        log(`Failed to approve role change request with id: ${error}`);
+        res.status(500).json({ error: "Failed to approve role change request" });
+      }
+    }
+  );
+
+  // POST /api/admin/role-approvals/reject - Reject a role change request
+  app.post(
+    "/api/admin/role-approvals/reject",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const token = req.accessToken!;
+        const { changeSet } = req.body as { changeSet: ChangeSetRequest };
+
+        if (!changeSet || !changeSet.changeSetId) {
+          res.status(400).json({ error: "Change set information is required" });
+          return;
+        }
+
+        await AddRejectionToChangeRequest(changeSet, token);
+        res.json({ message: "Role change request rejected" });
+      } catch (error) {
+        log(`Failed to reject role change request: ${error}`);
+        res.status(500).json({ error: "Failed to reject role change request" });
+      }
+    }
+  );
+
+  // POST /api/admin/role-approvals/commit - Commit an approved role change request
+  app.post(
+    "/api/admin/role-approvals/commit",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const token = req.accessToken!;
+        const { changeSet } = req.body as { changeSet: ChangeSetRequest };
+
+        log(`Committing role change set: ${JSON.stringify(changeSet)}`);
+
+        if (!changeSet || !changeSet.changeSetId) {
+          res.status(400).json({ error: "Change set information is required" });
+          return;
+        }
+
+        await CommitChangeRequest(changeSet, token);
+        res.json({ message: "Role change request committed" });
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        log(`Failed to commit role change request: ${errorMsg}`);
+        res.status(500).json({ error: `Failed to commit role change request: ${errorMsg}` });
+      }
+    }
+  );
+
+  // POST /api/admin/role-approvals/cancel - Cancel a role change request
+  app.post(
+    "/api/admin/role-approvals/cancel",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const token = req.accessToken!;
+        const { changeSet } = req.body as { changeSet: ChangeSetRequest };
+
+        log(`Cancelling role change set: ${JSON.stringify(changeSet)}`);
+
+        if (!changeSet || !changeSet.changeSetId) {
+          res.status(400).json({ error: "Change set information is required" });
+          return;
+        }
+
+        await CancelChangeRequest(changeSet, token);
+        res.json({ message: "Role change request cancelled" });
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        log(`Failed to cancel role change request: ${errorMsg}`);
+        res.status(500).json({ error: `Failed to cancel role change request: ${errorMsg}` });
       }
     }
   );

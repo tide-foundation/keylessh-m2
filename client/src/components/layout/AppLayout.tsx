@@ -89,7 +89,7 @@ const adminNavGroups = [
   {
     label: "Security",
     items: [
-      { title: "Approvals", url: "/admin/approvals", icon: CheckSquare },
+      { title: "Change Requests", url: "/admin/approvals", icon: CheckSquare },
       { title: "Recordings", url: "/admin/recordings", icon: Video },
       { title: "Audit Logs", url: "/admin/logs", icon: ScrollText },
     ],
@@ -116,6 +116,36 @@ export function AppLayout({ children }: AppLayoutProps) {
     enabled: isAdmin,
     staleTime: Infinity, // Only fetch once per session
   });
+
+  // Fetch change request counts for nav badge
+  const { data: accessApprovals } = useQuery({
+    queryKey: ["/api/admin/access-approvals"],
+    queryFn: api.admin.accessApprovals.list,
+    enabled: isAdmin,
+    refetchInterval: 30000, // Refresh every 30 seconds
+  });
+
+  const { data: roleApprovals } = useQuery({
+    queryKey: ["/api/admin/role-approvals"],
+    queryFn: api.admin.roleApprovals.list,
+    enabled: isAdmin,
+    refetchInterval: 30000,
+  });
+
+  const { data: pendingPolicies } = useQuery({
+    queryKey: ["/api/admin/ssh-policies/pending"],
+    queryFn: api.admin.sshPolicies.listPending,
+    enabled: isAdmin,
+    refetchInterval: 30000,
+  });
+
+  // Calculate total pending change requests
+  const totalChangeRequests = useMemo(() => {
+    const accessCount = accessApprovals?.length || 0;
+    const roleCount = roleApprovals?.length || 0;
+    const policyCount = pendingPolicies?.policies?.filter(p => p.status === "pending" || p.status === "approved").length || 0;
+    return accessCount + roleCount + policyCount;
+  }, [accessApprovals, roleApprovals, pendingPolicies]);
 
   // Filter out Settings group if Stripe is not configured
   const filteredAdminNavGroups = useMemo(() => {
@@ -209,9 +239,19 @@ export function AppLayout({ children }: AppLayoutProps) {
                           isActive={location === item.url || (item.url !== "/admin" && location.startsWith(item.url))}
                           data-testid={`nav-${item.title.toLowerCase().replace(/\s+/g, "-")}`}
                         >
-                          <Link href={item.url}>
-                            <item.icon className="h-4 w-4" />
-                            <span>{item.title}</span>
+                          <Link href={item.url} className="flex items-center justify-between w-full">
+                            <span className="flex items-center gap-2">
+                              <item.icon className="h-4 w-4" />
+                              <span>{item.title}</span>
+                            </span>
+                            {item.title === "Change Requests" && totalChangeRequests > 0 && (
+                              <Badge
+                                variant="destructive"
+                                className="h-5 min-w-5 p-0 flex items-center justify-center text-xs"
+                              >
+                                {totalChangeRequests > 99 ? "99+" : totalChangeRequests}
+                              </Badge>
+                            )}
                           </Link>
                         </SidebarMenuButton>
                       </SidebarMenuItem>

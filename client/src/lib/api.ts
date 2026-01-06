@@ -160,7 +160,7 @@ export const api = {
           body: JSON.stringify(data),
         }),
       delete: (roleName: string) =>
-        apiRequest<{ success: string }>(`/api/admin/roles?roleName=${roleName}`, {
+        apiRequest<{ success: string; approvalCreated?: boolean }>(`/api/admin/roles?roleName=${roleName}`, {
           method: "DELETE",
         }),
       policies: {
@@ -251,6 +251,39 @@ export const api = {
         }),
       cancel: (changeSet: ChangeSetRequest) =>
         apiRequest<{ message: string }>("/api/admin/access-approvals/cancel", {
+          method: "POST",
+          body: JSON.stringify({ changeSet }),
+        }),
+    },
+    roleApprovals: {
+      list: () => apiRequest<RoleApproval[]>("/api/admin/role-approvals"),
+      getRaw: (changeSet: ChangeSetRequest) =>
+        apiRequest<{ rawRequests: Array<{ changesetId: string; changeSetDraftRequests: string; requiresApprovalPopup: boolean | string }> }>("/api/admin/role-approvals/raw", {
+          method: "POST",
+          body: JSON.stringify({ changeSet }),
+        }),
+      approve: (changeSet: ChangeSetRequest, signedRequest?: string) =>
+        apiRequest<{ message: string }>("/api/admin/role-approvals/approve", {
+          method: "POST",
+          body: JSON.stringify({ changeSet, signedRequest }),
+        }),
+      approveWithId: (changeSetId: string, actionType: string, changeSetType: string, signedRequest: string) =>
+        apiRequest<{ message: string }>("/api/admin/role-approvals/approve-with-id", {
+          method: "POST",
+          body: JSON.stringify({ changeSetId, actionType, changeSetType, signedRequest }),
+        }),
+      reject: (changeSet: ChangeSetRequest) =>
+        apiRequest<{ message: string }>("/api/admin/role-approvals/reject", {
+          method: "POST",
+          body: JSON.stringify({ changeSet }),
+        }),
+      commit: (changeSet: ChangeSetRequest) =>
+        apiRequest<{ message: string }>("/api/admin/role-approvals/commit", {
+          method: "POST",
+          body: JSON.stringify({ changeSet }),
+        }),
+      cancel: (changeSet: ChangeSetRequest) =>
+        apiRequest<{ message: string }>("/api/admin/role-approvals/cancel", {
           method: "POST",
           body: JSON.stringify({ changeSet }),
         }),
@@ -499,6 +532,25 @@ export interface AccessApproval {
   rejectionFound: boolean;
   retrievalInfo: ChangeSetRequest;
   data: any;
+}
+
+export interface RoleApproval {
+  id: string;
+  requestType: string;
+  status: string;
+  requestedBy: string;
+  requestedAt: string;
+  role: string;
+  compositeRole?: string;
+  clientId: string;
+  changeSetType: string;
+  userRecords: Array<{
+    username: string;
+    proofDetailId?: string;
+    clientId?: string;
+    accessDraft?: string;
+  }>;
+  retrievalInfo: ChangeSetRequest;
 }
 
 // SSH connections are now handled via Socket.IO to KeyleSSH

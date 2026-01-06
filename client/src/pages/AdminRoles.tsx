@@ -170,12 +170,19 @@ export default function AdminRoles() {
 
   const deleteMutation = useMutation({
     mutationFn: (roleName: string) => api.admin.roles.delete(roleName),
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/roles"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/roles"] });
+      // Also invalidate role approvals since an approval may have been created
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/role-approvals"] });
       setDeletingRole(null);
       setEditingRole(null);
-      toast({ title: "Role deleted successfully" });
+      // Show appropriate message based on whether an approval was created
+      if (data.approvalCreated) {
+        toast({ title: "Approval request created", description: "Role has users assigned. An approval request has been created for review." });
+      } else {
+        toast({ title: "Role deleted successfully" });
+      }
     },
     onError: (error: Error) => {
       toast({ title: "Failed to delete role", description: error.message, variant: "destructive" });

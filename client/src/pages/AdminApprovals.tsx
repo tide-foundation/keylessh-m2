@@ -29,9 +29,9 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { queryClient } from "@/lib/queryClient";
-import { api, AccessApproval, PendingSshPolicy, SshPolicyDecision } from "@/lib/api";
+import { api, AccessApproval, RoleApproval, PendingSshPolicy, SshPolicyDecision } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
-import { CheckSquare, X, Upload, User, Shield, FileKey, Eye, Check, Clock, CheckCircle2, XCircle, ChevronDown, ChevronRight, Code, Trash2, Undo2 } from "lucide-react";
+import { CheckSquare, X, Upload, User, Shield, FileKey, Eye, Check, Clock, CheckCircle2, XCircle, ChevronDown, ChevronRight, Code, Trash2, Undo2, Users } from "lucide-react";
 import { SSH_FORSETI_CONTRACT } from "@/lib/sshPolicy";
 import {
   Collapsible,
@@ -40,7 +40,7 @@ import {
 } from "@/components/ui/collapsible";
 import { RefreshButton } from "@/components/RefreshButton";
 
-type TabType = "access" | "policies";
+type TabType = "access" | "roles" | "policies";
 
 // Helper to convert base64 to Uint8Array
 function base64ToBytes(base64: string): Uint8Array {
@@ -395,6 +395,315 @@ function getPolicyStatusBadge(status: string) {
     default:
       return <Badge variant="outline">{status}</Badge>;
   }
+}
+
+// Role Approvals Tab Component - Uses TideCloak API for role change requests
+function RoleApprovalsTab() {
+  const { toast } = useToast();
+  const { vuid, approveTideRequests } = useAuth();
+  const [approvals, setApprovals] = useState<RoleApproval[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetchRoleApprovals = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const data = await api.admin.roleApprovals.list();
+      setApprovals(data);
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/role-approvals"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/role-approvals"] });
+    } catch (error) {
+      console.error("Error fetching role approvals:", error);
+      toast({
+        title: "Failed to fetch role approvals",
+        description: error instanceof Error ? error.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [toast]);
+
+  const { secondsRemaining, refreshNow } = useAutoRefresh({
+    intervalSeconds: 15,
+    refresh: fetchRoleApprovals,
+    isBlocked: isLoading,
+  });
+
+  useEffect(() => {
+    void refreshNow();
+  }, [vuid, refreshNow]);
+
+  const handleReview = async (id: string) => {
+    const approval = approvals.find((a) => a.id === id);
+    if (!approval) {
+      toast({ title: "Could not find role change request", variant: "destructive" });
+      return;
+    }
+
+    try {
+      const { rawRequests } = await api.admin.roleApprovals.getRaw(approval.retrievalInfo);
+
+      if (!rawRequests || rawRequests.length === 0) {
+        toast({ title: "Failed to get request for signing", variant: "destructive" });
+        return;
+      }
+
+      const firstRequest = rawRequests[0];
+      const requiresPopup = firstRequest.requiresApprovalPopup === true || firstRequest.requiresApprovalPopup === "true";
+
+      if (!requiresPopup) {
+        await api.admin.roleApprovals.approve(approval.retrievalInfo);
+        toast({ title: "Role change request approved successfully" });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await refreshNow();
+        return;
+      }
+
+      const tideRequests = rawRequests.map((req) => ({
+        id: req.changesetId || "Role Change Request",
+        request: base64ToBytes(req.changeSetDraftRequests),
+      }));
+
+      const approvalResponses = await approveTideRequests(tideRequests);
+
+      const anyDenied = approvalResponses.some((r) => r.denied);
+      if (anyDenied) {
+        await api.admin.roleApprovals.reject(approval.retrievalInfo);
+        toast({ title: "Role change request denied" });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await refreshNow();
+        return;
+      }
+
+      const allApproved = approvalResponses.every((r) => r.approved);
+      if (allApproved) {
+        for (const reviewResp of approvalResponses) {
+          if (reviewResp.approved) {
+            const signedRequestBase64 = bytesToBase64(reviewResp.approved.request);
+            await api.admin.roleApprovals.approveWithId(
+              reviewResp.id,
+              approval.retrievalInfo.actionType,
+              approval.retrievalInfo.changeSetType,
+              signedRequestBase64
+            );
+          }
+        }
+        toast({ title: "Role change request approved successfully" });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await refreshNow();
+      } else {
+        toast({ title: "No response from approval enclave", variant: "destructive" });
+      }
+    } catch (error) {
+      console.error("Error reviewing role change request:", error);
+      toast({
+        title: "Failed to review request",
+        description: error instanceof Error ? error.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleCommit = async (id: string) => {
+    const approval = approvals.find((a) => a.id === id);
+    if (!approval) {
+      toast({ title: "Could not find role change request", variant: "destructive" });
+      return;
+    }
+
+    try {
+      await api.admin.roleApprovals.commit(approval.retrievalInfo);
+      toast({ title: "Role change committed successfully" });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await refreshNow();
+    } catch (error) {
+      console.error("Error committing role change:", error);
+      toast({
+        title: "Failed to commit role change",
+        description: error instanceof Error ? error.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleCancel = async (id: string) => {
+    const approval = approvals.find((a) => a.id === id);
+    if (!approval) {
+      toast({ title: "Could not find role change request", variant: "destructive" });
+      return;
+    }
+
+    try {
+      await api.admin.roleApprovals.cancel(approval.retrievalInfo);
+      toast({ title: "Role change request cancelled" });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await refreshNow();
+    } catch (error) {
+      console.error("Error cancelling role change:", error);
+      toast({
+        title: "Failed to cancel role change",
+        description: error instanceof Error ? error.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const getStatusBadge = (status: string) => {
+    switch (status?.toUpperCase()) {
+      case "PENDING":
+      case "DRAFT":
+        return <Badge variant="outline" className="bg-yellow-50 text-yellow-700 border-yellow-200 dark:bg-yellow-950/30 dark:text-yellow-400 dark:border-yellow-800"><Clock className="h-3 w-3 mr-1" />Pending</Badge>;
+      case "APPROVED":
+        return <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-800"><CheckCircle2 className="h-3 w-3 mr-1" />Approved</Badge>;
+      case "DENIED":
+        return <Badge variant="outline" className="bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-400 dark:border-red-800"><XCircle className="h-3 w-3 mr-1" />Denied</Badge>;
+      case "MIXED":
+        return <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/30 dark:text-purple-400 dark:border-purple-800">Mixed</Badge>;
+      default:
+        return <Badge variant="outline">{status}</Badge>;
+    }
+  };
+
+  const refreshControls = (
+    <div className="p-4 border-b border-border flex items-center justify-end">
+      <RefreshButton
+        onClick={() => void refreshNow()}
+        isRefreshing={isLoading}
+        secondsRemaining={secondsRemaining}
+        data-testid="refresh-role-approvals"
+        title="Refresh now"
+      />
+    </div>
+  );
+
+  if (isLoading && approvals.length === 0) {
+    return (
+      <div>
+        {refreshControls}
+        <div className="p-4 space-y-3">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="flex items-center gap-4">
+              <Skeleton className="h-10 w-10 rounded-full" />
+              <div className="flex-1 space-y-2">
+                <Skeleton className="h-4 w-32" />
+                <Skeleton className="h-3 w-48" />
+              </div>
+              <Skeleton className="h-6 w-16" />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (!approvals || approvals.length === 0) {
+    return (
+      <div>
+        {refreshControls}
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <Users className="h-12 w-12 text-muted-foreground mb-4" />
+          <h3 className="font-medium">No pending role change requests</h3>
+          <p className="text-sm text-muted-foreground mt-1">
+            Role change requests will appear here.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {refreshControls}
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Role</TableHead>
+            <TableHead>Client</TableHead>
+            <TableHead>Action</TableHead>
+            <TableHead>Requested By</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead className="text-right">Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {approvals.map((approval) => (
+            <TableRow key={approval.id}>
+              <TableCell>
+                <div className="flex items-center gap-2">
+                  <Shield className="h-4 w-4 text-muted-foreground" />
+                  <span className="font-medium">{approval.role}</span>
+                  {approval.compositeRole && (
+                    <span className="text-xs text-muted-foreground">({approval.compositeRole})</span>
+                  )}
+                </div>
+              </TableCell>
+              <TableCell>
+                <span className="text-sm text-muted-foreground">{approval.clientId}</span>
+              </TableCell>
+              <TableCell>
+                <span className="text-sm">{approval.requestType}</span>
+              </TableCell>
+              <TableCell>
+                <div className="flex items-center gap-2">
+                  <User className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-sm">{approval.requestedBy}</span>
+                </div>
+              </TableCell>
+              <TableCell>
+                {getStatusBadge(approval.status)}
+              </TableCell>
+              <TableCell className="text-right">
+                <div className="flex justify-end gap-1">
+                  {approval.status?.toUpperCase() === "APPROVED" ? (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleCommit(approval.id)}
+                        title="Commit this change"
+                        className="text-green-600 dark:text-green-400"
+                      >
+                        <Upload className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleCancel(approval.id)}
+                        title="Cancel this request"
+                        className="text-red-600 dark:text-red-400"
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleReview(approval.id)}
+                        title="Review via Tide enclave"
+                      >
+                        <Eye className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleCancel(approval.id)}
+                        title="Cancel this request"
+                        className="text-red-600 dark:text-red-400"
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </>
+                  )}
+                </div>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
 }
 
 // Policy Approvals Tab Component - SSH Signing Policy Approvals
@@ -950,12 +1259,18 @@ export default function AdminApprovals() {
     queryFn: api.admin.accessApprovals.list,
   });
 
+  const { data: roleApprovals } = useQuery({
+    queryKey: ["/api/admin/role-approvals"],
+    queryFn: api.admin.roleApprovals.list,
+  });
+
   const { data: pendingPolicies } = useQuery({
     queryKey: ["/api/admin/ssh-policies/pending"],
     queryFn: api.admin.sshPolicies.listPending,
   });
 
   const accessPendingCount = accessApprovals?.length || 0;
+  const rolePendingCount = roleApprovals?.length || 0;
   const policyPendingCount = pendingPolicies?.policies?.filter(p => p.status === "pending" || p.status === "approved").length || 0;
 
   return (
@@ -966,10 +1281,10 @@ export default function AdminApprovals() {
           data-testid="admin-approvals-title"
         >
           <CheckSquare className="h-6 w-6" />
-          Approvals
+          Change Requests
         </h1>
         <p className="text-muted-foreground">
-          Review and approve pending access requests and policy changes.
+          Review and approve pending access, role, and policy change requests.
         </p>
       </div>
 
@@ -985,6 +1300,17 @@ export default function AdminApprovals() {
                     className="ml-1 h-5 min-w-5 p-0 flex items-center justify-center text-xs"
                   >
                     {accessPendingCount > 99 ? "99+" : accessPendingCount}
+                  </Badge>
+                )}
+              </TabsTrigger>
+              <TabsTrigger value="roles" className="flex items-center gap-2">
+                Roles
+                {rolePendingCount > 0 && (
+                  <Badge
+                    variant="destructive"
+                    className="ml-1 h-5 min-w-5 p-0 flex items-center justify-center text-xs"
+                  >
+                    {rolePendingCount > 99 ? "99+" : rolePendingCount}
                   </Badge>
                 )}
               </TabsTrigger>
@@ -1005,6 +1331,10 @@ export default function AdminApprovals() {
           <CardContent className="p-0">
             <TabsContent value="access" className="m-0">
               <AccessApprovalsTab />
+            </TabsContent>
+
+            <TabsContent value="roles" className="m-0">
+              <RoleApprovalsTab />
             </TabsContent>
 
             <TabsContent value="policies" className="m-0">

@@ -402,7 +402,12 @@ export const SetUserEnabled = async (
   return;
 };
 
-export const DeleteRole = async (roleName: string, token: string): Promise<void> => {
+export interface DeleteRoleResult {
+  approvalCreated: boolean;
+  message?: string;
+}
+
+export const DeleteRole = async (roleName: string, token: string): Promise<DeleteRoleResult> => {
   const client: ClientRepresentation | null = await getClientByClientId(
     getClient(),
     token
@@ -423,7 +428,26 @@ export const DeleteRole = async (roleName: string, token: string): Promise<void>
     throw new Error(`Error deleting role: ${errorBody}`);
   }
 
-  return;
+  // Check if response indicates an approval was created
+  // TideCloak returns 202 Accepted when a changeset is created instead of immediate deletion
+  if (response.status === 202) {
+    return { approvalCreated: true, message: "Approval request created" };
+  }
+
+  // Try to parse response body for additional info
+  try {
+    const text = await response.text();
+    if (text) {
+      const body = JSON.parse(text);
+      if (body.changeSetId || body.draftRecordId) {
+        return { approvalCreated: true, message: "Approval request created" };
+      }
+    }
+  } catch {
+    // No body or not JSON - that's fine, role was deleted directly
+  }
+
+  return { approvalCreated: false };
 };
 
 export const UpdateRole = async (
@@ -601,6 +625,40 @@ export const GetUserChangeRequests = async (
     const errorBody = await response.text();
     console.error(`Error getting user change requests: ${response.statusText}`);
     throw new Error(`Error getting user change requests: ${errorBody}`);
+  }
+
+  const json = await response.json();
+  const result = json.map((d: any) => {
+    return {
+      data: d,
+      retrievalInfo: {
+        changeSetId: d.draftRecordId,
+        changeSetType: d.changeSetType,
+        actionType: d.actionType,
+      } as ChangeSetRequest,
+    };
+  });
+
+  return result;
+};
+
+export const GetRoleChangeRequests = async (
+  token: string
+): Promise<{ data: any; retrievalInfo: ChangeSetRequest }[]> => {
+  const response = await fetch(
+    `${getTcUrl()}/tide-admin/change-set/roles/requests`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error(`Error getting role change requests: ${response.statusText}`);
+    throw new Error(`Error getting role change requests: ${errorBody}`);
   }
 
   const json = await response.json();

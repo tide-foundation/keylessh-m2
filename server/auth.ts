@@ -18,6 +18,7 @@ import {
   getClientByClientId,
   UpdateRole,
   DeleteRole,
+  DeleteRoleResult,
   getClientById,
 } from "./lib/tidecloakApi";
 import { UserRepresentation, RoleRepresentation, ClientRepresentation } from "./lib/auth/keycloakTypes";
@@ -359,8 +360,8 @@ export class TidecloakAdmin {
   }
 
   // Delete a role
-  async deleteRole(token: string, roleName: string): Promise<void> {
-    await DeleteRole(roleName, token);
+  async deleteRole(token: string, roleName: string): Promise<DeleteRoleResult> {
+    return await DeleteRole(roleName, token);
   }
 }
 
