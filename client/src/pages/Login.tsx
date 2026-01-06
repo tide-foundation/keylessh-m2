@@ -81,14 +81,14 @@ export default function Login() {
   return (
     <div className="min-h-screen bg-background flex flex-col">
       <header className="border-b border-border">
-        <div className="container mx-auto px-6 py-4 flex items-center gap-3">
-          <KeyleSSHLogo className="h-9 w-9" />
-          <span className="font-semibold text-lg text-[hsl(0_0%_90%)]">KeyleSSH</span>
+        <div className="container mx-auto px-4 sm:px-6 py-4 flex items-center gap-3">
+          <KeyleSSHLogo className="h-8 w-8 sm:h-9 sm:w-9" />
+          <span className="font-semibold text-base sm:text-lg text-[hsl(0_0%_90%)]">KeyleSSH</span>
         </div>
       </header>
 
-      <main className="flex-1 container mx-auto px-6 py-12 flex flex-col lg:flex-row items-center justify-center gap-12">
-        <div className="flex-1 max-w-lg">
+      <main className="flex-1 container mx-auto px-4 sm:px-6 py-8 sm:py-12 flex flex-col lg:flex-row items-center justify-center gap-8 sm:gap-12">
+        <div className="flex-1 max-w-lg hidden sm:block">
           <div className="space-y-6">
             <div className="space-y-2">
               <h1 className="text-3xl font-semibold tracking-tight">
@@ -190,8 +190,8 @@ export default function Login() {
         </div>
       </main>
 
-      <footer className="border-t border-border py-6">
-        <div className="container mx-auto px-6 text-center text-sm text-muted-foreground">
+      <footer className="border-t border-border py-4 sm:py-6">
+        <div className="container mx-auto px-4 sm:px-6 text-center text-xs sm:text-sm text-muted-foreground">
           <p>Powered by KeyleSSH &middot; Tide Foundation</p>
         </div>
       </footer>

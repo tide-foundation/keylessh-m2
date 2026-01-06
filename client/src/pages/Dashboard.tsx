@@ -149,27 +149,25 @@ function ServerCardSkeleton() {
 
 function SessionItem({ session }: { session: ActiveSession }) {
   return (
-    <div className="flex items-center justify-between py-3 px-4 hover-elevate rounded-md group" data-testid={`session-${session.id}`}>
-      <div className="flex items-center gap-3">
-        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-[hsl(var(--neon-green)/0.15)] border border-[hsl(var(--neon-green)/0.3)]">
-          <Activity className="h-4 w-4 text-[hsl(var(--neon-green))]" />
+    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3 px-4 hover-elevate rounded-md group" data-testid={`session-${session.id}`}>
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[hsl(var(--neon-green)/0.15)] border border-[hsl(var(--neon-green)/0.3)]">
+          <Activity className="h-5 w-5 text-[hsl(var(--neon-green))]" />
         </div>
-        <div>
-          <p className="text-sm font-medium">{session.serverName}</p>
-          <p className="text-xs text-muted-foreground font-mono">
+        <div className="min-w-0">
+          <p className="text-sm font-medium truncate">{session.serverName}</p>
+          <p className="text-xs text-muted-foreground font-mono truncate">
             {session.sshUser}@{session.serverHost}
           </p>
         </div>
       </div>
-      <div className="flex items-center gap-3">
-        <div className="text-right">
-          <Badge variant="outline" className="text-xs gap-1 label-success">
-            <span className="h-1.5 w-1.5 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
-            Active
-          </Badge>
-        </div>
+      <div className="flex items-center justify-between sm:justify-end gap-3 pl-13 sm:pl-0">
+        <Badge variant="outline" className="text-xs gap-1 label-success shrink-0">
+          <span className="h-1.5 w-1.5 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
+          Active
+        </Badge>
         <Link href={`/app/console?serverId=${encodeURIComponent(session.serverId)}&user=${encodeURIComponent(session.sshUser)}`}>
-          <Button size="sm" variant="ghost" className="group-hover:text-[hsl(var(--neon-cyan))]" data-testid={`reconnect-session-${session.id}`}>
+          <Button size="sm" variant="ghost" className="group-hover:text-[hsl(var(--neon-cyan))] min-h-[44px] min-w-[44px]" data-testid={`reconnect-session-${session.id}`}>
             Reconnect
           </Button>
         </Link>
@@ -214,13 +212,13 @@ export default function Dashboard() {
   const recentSessions = sessions?.filter((s) => s.status !== "active").slice(0, 5) || [];
 
   return (
-    <div className="p-6 space-y-8">
-      <div className="flex items-start justify-between gap-4">
+    <div className="p-4 sm:p-6 space-y-6 sm:space-y-8">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight" data-testid="dashboard-title">
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight" data-testid="dashboard-title">
             Welcome back, {user?.username}
           </h1>
-          <p className="text-muted-foreground">
+          <p className="text-sm sm:text-base text-muted-foreground">
             Connect to your servers and manage your SSH sessions
           </p>
         </div>
@@ -230,6 +228,7 @@ export default function Dashboard() {
           secondsRemaining={secondsRemaining}
           data-testid="refresh-dashboard"
           title="Refresh now"
+          className="self-end sm:self-auto"
         />
       </div>
 
@@ -246,7 +245,7 @@ export default function Dashboard() {
       {activeSessions.length > 0 && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-medium flex items-center gap-2">
+            <h2 className="text-base sm:text-lg font-medium flex items-center gap-2">
               <Activity className="h-5 w-5 text-[hsl(var(--neon-green))]" />
               Active Sessions
             </h2>
@@ -264,21 +263,21 @@ export default function Dashboard() {
 
       <div className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-medium flex items-center gap-2">
+          <h2 className="text-base sm:text-lg font-medium flex items-center gap-2">
             <Server className="h-5 w-5 text-[hsl(var(--neon-cyan))]" />
             Available Servers
           </h2>
           {servers && <Badge variant="secondary" className="label-info">{servers.length}</Badge>}
         </div>
-        
+
         {serversLoading ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {[1, 2, 3].map((i) => (
               <ServerCardSkeleton key={i} />
             ))}
           </div>
         ) : servers && servers.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {servers.map((server) => (
               <ServerCard key={server.id} server={server} sshBlocked={isSshBlocked} />
             ))}
@@ -298,31 +297,31 @@ export default function Dashboard() {
 
       {recentSessions.length > 0 && (
         <div className="space-y-4">
-          <h2 className="text-lg font-medium flex items-center gap-2">
+          <h2 className="text-base sm:text-lg font-medium flex items-center gap-2">
             <Clock className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
             Recent Connections
           </h2>
           <Card>
             <CardContent className="p-0 divide-y divide-border">
               {recentSessions.map((session) => (
-                <div key={session.id} className="flex items-center justify-between py-3 px-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted">
-                      <Terminal className="h-4 w-4 text-muted-foreground" />
+                <div key={session.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3 px-4">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-muted">
+                      <Terminal className="h-5 w-5 text-muted-foreground" />
                     </div>
-                    <div>
-                      <p className="text-sm font-medium">{session.serverName}</p>
-                      <p className="text-xs text-muted-foreground font-mono">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">{session.serverName}</p>
+                      <p className="text-xs text-muted-foreground font-mono truncate">
                         {session.sshUser}@{session.serverHost}
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center justify-between sm:justify-end gap-3 pl-13 sm:pl-0">
                     <div className="text-xs text-muted-foreground">
                       {session.endedAt ? new Date(session.endedAt).toLocaleDateString() : ""}
                     </div>
                     <Link href={`/app/console?serverId=${encodeURIComponent(session.serverId)}&user=${encodeURIComponent(session.sshUser)}`}>
-                      <Button size="sm" variant="ghost" data-testid={`reconnect-recent-session-${session.id}`}>
+                      <Button size="sm" variant="ghost" className="min-h-[44px] min-w-[44px]" data-testid={`reconnect-recent-session-${session.id}`}>
                         Reconnect
                       </Button>
                     </Link>

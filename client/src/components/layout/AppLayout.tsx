@@ -276,12 +276,12 @@ export function AppLayout({ children }: AppLayoutProps) {
         </Sidebar>
 
         <div className="flex flex-1 flex-col overflow-hidden">
-          <header className="flex h-14 items-center justify-between gap-4 border-b border-border bg-background px-4">
-            <div className="flex items-center gap-4">
-              <SidebarTrigger data-testid="sidebar-trigger" />
-              <div className="flex items-center gap-2">
-                <Layers className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm font-medium text-muted-foreground">
+          <header className="flex h-14 items-center justify-between gap-2 sm:gap-4 border-b border-border bg-background px-2 sm:px-4">
+            <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+              <SidebarTrigger data-testid="sidebar-trigger" className="h-10 w-10 shrink-0" />
+              <div className="hidden sm:flex items-center gap-2 min-w-0">
+                <Layers className="h-4 w-4 text-muted-foreground shrink-0" />
+                <span className="text-sm font-medium text-muted-foreground truncate">
                   {location.split("/").filter(Boolean).map((s, i) => (
                     <span key={i}>
                       {i > 0 && " / "}
@@ -294,12 +294,12 @@ export function AppLayout({ children }: AppLayoutProps) {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1 sm:gap-2">
               <Button
                 variant="ghost"
                 size="icon"
                 onClick={toggleTheme}
-                className="h-9 w-9"
+                className="h-10 w-10"
                 data-testid="theme-toggle"
               >
                 {resolvedTheme === "dark" ? (

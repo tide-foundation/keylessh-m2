@@ -399,25 +399,25 @@ export default function Console() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="h-12 px-4 flex items-center justify-between border-b border-border bg-background shrink-0">
-        <div className="flex items-center gap-4">
+      <div className="min-h-[56px] px-2 sm:px-4 py-2 flex flex-wrap items-center justify-between gap-2 border-b border-border bg-background shrink-0">
+        <div className="flex items-center gap-2 sm:gap-4 min-w-0">
           <Link href="/app">
-            <Button size="icon" variant="ghost" data-testid="back-button">
+            <Button size="icon" variant="ghost" className="h-10 w-10 shrink-0" data-testid="back-button">
               <ArrowLeft className="h-4 w-4" />
             </Button>
           </Link>
-          <div className="flex items-center gap-2">
-            <span className="font-medium">{server?.name}</span>
-            <span className="text-muted-foreground font-mono text-sm">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-0.5 sm:gap-2 min-w-0">
+            <span className="font-medium text-sm sm:text-base truncate">{server?.name}</span>
+            <span className="text-muted-foreground font-mono text-xs sm:text-sm truncate hidden sm:inline">
               {sshUser}@{server?.host}:{server?.port}
             </span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 sm:gap-2">
           <Badge
             variant={status === "connected" ? "default" : "secondary"}
-            className="gap-1.5"
+            className="gap-1.5 text-xs shrink-0"
             data-testid="connection-status"
           >
             <StatusIcon
@@ -427,15 +427,16 @@ export default function Console() {
                   : ""
               }`}
             />
-            {statusConfig[status].label}
+            <span className="hidden sm:inline">{statusConfig[status].label}</span>
           </Badge>
 
-          <div className="flex items-center gap-1 ml-2">
+          <div className="flex items-center">
             <Button
               size="icon"
               variant="ghost"
               onClick={handleCopy}
               title="Copy selection"
+              className="h-10 w-10"
               data-testid="copy-button"
             >
               <Copy className="h-4 w-4" />
@@ -445,6 +446,7 @@ export default function Console() {
               variant="ghost"
               onClick={toggleFullscreen}
               title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+              className="h-10 w-10 hidden sm:inline-flex"
               data-testid="fullscreen-button"
             >
               {isFullscreen ? (
@@ -462,6 +464,7 @@ export default function Console() {
                   status === "connecting" || status === "authenticating"
                 }
                 title="Connect"
+                className="h-10 w-10"
                 data-testid="reconnect-button"
               >
                 <RefreshCw
@@ -479,6 +482,7 @@ export default function Console() {
                 variant="ghost"
                 onClick={handleDisconnect}
                 title="Disconnect"
+                className="h-10 w-10"
                 data-testid="disconnect-button"
               >
                 <Power className="h-4 w-4" />
@@ -488,11 +492,11 @@ export default function Console() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-hidden relative p-3 sm:p-4">
-        <div className="terminal-surface h-full w-full rounded-xl overflow-hidden relative">
+      <div className="flex-1 overflow-hidden relative p-2 sm:p-4">
+        <div className="terminal-surface h-full w-full rounded-lg sm:rounded-xl overflow-hidden relative">
           <div
             ref={terminalRef}
-            className="absolute inset-3"
+            className="absolute inset-2 sm:inset-3"
             data-testid="terminal-container"
           />
         </div>

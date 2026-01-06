@@ -165,14 +165,14 @@ export default function AdminDashboard() {
   const systemHealthDescription = systemAlerts.length > 0 ? `${systemAlerts.length} alert(s)` : "No active alerts";
 
   return (
-    <div className="p-6 space-y-8">
-      <div className="flex items-center justify-between">
+    <div className="p-4 sm:p-6 space-y-6 sm:space-y-8">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-title">
-            <Shield className="h-6 w-6 text-primary" />
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-title">
+            <Shield className="h-5 w-5 sm:h-6 sm:w-6 text-primary" />
             Admin Overview
           </h1>
-          <p className="text-muted-foreground">
+          <p className="text-sm sm:text-base text-muted-foreground">
             System overview and management
           </p>
         </div>
@@ -182,10 +182,11 @@ export default function AdminDashboard() {
           secondsRemaining={secondsRemaining}
           data-testid="refresh-admin-dashboard"
           title="Refresh now"
+          className="self-end sm:self-auto"
         />
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         {isLoading ? (
           <>
             <StatCardSkeleton />
