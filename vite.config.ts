@@ -1,11 +1,13 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import sri from "vite-plugin-sri";
 import path from "path";
 import { nodePolyfills } from "vite-plugin-node-polyfills";
 
 export default defineConfig({
   plugins: [
     react(),
+    sri(),
     nodePolyfills({
       include: ["buffer", "process", "stream", "util"],
       globals: {

@@ -50,7 +50,7 @@ import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import { FileCode, Pencil, Plus, Trash2, Search, Code, Variable } from "lucide-react";
 
-const DEFAULT_CS_CODE = `using Ork.Forseti.Sdk;
+const DEFAULT_CS_CODE = `using Forseti.Sdk;
 
 /// <summary>
 /// Custom SSH Policy - Describe your policy here.

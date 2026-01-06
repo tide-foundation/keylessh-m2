@@ -224,7 +224,7 @@ export const api = {
     accessApprovals: {
       list: () => apiRequest<AccessApproval[]>("/api/admin/access-approvals"),
       getRaw: (changeSet: ChangeSetRequest) =>
-        apiRequest<{ rawRequest: string }>("/api/admin/access-approvals/raw", {
+        apiRequest<{ rawRequests: Array<{ changesetId: string; changeSetDraftRequests: string; requiresApprovalPopup: boolean | string }> }>("/api/admin/access-approvals/raw", {
           method: "POST",
           body: JSON.stringify({ changeSet }),
         }),
@@ -232,6 +232,12 @@ export const api = {
         apiRequest<{ message: string }>("/api/admin/access-approvals/approve", {
           method: "POST",
           body: JSON.stringify({ changeSet, signedRequest }),
+        }),
+      // Submit approval with explicit changeSetId (for multi-request approval flow)
+      approveWithId: (changeSetId: string, actionType: string, changeSetType: string, signedRequest: string) =>
+        apiRequest<{ message: string }>("/api/admin/access-approvals/approve-with-id", {
+          method: "POST",
+          body: JSON.stringify({ changeSetId, actionType, changeSetType, signedRequest }),
         }),
       reject: (changeSet: ChangeSetRequest) =>
         apiRequest<{ message: string }>("/api/admin/access-approvals/reject", {

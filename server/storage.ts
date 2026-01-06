@@ -1275,7 +1275,7 @@ export class TemplateStorage {
 const DEFAULT_SSH_TEMPLATE = {
   name: "SSH Access Policy",
   description: "Standard SSH access policy with role-based authorization. Uses [PolicyParam] attributes and DecisionBuilder for clean, declarative policy logic.",
-  csCode: `using Ork.Forseti.Sdk;
+  csCode: `using Forseti.Sdk;
 
 /// <summary>
 /// SSH Challenge Signing Policy for Keyle-SSH.

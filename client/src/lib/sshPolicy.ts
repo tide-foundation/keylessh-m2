@@ -62,7 +62,7 @@ export type SshModelId = (typeof SSH_MODEL_IDS)[keyof typeof SSH_MODEL_IDS];
 // This C# code is compiled and executed by Ork for policy validation
 // Exported for display in the approval review dialog
 // Uses [PolicyParam] attributes and DecisionBuilder for clean, declarative policy logic
-export const SSH_FORSETI_CONTRACT = `using Ork.Forseti.Sdk;
+export const SSH_FORSETI_CONTRACT = `using Forseti.Sdk;
 
 /// <summary>
 /// SSH Challenge Signing Policy for Keyle-SSH.

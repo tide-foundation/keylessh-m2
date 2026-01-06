@@ -134,7 +134,7 @@ SSH signing requires the ORK network (Tide's decentralised nodes) for Policy:1 a
 
 - **TideCloak** must be configured with ORK endpoints (enclave proxy)
 - **ORKs** must be accessible from the browser (via TideCloak's enclave proxy)
-- **Forseti contracts** are compiled and validated by each ORK (requires Ork.Forseti.VmHost)
+- **Forseti contracts** are compiled and validated by each ORK (requires Forseti.VmHost)
 
 ### Policy Lifecycle
 
@@ -174,7 +174,7 @@ This guarantees hash consistency between Keyle-SSH and ORK without requiring an 
 
 ```bash
 # Just run it - Docker pulls automatically on first use
-echo 'using Ork.Forseti.Sdk;
+echo 'using Forseti.Sdk;
 public class MyPolicy : IAccessPolicy {
     public PolicyDecision Authorize(AccessContext ctx) {
         return PolicyDecision.Allow();
@@ -243,7 +243,7 @@ async function compileContract(source: string): Promise<string> {
 
 // Usage
 const contractId = await compileContract(`
-  using Ork.Forseti.Sdk;
+  using Forseti.Sdk;
   public class MyPolicy : IAccessPolicy {
     public PolicyDecision Authorize(AccessContext ctx) {
       return PolicyDecision.Allow();
@@ -273,7 +273,7 @@ def compile_contract(source: str) -> str:
 
 # Usage
 contract_id = compile_contract("""
-using Ork.Forseti.Sdk;
+using Forseti.Sdk;
 public class MyPolicy : IAccessPolicy {
     public PolicyDecision Authorize(AccessContext ctx) {
         return PolicyDecision.Allow();
@@ -292,7 +292,7 @@ compile_contract() {
 }
 
 # Usage
-CONTRACT_ID=$(compile_contract 'using Ork.Forseti.Sdk;
+CONTRACT_ID=$(compile_contract 'using Forseti.Sdk;
 public class MyPolicy : IAccessPolicy {
   public PolicyDecision Authorize(AccessContext ctx) {
     return PolicyDecision.Allow();
@@ -434,13 +434,13 @@ Test that the published image produces the same hash as ORK:
 
 ```bash
 # Published compiler image
-echo 'public class T : Ork.Forseti.Sdk.IAccessPolicy { public Ork.Forseti.Sdk.PolicyDecision Authorize(Ork.Forseti.Sdk.AccessContext c) { return Ork.Forseti.Sdk.PolicyDecision.Allow(); } }' \
+echo 'public class T : Forseti.Sdk.IAccessPolicy { public Forseti.Sdk.PolicyDecision Authorize(Forseti.Sdk.AccessContext c) { return Forseti.Sdk.PolicyDecision.Allow(); } }' \
   | docker run -i --rm ghcr.io/tide-foundation/forseti-compiler:latest --json
 
 # ORK Compile API (if running locally)
 curl -s -X POST http://localhost:8080/Forseti/Compile/preview \
   -H "Content-Type: application/json" \
-  -d '{"source": "public class T : Ork.Forseti.Sdk.IAccessPolicy { public Ork.Forseti.Sdk.PolicyDecision Authorize(Ork.Forseti.Sdk.AccessContext c) { return Ork.Forseti.Sdk.PolicyDecision.Allow(); } }"}'
+  -d '{"source": "public class T : Forseti.Sdk.IAccessPolicy { public Forseti.Sdk.PolicyDecision Authorize(Forseti.Sdk.AccessContext c) { return Forseti.Sdk.PolicyDecision.Allow(); } }"}'
 ```
 
 Both should return identical `contractId` values.

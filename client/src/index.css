@@ -2,9 +2,147 @@
 @tailwind components;
 @tailwind utilities;
 
-/* GREEN BG + MONOCHROME TEXT THEME */
+/* ========================================
+   LIGHT MODE (default)
+   ======================================== */
 :root {
-  /* Force dark mode */
+  color-scheme: light;
+
+  /* Accent colors - teal/cyan for light mode */
+  --accent-primary: 180 50% 35%;
+  --accent-primary-bright: 180 55% 30%;
+  --accent-secondary: 180 40% 45%;
+  --accent-muted: 180 25% 55%;
+
+  /* Status colors */
+  --status-success: 145 60% 40%;
+  --status-warning: 45 90% 45%;
+  --status-danger: 0 70% 50%;
+  --status-info: 210 60% 50%;
+
+  /* Background surfaces - light gray */
+  --bg-void: 210 15% 97%;
+  --bg-surface: 0 0% 100%;
+  --bg-elevated: 0 0% 100%;
+  --bg-hover: 210 15% 94%;
+
+  /* Button/Badge overlays */
+  --button-outline: rgba(0, 0, 0, 0.08);
+  --badge-outline: rgba(0, 0, 0, 0.06);
+  --opaque-button-border-intensity: 8;
+  --elevate-1: rgba(0, 0, 0, 0.02);
+  --elevate-2: rgba(0, 0, 0, 0.04);
+
+  /* Core theme tokens */
+  --background: var(--bg-void);
+  --foreground: 210 20% 15%;
+
+  --border: 210 15% 88%;
+  --card: var(--bg-surface);
+  --card-foreground: 210 20% 15%;
+  --card-border: 210 15% 90%;
+
+  /* Sidebar */
+  --sidebar: var(--bg-surface);
+  --sidebar-foreground: 210 20% 15%;
+  --sidebar-border: 210 15% 90%;
+  --sidebar-primary: var(--accent-primary);
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 210 15% 95%;
+  --sidebar-accent-foreground: 210 20% 15%;
+  --sidebar-ring: var(--accent-primary);
+
+  /* Popover */
+  --popover: var(--bg-elevated);
+  --popover-foreground: 210 20% 15%;
+  --popover-border: 210 15% 88%;
+
+  /* Primary */
+  --primary: var(--accent-primary);
+  --primary-foreground: 0 0% 100%;
+
+  /* Secondary */
+  --secondary: 210 15% 93%;
+  --secondary-foreground: 210 20% 25%;
+
+  /* Muted */
+  --muted: 210 12% 94%;
+  --muted-foreground: 210 10% 45%;
+
+  /* Accent */
+  --accent: 210 15% 95%;
+  --accent-foreground: 210 20% 15%;
+
+  /* Destructive */
+  --destructive: var(--status-danger);
+  --destructive-foreground: 0 0% 100%;
+
+  /* Form elements */
+  --input: 210 15% 95%;
+  --ring: var(--accent-primary);
+
+  /* Chart/Status colors */
+  --chart-1: var(--status-info);
+  --chart-2: var(--status-success);
+  --chart-3: 260 50% 55%;
+  --chart-4: var(--status-warning);
+  --chart-5: var(--status-danger);
+
+  /* Neon variables mapped for component compatibility */
+  --neon-cyan: var(--accent-primary);
+  --neon-cyan-bright: var(--accent-primary-bright);
+  --neon-magenta: var(--accent-secondary);
+  --neon-purple: 260 50% 55%;
+  --neon-green: var(--status-success);
+  --neon-red: var(--status-danger);
+  --neon-amber: var(--status-warning);
+
+  /* Surface effects */
+  --iso-shadow: 0 10px 40px hsl(210 20% 0% / 0.08), 0 20px 60px hsl(210 20% 0% / 0.05);
+  --iso-shadow-tight: 0 4px 16px hsl(210 20% 0% / 0.06), 0 8px 24px hsl(210 20% 0% / 0.04);
+  --iso-edge: hsl(210 15% 0% / 0.06);
+  --iso-highlight: hsl(0 0% 100% / 0.8);
+  --iso-grid: hsl(210 15% 0% / 0.03);
+
+  /* Overlay / Terminal */
+  --overlay: hsl(210 20% 10% / 0.50);
+  --terminal-bg: hsl(220 15% 12%);
+  --terminal-border: hsl(210 15% 85%);
+
+  /* Typography */
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-serif: Georgia, serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+
+  /* Spacing & Radius */
+  --radius: 0.5rem;
+  --spacing: 0.25rem;
+  --tracking-normal: 0em;
+
+  /* Shadows */
+  --shadow-2xs: 0 1px 2px hsl(210 20% 0% / 0.04);
+  --shadow-xs: 0 1px 3px hsl(210 20% 0% / 0.06);
+  --shadow-sm: 0 2px 4px hsl(210 20% 0% / 0.06);
+  --shadow: 0 4px 6px hsl(210 20% 0% / 0.08);
+  --shadow-md: 0 6px 10px hsl(210 20% 0% / 0.08);
+  --shadow-lg: 0 10px 20px hsl(210 20% 0% / 0.1);
+  --shadow-xl: 0 16px 32px hsl(210 20% 0% / 0.12);
+  --shadow-2xl: 0 24px 48px hsl(210 20% 0% / 0.15);
+
+  /* Border color modifiers */
+  --sidebar-primary-border: hsl(var(--accent-primary) / 0.2);
+  --sidebar-accent-border: hsl(210 15% 88%);
+  --primary-border: hsl(var(--accent-primary) / 0.3);
+  --secondary-border: hsl(210 15% 88%);
+  --muted-border: hsl(210 12% 90%);
+  --accent-border: hsl(210 15% 85%);
+  --destructive-border: hsl(var(--status-danger) / 0.4);
+}
+
+/* ========================================
+   DARK MODE (lighter than before)
+   ======================================== */
+.dark {
   color-scheme: dark;
 
   /* Monochrome white/silver accent colors */
@@ -19,17 +157,11 @@
   --status-danger: 0 70% 55%;
   --status-info: 0 0% 85%;
 
-  /* Glow intensities */
-  --glow-sm: 0 0 10px;
-  --glow-md: 0 0 20px;
-  --glow-lg: 0 0 30px;
-  --glow-xl: 0 0 40px;
-
-  /* Background surfaces - pure black CRT style */
-  --bg-void: 120 20% 3%;
-  --bg-surface: 120 15% 5%;
-  --bg-elevated: 120 12% 8%;
-  --bg-hover: 120 10% 12%;
+  /* Background surfaces - lighter than before */
+  --bg-void: 220 15% 10%;
+  --bg-surface: 220 12% 13%;
+  --bg-elevated: 220 10% 16%;
+  --bg-hover: 220 10% 20%;
 
   /* Button/Badge overlays */
   --button-outline: rgba(255, 255, 255, 0.12);
@@ -40,50 +172,50 @@
 
   /* Core theme tokens */
   --background: var(--bg-void);
-  --foreground: 0 0% 88%;
+  --foreground: 0 0% 92%;
 
-  --border: 120 20% 18%;
+  --border: 220 15% 22%;
   --card: var(--bg-surface);
-  --card-foreground: 0 0% 88%;
-  --card-border: 120 20% 15%;
+  --card-foreground: 0 0% 92%;
+  --card-border: 220 15% 20%;
 
   /* Sidebar */
   --sidebar: var(--bg-surface);
-  --sidebar-foreground: 0 0% 88%;
-  --sidebar-border: 120 20% 12%;
+  --sidebar-foreground: 0 0% 92%;
+  --sidebar-border: 220 15% 18%;
   --sidebar-primary: var(--accent-primary);
-  --sidebar-primary-foreground: 120 20% 8%;
-  --sidebar-accent: 120 15% 14%;
-  --sidebar-accent-foreground: 0 0% 88%;
+  --sidebar-primary-foreground: 220 15% 10%;
+  --sidebar-accent: 220 12% 18%;
+  --sidebar-accent-foreground: 0 0% 92%;
   --sidebar-ring: var(--accent-primary);
 
   /* Popover */
   --popover: var(--bg-elevated);
-  --popover-foreground: 0 0% 88%;
-  --popover-border: 120 20% 18%;
+  --popover-foreground: 0 0% 92%;
+  --popover-border: 220 15% 22%;
 
   /* Primary - White/silver */
   --primary: var(--accent-primary);
-  --primary-foreground: 120 20% 8%;
+  --primary-foreground: 220 15% 10%;
 
   /* Secondary - Dark surface */
-  --secondary: 120 15% 14%;
+  --secondary: 220 12% 18%;
   --secondary-foreground: 0 0% 80%;
 
   /* Muted */
-  --muted: 120 12% 12%;
-  --muted-foreground: 0 0% 50%;
+  --muted: 220 10% 16%;
+  --muted-foreground: 0 0% 55%;
 
   /* Accent */
-  --accent: 120 15% 16%;
-  --accent-foreground: 0 0% 88%;
+  --accent: 220 12% 20%;
+  --accent-foreground: 0 0% 92%;
 
   /* Destructive */
   --destructive: var(--status-danger);
   --destructive-foreground: 0 0% 100%;
 
   /* Form elements */
-  --input: 120 15% 14%;
+  --input: 220 12% 18%;
   --ring: var(--accent-primary);
 
   /* Chart/Status colors */
@@ -102,51 +234,36 @@
   --neon-red: var(--status-danger);
   --neon-amber: var(--status-warning);
 
-  /* Isometric/Surface effects */
-  --iso-shadow: 0 10px 40px hsl(0 0% 0% / 0.3), 0 20px 60px hsl(0 0% 0% / 0.4);
-  --iso-shadow-tight: 0 6px 24px hsl(0 0% 0% / 0.25), 0 12px 40px hsl(0 0% 0% / 0.3);
+  /* Surface effects */
+  --iso-shadow: 0 10px 40px hsl(0 0% 0% / 0.4), 0 20px 60px hsl(0 0% 0% / 0.3);
+  --iso-shadow-tight: 0 6px 24px hsl(0 0% 0% / 0.3), 0 12px 40px hsl(0 0% 0% / 0.25);
   --iso-edge: hsl(0 0% 100% / 0.08);
   --iso-highlight: hsl(0 0% 100% / 0.04);
   --iso-grid: hsl(0 0% 100% / 0.03);
 
   /* Overlay / Terminal */
   --overlay: hsl(0 0% 0% / 0.70);
-  --terminal-bg: #050608;
+  --terminal-bg: hsl(220 20% 8%);
   --terminal-border: hsl(0 0% 100% / 0.12);
 
-  /* Typography */
-  --font-sans: 'Inter', system-ui, sans-serif;
-  --font-serif: Georgia, serif;
-  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
-
-  /* Spacing & Radius */
-  --radius: 0.5rem;
-  --spacing: 0.25rem;
-  --tracking-normal: 0em;
-
-  /* Shadows - subtle glow */
+  /* Shadows - subtle */
   --shadow-2xs: 0 1px 2px hsl(0 0% 0% / 0.3);
-  --shadow-xs: 0 1px 3px hsl(0 0% 0% / 0.4);
-  --shadow-sm: 0 2px 4px hsl(0 0% 0% / 0.4), 0 0 12px hsl(var(--accent-primary) / 0.03);
-  --shadow: 0 4px 6px hsl(0 0% 0% / 0.4), 0 0 16px hsl(var(--accent-primary) / 0.04);
-  --shadow-md: 0 6px 10px hsl(0 0% 0% / 0.4), 0 0 20px hsl(var(--accent-primary) / 0.05);
-  --shadow-lg: 0 10px 20px hsl(0 0% 0% / 0.5), 0 0 30px hsl(var(--accent-primary) / 0.06);
-  --shadow-xl: 0 16px 32px hsl(0 0% 0% / 0.5), 0 0 40px hsl(var(--accent-primary) / 0.08);
-  --shadow-2xl: 0 24px 48px hsl(0 0% 0% / 0.6), 0 0 60px hsl(var(--accent-primary) / 0.10);
+  --shadow-xs: 0 1px 3px hsl(0 0% 0% / 0.35);
+  --shadow-sm: 0 2px 4px hsl(0 0% 0% / 0.35);
+  --shadow: 0 4px 6px hsl(0 0% 0% / 0.35);
+  --shadow-md: 0 6px 10px hsl(0 0% 0% / 0.35);
+  --shadow-lg: 0 10px 20px hsl(0 0% 0% / 0.4);
+  --shadow-xl: 0 16px 32px hsl(0 0% 0% / 0.45);
+  --shadow-2xl: 0 24px 48px hsl(0 0% 0% / 0.5);
 
   /* Border color modifiers */
   --sidebar-primary-border: hsl(var(--accent-primary) / 0.3);
-  --sidebar-accent-border: hsl(120 15% 20%);
+  --sidebar-accent-border: hsl(220 12% 24%);
   --primary-border: hsl(var(--accent-primary) / 0.3);
-  --secondary-border: hsl(120 15% 20%);
-  --muted-border: hsl(120 12% 18%);
-  --accent-border: hsl(120 15% 22%);
+  --secondary-border: hsl(220 12% 24%);
+  --muted-border: hsl(220 10% 22%);
+  --accent-border: hsl(220 12% 26%);
   --destructive-border: hsl(var(--status-danger) / 0.5);
-}
-
-/* Dark class - same as root */
-.dark {
-  color-scheme: dark;
 }
 
 @layer base {
@@ -155,6 +272,10 @@
   }
 
   html {
+    color-scheme: light;
+  }
+
+  html.dark {
     color-scheme: dark;
   }
 
@@ -242,15 +363,23 @@
      MONOCHROME CANVAS & SURFACES
      ======================================== */
 
-  /* Dark void background with subtle grid */
+  /* Background with subtle grid */
   .iso-canvas {
     background-color: hsl(var(--bg-void));
     background-image:
+      radial-gradient(ellipse 1200px 800px at 10% 0%, hsl(var(--accent-primary) / 0.03), transparent 60%),
+      radial-gradient(ellipse 800px 600px at 90% 100%, hsl(var(--accent-primary) / 0.02), transparent 55%),
+      linear-gradient(0deg, transparent 95%, hsl(var(--border)) 95%),
+      linear-gradient(90deg, transparent 95%, hsl(var(--border)) 95%);
+    background-size: auto, auto, 40px 40px, 40px 40px;
+  }
+
+  .dark .iso-canvas {
+    background-image:
       radial-gradient(ellipse 1200px 800px at 10% 0%, hsl(0 0% 100% / 0.02), transparent 60%),
       radial-gradient(ellipse 800px 600px at 90% 100%, hsl(0 0% 100% / 0.015), transparent 55%),
-      linear-gradient(0deg, transparent 95%, hsl(0 0% 100% / 0.02) 95%),
-      linear-gradient(90deg, transparent 95%, hsl(0 0% 100% / 0.02) 95%);
-    background-size: auto, auto, 40px 40px, 40px 40px;
+      linear-gradient(0deg, transparent 95%, hsl(0 0% 100% / 0.04) 95%),
+      linear-gradient(90deg, transparent 95%, hsl(0 0% 100% / 0.04) 95%);
   }
 
   /* Monochrome surface for cards/panels */

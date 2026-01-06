@@ -135,44 +135,68 @@ function AccessApprovalsTab() {
     }
 
     try {
-      // Get raw change set request for signing
-      const { rawRequest } = await api.admin.accessApprovals.getRaw(approval.retrievalInfo);
+      // Get raw change set requests for signing (may include multiple: user + policy)
+      const { rawRequests } = await api.admin.accessApprovals.getRaw(approval.retrievalInfo);
 
-      if (!rawRequest) {
+      if (!rawRequests || rawRequests.length === 0) {
         toast({ title: "Failed to get request for signing", variant: "destructive" });
         return;
       }
 
-      // Convert base64 to Uint8Array for Tide enclave
-      const requestBytes = base64ToBytes(rawRequest);
+      // Check if approval popup is required
+      const firstRequest = rawRequests[0];
+      const requiresPopup = firstRequest.requiresApprovalPopup === true || firstRequest.requiresApprovalPopup === "true";
 
-      // Call Tide enclave for approval (opens popup for cryptographic signing)
-      const approvalResponses = await approveTideRequests([
-        {
-          id: "User Context Approval",
-          request: requestBytes,
-        },
-      ]);
-
-      const response = approvalResponses[0];
-
-      if (response.approved) {
-        // Submit the signed approval
-        const signedRequestBase64 = bytesToBase64(response.approved.request);
-        await api.admin.accessApprovals.approve(approval.retrievalInfo, signedRequestBase64);
+      if (!requiresPopup) {
+        // No popup required, just approve directly
+        await api.admin.accessApprovals.approve(approval.retrievalInfo);
         toast({ title: "Access request approved successfully" });
-        // Small delay to allow TideCloak to process the change
         await new Promise((resolve) => setTimeout(resolve, 500));
         await refreshNow();
-      } else if (response.denied) {
+        return;
+      }
+
+      // Map through all requests to create array for Tide enclave
+      const tideRequests = rawRequests.map((req) => ({
+        id: req.changesetId || "Change Request",
+        request: base64ToBytes(req.changeSetDraftRequests),
+      }));
+
+      // Call Tide enclave for approval (opens popup for cryptographic signing)
+      const approvalResponses = await approveTideRequests(tideRequests);
+
+      // Check if any were denied
+      const anyDenied = approvalResponses.some((r) => r.denied);
+      if (anyDenied) {
         // Submit rejection
         await api.admin.accessApprovals.reject(approval.retrievalInfo);
         toast({ title: "Access request denied" });
-        // Small delay to allow TideCloak to process the change
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await refreshNow();
+        return;
+      }
+
+      // Process all approved responses - submit each one separately like keycloak-IGA does
+      const allApproved = approvalResponses.every((r) => r.approved);
+      if (allApproved) {
+        // Submit each signed approval with its own changeSetId
+        for (const reviewResp of approvalResponses) {
+          if (reviewResp.approved) {
+            const signedRequestBase64 = bytesToBase64(reviewResp.approved.request);
+            // Use the changeSetId from each response, but actionType/changeSetType from original
+            await api.admin.accessApprovals.approveWithId(
+              reviewResp.id,
+              approval.retrievalInfo.actionType,
+              approval.retrievalInfo.changeSetType,
+              signedRequestBase64
+            );
+          }
+        }
+        toast({ title: "Access request approved successfully" });
         await new Promise((resolve) => setTimeout(resolve, 500));
         await refreshNow();
       } else {
-        // Still pending - no response from enclave
+        // Still pending - no complete response from enclave
         toast({ title: "No response from approval enclave", variant: "destructive" });
       }
     } catch (error) {

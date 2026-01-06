@@ -1809,8 +1809,9 @@ export async function registerRoutes(
           return;
         }
 
-        const rawRequest = await GetRawChangeSetRequest(changeSet, token);
-        res.json({ rawRequest });
+        const rawRequests = await GetRawChangeSetRequest(changeSet, token);
+        // Return all sign requests (may include user + policy requests)
+        res.json({ rawRequests });
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
         log(`Failed to get raw change set request: ${errorMsg}`);
@@ -1846,6 +1847,42 @@ export async function registerRoutes(
         res.json({ message: "Access request approved" });
       } catch (error) {
         log(`Failed to approve access request: ${error}`);
+        res.status(500).json({ error: "Failed to approve access request" });
+      }
+    }
+  );
+
+  // POST /api/admin/access-approvals/approve-with-id - Approve with explicit changeSetId (for multi-request flow)
+  app.post(
+    "/api/admin/access-approvals/approve-with-id",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const token = req.accessToken!;
+        const { changeSetId, actionType, changeSetType, signedRequest } = req.body as {
+          changeSetId: string;
+          actionType: string;
+          changeSetType: string;
+          signedRequest: string;
+        };
+
+        if (!changeSetId || !actionType || !changeSetType || !signedRequest) {
+          res.status(400).json({ error: "changeSetId, actionType, changeSetType, and signedRequest are required" });
+          return;
+        }
+
+        // Build changeSet object from explicit IDs
+        const changeSet: ChangeSetRequest = {
+          changeSetId,
+          actionType,
+          changeSetType,
+        };
+
+        await AddApprovalWithSignedRequest(changeSet, signedRequest, token);
+        res.json({ message: "Access request approved" });
+      } catch (error) {
+        log(`Failed to approve access request with id: ${error}`);
         res.status(500).json({ error: "Failed to approve access request" });
       }
     }

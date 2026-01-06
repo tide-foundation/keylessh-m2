@@ -719,10 +719,16 @@ export const CancelChangeRequest = async (
   return;
 };
 
+export interface RawChangeSetResponse {
+  changesetId: string;
+  changeSetDraftRequests: string;
+  requiresApprovalPopup: boolean | string;
+}
+
 export const GetRawChangeSetRequest = async (
   changeSet: ChangeSetRequest,
   token: string
-): Promise<string> => {
+): Promise<RawChangeSetResponse[]> => {
   const response = await fetch(`${getTcUrl()}/tide-admin/change-set/sign/batch`, {
     method: "POST",
     headers: {
@@ -739,8 +745,8 @@ export const GetRawChangeSetRequest = async (
   }
 
   const json = await response.json();
-  // Returns base64 encoded request
-  return json[0]?.changeSetDraftRequests || "";
+  // Returns array of all sign requests (may include user + policy requests)
+  return json as RawChangeSetResponse[];
 };
 
 export const AddApprovalWithSignedRequest = async (

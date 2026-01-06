@@ -24,7 +24,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode, CreditCard, Video, Zap } from "lucide-react";
+import { Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode, CreditCard, Video, Zap, Sun, Moon } from "lucide-react";
 
 function KeyleSSHLogo({ className = "" }: { className?: string }) {
   return (
@@ -42,7 +42,7 @@ function KeyleSSHLogo({ className = "" }: { className?: string }) {
           </feMerge>
         </filter>
       </defs>
-      <rect width="36" height="36" rx="8" fill="hsl(120 15% 8%)"/>
+      <rect width="36" height="36" rx="8" fill="hsl(220 15% 10%)"/>
       <g filter="url(#logoGlow)">
         <path d="M10 8 L10 28" stroke="url(#logoGrad)" strokeWidth="3" strokeLinecap="round" fill="none"/>
         <path d="M11 18 L21 8" stroke="#ffffff" strokeWidth="3" strokeLinecap="round" fill="none"/>
@@ -54,6 +54,7 @@ function KeyleSSHLogo({ className = "" }: { className?: string }) {
 }
 import { useEffect, useState, useMemo, type ReactNode } from "react";
 import { useToast } from "@/hooks/use-toast";
+import { useTheme } from "@/contexts/ThemeContext";
 import { queryClient } from "@/lib/queryClient";
 import { useQuery } from "@tanstack/react-query";
 import { api, type PricingInfo } from "@/lib/api";
@@ -140,10 +141,7 @@ export function AppLayout({ children }: AppLayoutProps) {
     };
   }, []);
 
-  // Force dark mode for cyberpunk theme
-  useEffect(() => {
-    document.documentElement.classList.add("dark");
-  }, []);
+  const { resolvedTheme, toggleTheme } = useTheme();
 
   const style = {
     "--sidebar-width": "16rem",
@@ -160,10 +158,10 @@ export function AppLayout({ children }: AppLayoutProps) {
                 <KeyleSSHLogo className="h-9 w-9 transition-transform group-hover:scale-105" />
               </div>
               <div className="flex flex-col">
-                <span className="font-semibold text-[hsl(0_0%_90%)] drop-shadow-[0_0_8px_rgba(255,255,255,0.4)]">
+                <span className="font-semibold text-sidebar-foreground">
                   KeyleSSH
                 </span>
-                <span className="text-xs text-muted-foreground">Secure Shell</span>
+                <span className="text-xs text-sidebar-foreground/60">Secure Shell</span>
               </div>
             </Link>
           </SidebarHeader>
@@ -296,7 +294,21 @@ export function AppLayout({ children }: AppLayoutProps) {
               </div>
             </div>
 
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={toggleTheme}
+                className="h-9 w-9"
+                data-testid="theme-toggle"
+              >
+                {resolvedTheme === "dark" ? (
+                  <Sun className="h-4 w-4" />
+                ) : (
+                  <Moon className="h-4 w-4" />
+                )}
+                <span className="sr-only">Toggle theme</span>
+              </Button>
               <Badge
                 variant="outline"
                 className={`hidden sm:flex gap-1.5 items-center ${isBrowserOnline ? "label-success" : "label-danger"}`}
