@@ -125,22 +125,6 @@ curl -s $CURL_OPTS -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/ti
     --data-urlencode "isIGAEnabled=true" > /dev/null 2>&1
 echo "✅ Tide realm + IGA done."
 
-# Update CustomAdminUIDomain
-TOKEN="$(get_admin_token)"
-echo "🌐 Updating CustomAdminUIDomain..."
-INST=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/identity-provider/instances/tide" \
-    -H "Authorization: Bearer $TOKEN")
-UPDATED=$(echo "$INST" | jq --arg d "$CLIENT_APP_URL" '.config.CustomAdminUIDomain=$d')
-
-curl -s $CURL_OPTS -X PUT "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/identity-provider/instances/tide" \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$UPDATED" > /dev/null 2>&1
-
-curl -s $CURL_OPTS -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/vendorResources/sign-idp-settings" \
-    -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1
-echo "✅ CustomAdminUIDomain updated + signed."
-
 approve_and_commit() {
     local TYPE=$1
     echo "🔄 Processing ${TYPE} change-sets..."
@@ -325,6 +309,22 @@ while true; do
 done
 
 approve_and_commit users
+
+# Update CustomAdminUIDomain
+TOKEN="$(get_admin_token)"
+echo "🌐 Updating CustomAdminUIDomain..."
+INST=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/identity-provider/instances/tide" \
+    -H "Authorization: Bearer $TOKEN")
+UPDATED=$(echo "$INST" | jq --arg d "$CLIENT_APP_URL" '.config.CustomAdminUIDomain=$d')
+
+curl -s $CURL_OPTS -X PUT "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/identity-provider/instances/tide" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$UPDATED" > /dev/null 2>&1
+
+curl -s $CURL_OPTS -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/vendorResources/sign-idp-settings" \
+    -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1
+echo "✅ CustomAdminUIDomain updated + signed."
 
 echo ""
 echo "🎉 Tidecloak initialization complete!"
