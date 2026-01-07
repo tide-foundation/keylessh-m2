@@ -116,7 +116,7 @@ echo "🔐 Initializing Tide realm + IGA..."
 curl -s $CURL_OPTS -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/vendorResources/setUpTideRealm" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/x-www-form-urlencoded" \
-    --data-urlencode "email=swarm@ideed.com.au" \
+    --data-urlencode "email=keylesshdemo@tide.org" \
     --data-urlencode "isRagnarokEnabled=true" > /dev/null 2>&1
 
 curl -s $CURL_OPTS -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/tide-admin/toggle-iga" \
@@ -192,7 +192,7 @@ echo "👤 Creating admin user..."
 curl -s $CURL_OPTS -X POST "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/users" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
-    -d '{"username":"admin","email":"admin@ideed.com.au","firstName":"admin","lastName":"user","enabled":true,"emailVerified":false,"requiredActions":[],"attributes":{"locale":""},"groups":[]}' > /dev/null 2>&1
+    -d '{"username":"admin","email":"admin@yourorg.com","firstName":"admin","lastName":"user","enabled":true,"emailVerified":false,"requiredActions":[],"attributes":{"locale":""},"groups":[]}' > /dev/null 2>&1
 
 USER_ID=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_LOCAL_URL}/admin/realms/${REALM_NAME}/users?username=admin" \
     -H "Authorization: Bearer $TOKEN" | jq -r '.[0].id')
