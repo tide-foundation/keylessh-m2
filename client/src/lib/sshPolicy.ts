@@ -42,6 +42,15 @@ public class SshPolicy : IAccessPolicy
     /// </summary>
     public PolicyDecision ValidateData(DataContext ctx)
     {
+        if (string.IsNullOrWhiteSpace(Role))
+            return PolicyDecision.Deny("Role is missing.");
+
+        var parts = Role.Split(':', 2, StringSplitOptions.TrimEntries);
+        if (parts.Length != 2 || parts[1].Length == 0)
+            return PolicyDecision.Deny("Role must be in the form 'prefix:role'.");
+
+        var userRole = parts[1];
+
         if (ctx == null || ctx.Data == null || ctx.Data.Length == 0)
             return PolicyDecision.Deny("No data provided for SSH challenge validation");
 
@@ -56,6 +65,10 @@ public class SshPolicy : IAccessPolicy
 
         if (parsed.PublicKeyAlgorithm != "ssh-ed25519")
             return PolicyDecision.Deny("Only ssh-ed25519 allowed");
+        
+        if(parsed.Username != userRole) {
+            return PolicyDecision.Deny("Not allowed to log in as " + parsed.Username);
+        }
 
         return PolicyDecision.Allow();
     }
