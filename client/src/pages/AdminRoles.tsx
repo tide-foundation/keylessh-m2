@@ -354,6 +354,7 @@ export default function AdminRoles() {
             policyRequest: bytesToBase64(initializedRequest.encode()),
             roleName: editingRole.name,
             contractCode: usedContractCode,
+            threshold: calculatedThreshold,
           }),
         });
 
@@ -443,6 +444,7 @@ export default function AdminRoles() {
             policyRequest: bytesToBase64(initializedRequest.encode()),
             roleName: name,
             contractCode: usedContractCode,
+            threshold: calculatedThreshold,
           }),
         });
 
