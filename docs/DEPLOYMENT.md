@@ -5,7 +5,7 @@ This app has two deployable services and requires a TideCloak docker instance an
 1. **Main server** (required): serves the React app + REST API + default local `/ws/tcp` WebSocket bridge.
 2. **TideCloak server** (required): serves the authentication and authorization services.
 3. **Blind bridge** (optional): `tcp-bridge` as a separate, auto-scaling WS↔TCP forwarder (recommended for high concurrency).
-4. **ORK network** (provided by Tide): Tide's Fabric for Policy authorization and SSH signing.
+4. **Tide Fabric** (provided by Tide): Tide's Decentralized Network for Policy authorization and SSH signing.
 
 For most deployments you run **one main server** with a persistent `data/` volume, connectivity to the Tide Fabric, and optionally an external `tcp-bridge`.
 
