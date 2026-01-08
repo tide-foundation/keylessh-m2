@@ -114,6 +114,8 @@ Here's how you set up your first SSH server and access it using KeyleSSH:
    - Confirm User Access Change by clicking the `Y` button
    - Click the `Submit Approvals` button
    - Click the `Commit` button (📤) for the policy role `ssh:user`
+5. Expand your user profile (a `AD admin` icon at the bottom-left of your KeyleSSH browser windows) ->
+   - Click `Restart session` to quickly log out and in again
 5. Go to [Dashboard](http://localhost:3000/app) -> `myserver` -> SSH USER: `user` -> `Connect` ->
    - In the `Terminal Workspace`, click the `Connect` button
    - Copy the "Tide SSH public key" string (click the `Copy` button)
