@@ -296,9 +296,9 @@ function AccessApprovalsTab() {
         <TableHeader>
           <TableRow>
             <TableHead>User</TableHead>
-            <TableHead>Role</TableHead>
-            <TableHead>Client</TableHead>
-            <TableHead>Created</TableHead>
+            <TableHead className="hidden sm:table-cell">Role</TableHead>
+            <TableHead className="hidden lg:table-cell">Client</TableHead>
+            <TableHead className="hidden md:table-cell">Created</TableHead>
             <TableHead>Status</TableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
@@ -314,16 +314,16 @@ function AccessApprovalsTab() {
                   <span className="font-medium">{approval.username}</span>
                 </div>
               </TableCell>
-              <TableCell>
+              <TableCell className="hidden sm:table-cell">
                 <div className="flex items-center gap-2">
                   <Shield className="h-4 w-4 text-muted-foreground" />
                   <span className="text-sm">{approval.role}</span>
                 </div>
               </TableCell>
-              <TableCell>
+              <TableCell className="hidden lg:table-cell">
                 <span className="text-sm text-muted-foreground">{approval.clientId}</span>
               </TableCell>
-              <TableCell>
+              <TableCell className="hidden md:table-cell">
                 <span className="text-sm text-muted-foreground">{formatDate(approval.timestamp)}</span>
               </TableCell>
               <TableCell>
@@ -618,9 +618,9 @@ function RoleApprovalsTab() {
         <TableHeader>
           <TableRow>
             <TableHead>Role</TableHead>
-            <TableHead>Client</TableHead>
-            <TableHead>Action</TableHead>
-            <TableHead>Requested By</TableHead>
+            <TableHead className="hidden lg:table-cell">Client</TableHead>
+            <TableHead className="hidden md:table-cell">Action</TableHead>
+            <TableHead className="hidden sm:table-cell">Requested By</TableHead>
             <TableHead>Status</TableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
@@ -637,13 +637,13 @@ function RoleApprovalsTab() {
                   )}
                 </div>
               </TableCell>
-              <TableCell>
+              <TableCell className="hidden lg:table-cell">
                 <span className="text-sm text-muted-foreground">{approval.clientId}</span>
               </TableCell>
-              <TableCell>
+              <TableCell className="hidden md:table-cell">
                 <span className="text-sm">{approval.requestType}</span>
               </TableCell>
-              <TableCell>
+              <TableCell className="hidden sm:table-cell">
                 <div className="flex items-center gap-2">
                   <User className="h-4 w-4 text-muted-foreground" />
                   <span className="text-sm">{approval.requestedBy}</span>
@@ -1003,10 +1003,10 @@ function PolicyApprovalsTab() {
         <TableHeader>
           <TableRow>
             <TableHead>Role</TableHead>
-            <TableHead>Requested By</TableHead>
-            <TableHead>Progress</TableHead>
+            <TableHead className="hidden sm:table-cell">Requested By</TableHead>
+            <TableHead className="hidden md:table-cell">Progress</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead>Created</TableHead>
+            <TableHead className="hidden lg:table-cell">Created</TableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
@@ -1019,8 +1019,8 @@ function PolicyApprovalsTab() {
                   <span className="font-mono">{policy.roleId}</span>
                 </div>
               </TableCell>
-              <TableCell>{policy.requestedByEmail || policy.requestedBy}</TableCell>
-              <TableCell>
+              <TableCell className="hidden sm:table-cell">{policy.requestedByEmail || policy.requestedBy}</TableCell>
+              <TableCell className="hidden md:table-cell">
                 <div className="flex items-center gap-2">
                   <span className="text-green-600 dark:text-green-400">{policy.approvalCount || 0}</span>
                   <span className="text-muted-foreground">/</span>
@@ -1031,7 +1031,7 @@ function PolicyApprovalsTab() {
                 </div>
               </TableCell>
               <TableCell>{getPolicyStatusBadge(policy.status)}</TableCell>
-              <TableCell className="text-sm text-muted-foreground">
+              <TableCell className="hidden lg:table-cell text-sm text-muted-foreground">
                 {formatPolicyTimestamp(policy.createdAt)}
               </TableCell>
               <TableCell className="text-right">
@@ -1107,7 +1107,7 @@ function PolicyApprovalsTab() {
 
           {selectedPolicy && (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4 text-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
                 <div>
                   <p className="text-muted-foreground">Requested By</p>
                   <p className="font-medium">{selectedPolicy.requestedByEmail || selectedPolicy.requestedBy}</p>
@@ -1276,16 +1276,16 @@ export default function AdminApprovals() {
   const policyPendingCount = pendingPolicies?.policies?.filter(p => p.status === "pending" || p.status === "approved").length || 0;
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
       <div className="space-y-1">
         <h1
-          className="text-2xl font-semibold tracking-tight flex items-center gap-2"
+          className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2"
           data-testid="admin-approvals-title"
         >
-          <CheckSquare className="h-6 w-6" />
+          <CheckSquare className="h-5 w-5 sm:h-6 sm:w-6" />
           Change Requests
         </h1>
-        <p className="text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           Review and approve pending access, role, and policy change requests.
         </p>
       </div>

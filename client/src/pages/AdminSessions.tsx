@@ -227,15 +227,15 @@ export function AdminActiveSessionsContent({ embedded = false }: { embedded?: bo
   };
 
   return (
-    <div className={cn("space-y-6", !embedded && "p-6")}>
+    <div className={cn("space-y-4 sm:space-y-6", !embedded && "p-4 sm:p-6")}>
       {!embedded && (
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
           <div className="space-y-1">
-            <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-sessions-title">
-              <Activity className="h-6 w-6" />
+            <h1 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-sessions-title">
+              <Activity className="h-5 w-5 sm:h-6 sm:w-6" />
               Manage Sessions
             </h1>
-            <p className="text-muted-foreground">
+            <p className="text-sm text-muted-foreground">
               View currently active SSH sessions and terminate if needed
             </p>
           </div>
@@ -294,10 +294,10 @@ export function AdminActiveSessionsContent({ embedded = false }: { embedded?: bo
               <TableHeader>
                 <TableRow>
                   <TableHead>Server</TableHead>
-                  <TableHead>User</TableHead>
-                  <TableHead>SSH User</TableHead>
-                  <TableHead>Started</TableHead>
-                  <TableHead>Duration</TableHead>
+                  <TableHead className="hidden sm:table-cell">User</TableHead>
+                  <TableHead className="hidden md:table-cell">SSH User</TableHead>
+                  <TableHead className="hidden lg:table-cell">Started</TableHead>
+                  <TableHead className="hidden md:table-cell">Duration</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -306,19 +306,19 @@ export function AdminActiveSessionsContent({ embedded = false }: { embedded?: bo
                 {activeSessions.map((session) => (
                   <TableRow key={session.id} data-testid={`active-session-${session.id}`}>
                     <TableCell>
-                      <div className="flex items-center gap-3">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-chart-2/10">
+                      <div className="flex items-center gap-2 sm:gap-3">
+                        <div className="hidden sm:flex h-8 w-8 items-center justify-center rounded-md bg-chart-2/10">
                           <Server className="h-4 w-4 text-chart-2" />
                         </div>
                         <div>
-                          <p className="font-medium">{session.serverName}</p>
+                          <p className="font-medium text-sm">{session.serverName}</p>
                           <p className="text-xs text-muted-foreground font-mono">
                             {session.serverHost}
                           </p>
                         </div>
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden sm:table-cell">
                       <div className="space-y-0.5">
                         <div className="text-sm font-medium">
                           {session.userUsername || "Unknown"}
@@ -328,33 +328,33 @@ export function AdminActiveSessionsContent({ embedded = false }: { embedded?: bo
                         </div>
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden md:table-cell">
                       <Badge variant="outline" className="font-mono">
                         {session.sshUser}
                       </Badge>
                     </TableCell>
-                    <TableCell className="text-sm">
+                    <TableCell className="hidden lg:table-cell text-sm">
                       {formatDate(session.startedAt)}
                     </TableCell>
-                    <TableCell className="text-sm font-mono">
+                    <TableCell className="hidden md:table-cell text-sm font-mono">
                       {formatDuration(session.startedAt)}
                     </TableCell>
                     <TableCell>
                       <Badge variant="default" className="gap-1.5">
                         <span className="h-1.5 w-1.5 rounded-full bg-chart-2 animate-pulse" />
-                        Active
+                        <span className="hidden sm:inline">Active</span>
                       </Badge>
                     </TableCell>
                     <TableCell className="text-right">
                       <Button
                         size="sm"
                         variant="destructive"
-                        className="gap-2"
+                        className="gap-1 sm:gap-2"
                         onClick={() => setTerminatingSession(session)}
                         data-testid={`terminate-session-${session.id}`}
                       >
                         <Ban className="h-4 w-4" />
-                        Terminate
+                        <span className="hidden sm:inline">Terminate</span>
                       </Button>
                     </TableCell>
                   </TableRow>
@@ -562,11 +562,11 @@ export function AdminSessionHistoryContent({ embedded = false }: { embedded?: bo
                   <TableRow>
                     <TableHead className="w-[40px]"></TableHead>
                     <TableHead>Server</TableHead>
-                    <TableHead>User</TableHead>
-                    <TableHead>SSH User</TableHead>
-                    <TableHead>Started</TableHead>
-                    <TableHead>Ended</TableHead>
-                    <TableHead>Duration</TableHead>
+                    <TableHead className="hidden sm:table-cell">User</TableHead>
+                    <TableHead className="hidden md:table-cell">SSH User</TableHead>
+                    <TableHead className="hidden lg:table-cell">Started</TableHead>
+                    <TableHead className="hidden lg:table-cell">Ended</TableHead>
+                    <TableHead className="hidden md:table-cell">Duration</TableHead>
                     <TableHead>Status</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -599,19 +599,19 @@ export function AdminSessionHistoryContent({ embedded = false }: { embedded?: bo
                             </Button>
                           </TableCell>
                           <TableCell>
-                            <div className="flex items-center gap-3">
-                              <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted">
+                            <div className="flex items-center gap-2 sm:gap-3">
+                              <div className="hidden sm:flex h-8 w-8 items-center justify-center rounded-md bg-muted">
                                 <Server className="h-4 w-4 text-muted-foreground" />
                               </div>
                               <div>
-                                <p className="font-medium">{session.serverName}</p>
+                                <p className="font-medium text-sm">{session.serverName}</p>
                                 <p className="text-xs text-muted-foreground font-mono">
                                   {session.serverHost}
                                 </p>
                               </div>
                             </div>
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="hidden sm:table-cell">
                             <div className="space-y-0.5">
                               <div className="text-sm font-medium">
                                 {session.userUsername || "Unknown"}
@@ -621,18 +621,18 @@ export function AdminSessionHistoryContent({ embedded = false }: { embedded?: bo
                               </div>
                             </div>
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="hidden md:table-cell">
                             <Badge variant="outline" className="font-mono">
                               {session.sshUser}
                             </Badge>
                           </TableCell>
-                          <TableCell className="text-sm">
+                          <TableCell className="hidden lg:table-cell text-sm">
                             {formatDate(session.startedAt)}
                           </TableCell>
-                          <TableCell className="text-sm">
+                          <TableCell className="hidden lg:table-cell text-sm">
                             {formatDate(session.endedAt)}
                           </TableCell>
-                          <TableCell className="text-sm font-mono">
+                          <TableCell className="hidden md:table-cell text-sm font-mono">
                             {formatDuration(session.startedAt, session.endedAt)}
                           </TableCell>
                           <TableCell>

@@ -437,29 +437,29 @@ export function TerminalSession({
   const StatusIcon = statusConfig[status].icon;
 
   return (
-    <div className="flex flex-col gap-4 h-full">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Badge variant="outline" className="gap-2">
+    <div className="flex flex-col gap-2 sm:gap-4 h-full">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <Badge variant="outline" className="gap-1.5 shrink-0">
             <span className={`h-2 w-2 rounded-full ${statusConfig[status].color}`} />
             <StatusIcon className={`h-3.5 w-3.5 ${status === "connecting" || status === "authenticating" ? "animate-spin" : ""}`} />
-            <span>{statusConfig[status].label}</span>
+            <span className="hidden sm:inline">{statusConfig[status].label}</span>
           </Badge>
-          <div className="text-sm text-muted-foreground">
+          <div className="text-sm text-muted-foreground truncate min-w-0">
             {server?.name ? (
               <span className="font-medium text-foreground">{server.name}</span>
             ) : (
-              <Skeleton className="h-4 w-40 inline-block" />
+              <Skeleton className="h-4 w-24 sm:w-40 inline-block" />
             )}
-            <span className="ml-2 font-mono text-xs">{sshUser}@{server?.host || "…"}</span>
+            <span className="ml-2 font-mono text-xs hidden sm:inline">{sshUser}@{server?.host || "…"}</span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
           {onCloseTab && (
-            <Button variant="outline" size="sm" onClick={handleCloseTabClick}>
-              <X className="h-4 w-4 mr-2" />
-              Close tab
+            <Button variant="outline" size="sm" onClick={handleCloseTabClick} title="Close tab" className="h-8 w-8 sm:w-auto sm:px-3">
+              <X className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">Close</span>
             </Button>
           )}
           <DropdownMenu>
@@ -468,16 +468,18 @@ export function TerminalSession({
                 variant={showFileBrowser ? "secondary" : "outline"}
                 size="sm"
                 disabled={status !== "connected" || sftpLoading}
+                title="Files"
+                className="h-8 w-8 sm:w-auto sm:px-3"
               >
                 {sftpLoading ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  <Loader2 className="h-4 w-4 sm:mr-2 animate-spin" />
                 ) : showFileBrowser ? (
-                  <PanelLeftClose className="h-4 w-4 mr-2" />
+                  <PanelLeftClose className="h-4 w-4 sm:mr-2" />
                 ) : (
-                  <FolderOpen className="h-4 w-4 mr-2" />
+                  <FolderOpen className="h-4 w-4 sm:mr-2" />
                 )}
-                {showFileBrowser ? `Files (${fileTransferMode?.toUpperCase() || "..."})` : "Files"}
-                <ChevronDown className="h-3 w-3 ml-1" />
+                <span className="hidden sm:inline">{showFileBrowser ? `Files (${fileTransferMode?.toUpperCase() || "..."})` : "Files"}</span>
+                <ChevronDown className="h-3 w-3 ml-1 hidden sm:inline" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
@@ -502,23 +504,23 @@ export function TerminalSession({
               )}
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button variant="outline" size="sm" onClick={handleCopy} disabled={status !== "connected"}>
-            <Copy className="h-4 w-4 mr-2" />
-            Copy
+          <Button variant="outline" size="sm" onClick={handleCopy} disabled={status !== "connected"} title="Copy" className="h-8 w-8 sm:w-auto sm:px-3">
+            <Copy className="h-4 w-4 sm:mr-2" />
+            <span className="hidden sm:inline">Copy</span>
           </Button>
-          <Button variant="outline" size="sm" onClick={toggleFullscreen}>
-            {isFullscreen ? <Minimize className="h-4 w-4 mr-2" /> : <Maximize className="h-4 w-4 mr-2" />}
-            {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+          <Button variant="outline" size="sm" onClick={toggleFullscreen} title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"} className="hidden sm:flex h-8 w-8 sm:w-auto sm:px-3">
+            {isFullscreen ? <Minimize className="h-4 w-4 sm:mr-2" /> : <Maximize className="h-4 w-4 sm:mr-2" />}
+            <span className="hidden md:inline">{isFullscreen ? "Exit" : "Fullscreen"}</span>
           </Button>
           {status === "connected" ? (
-            <Button variant="destructive" size="sm" onClick={handleDisconnect}>
-              <Power className="h-4 w-4 mr-2" />
-              Disconnect
+            <Button variant="destructive" size="sm" onClick={handleDisconnect} title="Disconnect" className="h-8 w-8 sm:w-auto sm:px-3">
+              <Power className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">Disconnect</span>
             </Button>
           ) : (
-            <Button size="sm" onClick={() => setShowKeyDialog(true)} disabled={serverLoading || serverIsDisabled}>
-              <RefreshCw className="h-4 w-4 mr-2" />
-              Connect
+            <Button size="sm" onClick={() => setShowKeyDialog(true)} disabled={serverLoading || serverIsDisabled} title="Connect" className="h-8 w-8 sm:w-auto sm:px-3">
+              <RefreshCw className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">Connect</span>
             </Button>
           )}
         </div>

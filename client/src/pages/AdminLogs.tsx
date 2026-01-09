@@ -114,11 +114,11 @@ function AccessLogsTable({
   return (
     <Card>
       <CardContent className="p-0">
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-border">
-          <div className="text-sm text-muted-foreground">
+        <div className="flex items-center justify-between gap-2 px-3 sm:px-4 py-2 sm:py-3 border-b border-border">
+          <div className="text-xs sm:text-sm text-muted-foreground">
             Page <span className="font-medium text-foreground">{page + 1}</span>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
             <div className="hidden sm:flex items-center gap-2 text-sm text-muted-foreground">
               Page size
               <Select
@@ -139,20 +139,23 @@ function AccessLogsTable({
               </Select>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1 sm:gap-2">
               <Button
                 size="sm"
                 variant="outline"
                 onClick={() => onPageChange(Math.max(0, page - 1))}
                 disabled={page === 0 || isLoading}
+                className="px-2 sm:px-3"
               >
-                Previous
+                <span className="hidden sm:inline">Previous</span>
+                <span className="sm:hidden">Prev</span>
               </Button>
               <Button
                 size="sm"
                 variant="outline"
                 onClick={() => onPageChange(page + 1)}
                 disabled={!hasNextPage || isLoading}
+                className="px-2 sm:px-3"
               >
                 Next
               </Button>
@@ -174,34 +177,36 @@ function AccessLogsTable({
         ) : events && events.length > 0 ? (
           <div
             ref={tableViewportRef}
-            className="h-[max(240px,calc(100vh-420px))] md:h-[max(320px,calc(100vh-360px))] overflow-auto"
+            className="h-[max(200px,calc(100vh-480px))] sm:h-[max(240px,calc(100vh-420px))] md:h-[max(320px,calc(100vh-360px))] overflow-auto"
           >
+            <div className="min-w-[900px]">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="min-w-[190px]">Timestamp</TableHead>
-                  <TableHead className="min-w-[130px]">Event</TableHead>
-                  <TableHead className="min-w-[180px]">Username</TableHead>
-                  <TableHead className="min-w-[260px]">User ID</TableHead>
-                  <TableHead className="min-w-[160px]">IP Address</TableHead>
-                  <TableHead className="min-w-[200px]">Client</TableHead>
+                  <TableHead className="min-w-[160px]">Timestamp</TableHead>
+                  <TableHead className="min-w-[100px]">Event</TableHead>
+                  <TableHead className="min-w-[120px]">Username</TableHead>
+                  <TableHead className="min-w-[140px]">IP Address</TableHead>
+                  <TableHead className="min-w-[200px]">User ID</TableHead>
+                  <TableHead className="min-w-[160px]">Client</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {events.map((event) => (
                   <TableRow key={event.id}>
-                    <TableCell className="text-sm whitespace-nowrap">
+                    <TableCell className="text-xs sm:text-sm whitespace-nowrap">
                       {formatEventTimestamp(event.time)}
                     </TableCell>
-                    <TableCell className="text-sm">{event.type}</TableCell>
+                    <TableCell className="text-xs sm:text-sm">{event.type}</TableCell>
                     <TableCell className="text-sm">{event.details?.username || "-"}</TableCell>
-                    <TableCell className="text-sm font-mono">{event.userId || "-"}</TableCell>
                     <TableCell className="text-sm font-mono">{event.ipAddress || "-"}</TableCell>
+                    <TableCell className="text-sm font-mono">{event.userId || "-"}</TableCell>
                     <TableCell className="text-sm font-mono">{event.clientId || "-"}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
+            </div>
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center py-12 text-center">
@@ -336,14 +341,14 @@ export default function AdminLogs() {
   };
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-start justify-between gap-4">
+    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
-            <ScrollText className="h-6 w-6" />
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2">
+            <ScrollText className="h-5 w-5 sm:h-6 sm:w-6" />
             Logs
           </h1>
-          <p className="text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Review access changes and SSH session activity
           </p>
         </div>
@@ -357,14 +362,14 @@ export default function AdminLogs() {
       </div>
 
       <Tabs value={tabFromUrl} onValueChange={handleTabChange}>
-        <TabsList>
-          <TabsTrigger value="access">Access</TabsTrigger>
-          <TabsTrigger value="sessions" className="gap-2">
-            <Activity className="h-4 w-4" />
+        <TabsList className="w-full sm:w-auto grid grid-cols-3 sm:inline-flex">
+          <TabsTrigger value="access" className="text-xs sm:text-sm">Access</TabsTrigger>
+          <TabsTrigger value="sessions" className="gap-1 sm:gap-2 text-xs sm:text-sm">
+            <Activity className="h-3 w-3 sm:h-4 sm:w-4" />
             Sessions
           </TabsTrigger>
-          <TabsTrigger value="policies" className="gap-2">
-            <Shield className="h-4 w-4" />
+          <TabsTrigger value="policies" className="gap-1 sm:gap-2 text-xs sm:text-sm">
+            <Shield className="h-3 w-3 sm:h-4 sm:w-4" />
             Policies
           </TabsTrigger>
         </TabsList>
@@ -397,11 +402,11 @@ export default function AdminLogs() {
           <Card>
             <CardContent className="p-0">
               {/* Pagination controls */}
-              <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-border">
-                <div className="text-sm text-muted-foreground">
+              <div className="flex items-center justify-between gap-2 px-3 sm:px-4 py-2 sm:py-3 border-b border-border">
+                <div className="text-xs sm:text-sm text-muted-foreground">
                   Page <span className="font-medium text-foreground">{policyPage + 1}</span>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 sm:gap-3">
                   <div className="hidden sm:flex items-center gap-2 text-sm text-muted-foreground">
                     Page size
                     <Select
@@ -429,20 +434,23 @@ export default function AdminLogs() {
                     </Select>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1 sm:gap-2">
                     <Button
                       size="sm"
                       variant="outline"
                       onClick={() => setPolicyPage(Math.max(0, policyPage - 1))}
                       disabled={policyPage === 0 || policyLogsLoading}
+                      className="px-2 sm:px-3"
                     >
-                      Previous
+                      <span className="hidden sm:inline">Previous</span>
+                      <span className="sm:hidden">Prev</span>
                     </Button>
                     <Button
                       size="sm"
                       variant="outline"
                       onClick={() => setPolicyPage(policyPage + 1)}
                       disabled={policyLogs.length < policyPageSize || policyLogsLoading}
+                      className="px-2 sm:px-3"
                     >
                       Next
                     </Button>
@@ -463,28 +471,29 @@ export default function AdminLogs() {
               ) : policyLogs.length > 0 ? (
                 <div
                   ref={policyTableViewportRef}
-                  className="h-[max(240px,calc(100vh-420px))] md:h-[max(320px,calc(100vh-360px))] overflow-auto"
+                  className="h-[max(200px,calc(100vh-480px))] sm:h-[max(240px,calc(100vh-420px))] md:h-[max(320px,calc(100vh-360px))] overflow-auto"
                 >
+                  <div className="min-w-[850px]">
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead className="min-w-[190px]">Timestamp</TableHead>
-                        <TableHead className="min-w-[110px]">Action</TableHead>
-                        <TableHead className="min-w-[180px]">Role</TableHead>
-                        <TableHead className="min-w-[200px]">Performed By</TableHead>
-                        <TableHead className="min-w-[120px]">Progress</TableHead>
-                        <TableHead className="min-w-[110px]">Status</TableHead>
-                        <TableHead className="min-w-[80px]">Details</TableHead>
+                        <TableHead className="min-w-[160px]">Timestamp</TableHead>
+                        <TableHead className="min-w-[100px]">Action</TableHead>
+                        <TableHead className="min-w-[140px]">Role</TableHead>
+                        <TableHead className="min-w-[160px]">Performed By</TableHead>
+                        <TableHead className="min-w-[100px]">Progress</TableHead>
+                        <TableHead className="min-w-[90px]">Status</TableHead>
+                        <TableHead className="min-w-[60px]">Details</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {policyLogs.map((log) => (
                         <TableRow key={log.id}>
-                          <TableCell className="text-sm whitespace-nowrap">
+                          <TableCell className="text-xs sm:text-sm whitespace-nowrap">
                             {formatEventTimestamp(log.createdAt * 1000)}
                           </TableCell>
                           <TableCell>
-                            <div className={`flex items-center gap-1.5 text-sm font-medium ${getActionColor(log.action)}`}>
+                            <div className={`flex items-center gap-1.5 text-xs sm:text-sm font-medium ${getActionColor(log.action)}`}>
                               {getActionIcon(log.action)}
                               <span className="capitalize">{log.action === "denied" ? "rejected" : log.action}</span>
                             </div>
@@ -511,13 +520,13 @@ export default function AdminLogs() {
                             {log.policyStatus ? (
                               <Badge
                                 variant="outline"
-                                className={
+                                className={`text-xs ${
                                   log.policyStatus === "pending" ? "bg-yellow-50 text-yellow-700 border-yellow-200 dark:bg-yellow-950/30 dark:text-yellow-400 dark:border-yellow-800" :
                                   log.policyStatus === "approved" ? "bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-800" :
                                   log.policyStatus === "committed" ? "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/30 dark:text-purple-400 dark:border-purple-800" :
                                   log.policyStatus === "cancelled" ? "bg-gray-50 text-gray-700 border-gray-200 dark:bg-gray-900/30 dark:text-gray-400 dark:border-gray-700" :
                                   ""
-                                }
+                                }`}
                               >
                                 {log.policyStatus}
                               </Badge>
@@ -541,6 +550,7 @@ export default function AdminLogs() {
                       ))}
                     </TableBody>
                   </Table>
+                  </div>
                 </div>
               ) : (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
@@ -573,7 +583,7 @@ export default function AdminLogs() {
             </div>
           ) : policyDetails ? (
             <div className="space-y-6">
-              <div className="grid grid-cols-2 gap-4 text-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
                 <div>
                   <p className="text-muted-foreground">Role</p>
                   <p className="font-mono font-medium">{policyDetails.policy.roleId}</p>

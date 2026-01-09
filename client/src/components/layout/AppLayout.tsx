@@ -262,32 +262,79 @@ export function AppLayout({ children }: AppLayoutProps) {
             ))}
           </SidebarContent>
 
-          <SidebarFooter className="p-4 border-t border-sidebar-border">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" className="w-full justify-start gap-3 px-2" data-testid="user-menu-trigger">
-                  <Avatar className="h-8 w-8">
-                    <AvatarFallback className="bg-primary/10 text-primary text-sm font-medium">
-                      {user?.username?.slice(0, 2).toUpperCase() || "U"}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="flex flex-1 flex-col items-start text-left">
-                    <span className="text-sm font-medium truncate max-w-[120px]">{user?.username}</span>
-                    <span className="text-xs text-muted-foreground truncate max-w-[120px]">{user?.email}</span>
+          <SidebarFooter className="p-4 border-t border-sidebar-border space-y-3">
+            {/* Desktop: Dropdown menu */}
+            <div className="hidden lg:block">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" className="w-full justify-start gap-3 px-2" data-testid="user-menu-trigger">
+                    <Avatar className="h-8 w-8">
+                      <AvatarFallback className="bg-primary/10 text-primary text-sm font-medium">
+                        {user?.username?.slice(0, 2).toUpperCase() || "U"}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="flex flex-1 flex-col items-start text-left">
+                      <span className="text-sm font-medium truncate max-w-[120px]">{user?.username}</span>
+                      <span className="text-xs text-muted-foreground truncate max-w-[120px]">{user?.email}</span>
+                    </div>
+                    <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56">
+                  <div className="px-2 py-2">
+                    <p className="text-sm font-medium">{user?.username}</p>
+                    <p className="text-xs text-muted-foreground">{user?.email}</p>
+                    <Badge variant="secondary" className="mt-2 text-xs">
+                      {user?.role === "admin" ? "Administrator" : "User"}
+                    </Badge>
                   </div>
-                  <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
-                <div className="px-2 py-2">
-                  <p className="text-sm font-medium">{user?.username}</p>
-                  <p className="text-xs text-muted-foreground">{user?.email}</p>
-                  <Badge variant="secondary" className="mt-2 text-xs">
-                    {user?.role === "admin" ? "Administrator" : "User"}
-                  </Badge>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={() => {
+                      void (async () => {
+                        const ok = await refreshToken();
+                        toast({
+                          title: ok ? "Token refreshed" : "Token refresh unavailable",
+                          description: ok
+                            ? "Your roles/claims have been updated for this session."
+                            : "If your roles just changed, try a full page reload.",
+                          variant: ok ? "default" : "destructive",
+                        });
+                      })();
+                    }}
+                    data-testid="refresh-token-button-desktop"
+                  >
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                    Restart session
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={logout} className="text-destructive focus:text-destructive" data-testid="logout-button-desktop">
+                    <LogOut className="mr-2 h-4 w-4" />
+                    Sign out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+            {/* Mobile: User info + direct action buttons */}
+            <div className="lg:hidden space-y-3">
+              <div className="flex items-center gap-3 px-2">
+                <Avatar className="h-8 w-8">
+                  <AvatarFallback className="bg-primary/10 text-primary text-sm font-medium">
+                    {user?.username?.slice(0, 2).toUpperCase() || "U"}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="flex flex-1 flex-col items-start text-left min-w-0">
+                  <span className="text-sm font-medium truncate max-w-full">{user?.username}</span>
+                  <span className="text-xs text-muted-foreground truncate max-w-full">{user?.email}</span>
                 </div>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
+                <Badge variant="secondary" className="text-xs shrink-0">
+                  {user?.role === "admin" ? "Admin" : "User"}
+                </Badge>
+              </div>
+              <div className="flex flex-col gap-1">
+                <Button
+                  variant="ghost"
+                  className="w-full justify-start gap-2 h-10"
                   onClick={() => {
                     void (async () => {
                       const ok = await refreshToken();
@@ -302,16 +349,20 @@ export function AppLayout({ children }: AppLayoutProps) {
                   }}
                   data-testid="refresh-token-button"
                 >
-                  <RefreshCw className="mr-2 h-4 w-4" />
+                  <RefreshCw className="h-4 w-4" />
                   Restart session
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={logout} className="text-destructive focus:text-destructive" data-testid="logout-button">
-                  <LogOut className="mr-2 h-4 w-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="w-full justify-start gap-2 h-10 text-destructive hover:text-destructive hover:bg-destructive/10"
+                  onClick={logout}
+                  data-testid="logout-button"
+                >
+                  <LogOut className="h-4 w-4" />
                   Sign out
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                </Button>
+              </div>
+            </div>
           </SidebarFooter>
         </Sidebar>
 
@@ -358,10 +409,60 @@ export function AppLayout({ children }: AppLayoutProps) {
                 />
                 {isBrowserOnline ? "Online" : "Offline"}
               </Badge>
+              {/* User menu in header - always visible for easy access */}
+              <DropdownMenu modal={false}>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon" className="h-10 w-10 relative" data-testid="mobile-user-menu">
+                    <Avatar className="h-7 w-7">
+                      <AvatarFallback className="bg-primary/10 text-primary text-xs font-medium">
+                        {user?.username?.slice(0, 2).toUpperCase() || "U"}
+                      </AvatarFallback>
+                    </Avatar>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" sideOffset={8} className="w-56 z-[100]">
+                  <div className="px-3 py-3">
+                    <p className="text-sm font-medium">{user?.username}</p>
+                    <p className="text-xs text-muted-foreground">{user?.email}</p>
+                    <Badge variant="secondary" className="mt-2 text-xs">
+                      {user?.role === "admin" ? "Administrator" : "User"}
+                    </Badge>
+                  </div>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    className="py-3 cursor-pointer"
+                    onSelect={() => {
+                      void (async () => {
+                        const ok = await refreshToken();
+                        toast({
+                          title: ok ? "Token refreshed" : "Token refresh unavailable",
+                          description: ok
+                            ? "Your roles/claims have been updated for this session."
+                            : "If your roles just changed, try a full page reload.",
+                          variant: ok ? "default" : "destructive",
+                        });
+                      })();
+                    }}
+                    data-testid="mobile-refresh-token-button"
+                  >
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                    Restart session
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onSelect={logout}
+                    className="py-3 cursor-pointer text-destructive focus:text-destructive"
+                    data-testid="mobile-logout-button"
+                  >
+                    <LogOut className="mr-2 h-4 w-4" />
+                    Sign out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </header>
 
-          <main className="flex-1 overflow-auto bg-background iso-canvas">
+          <main className="flex-1 overflow-y-auto overflow-x-hidden bg-background iso-canvas">
             {children}
           </main>
         </div>

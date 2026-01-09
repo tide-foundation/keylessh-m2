@@ -86,7 +86,7 @@ function ServerForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="space-y-2">
           <Label htmlFor="name">Server Name</Label>
           <Input
@@ -111,7 +111,7 @@ function ServerForm({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="space-y-2">
           <Label htmlFor="port">Port</Label>
           <Input
@@ -368,42 +368,44 @@ export default function AdminServers() {
   const statusById = serverStatusData?.statuses || {};
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between gap-4">
+    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-servers-title">
-            <Server className="h-6 w-6" />
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-servers-title">
+            <Server className="h-5 w-5 sm:h-6 sm:w-6" />
             Manage Servers
           </h1>
-          <p className="text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Add, edit, and remove SSH servers
           </p>
         </div>
 
-        <RefreshButton
-          onClick={() => void refreshNow()}
-          isRefreshing={isFetching}
-          secondsRemaining={secondsRemaining}
-          data-testid="refresh-servers"
-          title="Refresh now"
-        />
+        <div className="flex items-center gap-2">
+          <RefreshButton
+            onClick={() => void refreshNow()}
+            isRefreshing={isFetching}
+            secondsRemaining={secondsRemaining}
+            data-testid="refresh-servers"
+            title="Refresh now"
+          />
 
-        <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-          <DialogTrigger asChild>
-            <Button
-              onClick={() => setEditingServer(null)}
-              disabled={serverLimit ? !serverLimit.allowed : false}
-              title={
-                serverLimit && !serverLimit.allowed
-                  ? `Server limit reached (${serverLimit.current}/${serverLimit.limit}). Upgrade your plan to add more.`
-                  : undefined
-              }
-              data-testid="add-server-button"
-            >
-              <Plus className="h-4 w-4 mr-2" />
-              Add Server
-            </Button>
-          </DialogTrigger>
+          <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+            <DialogTrigger asChild>
+              <Button
+                onClick={() => setEditingServer(null)}
+                disabled={serverLimit ? !serverLimit.allowed : false}
+                title={
+                  serverLimit && !serverLimit.allowed
+                    ? `Server limit reached (${serverLimit.current}/${serverLimit.limit}). Upgrade your plan to add more.`
+                    : "Add Server"
+                }
+                data-testid="add-server-button"
+                className="shrink-0"
+              >
+                <Plus className="h-4 w-4 sm:mr-2" />
+                <span className="hidden sm:inline">Add Server</span>
+              </Button>
+            </DialogTrigger>
           <DialogContent className="max-w-md">
             <DialogHeader>
               <DialogTitle>{editingServer ? "Edit Server" : "Add New Server"}</DialogTitle>
@@ -433,6 +435,7 @@ export default function AdminServers() {
             />
           </DialogContent>
         </Dialog>
+        </div>
       </div>
 
       {serverLimit && !serverLimit.allowed && (
@@ -488,10 +491,10 @@ export default function AdminServers() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Server</TableHead>
-                  <TableHead>Environment</TableHead>
-                  <TableHead>SSH Users</TableHead>
-                  <TableHead>Recording</TableHead>
-                  <TableHead>Enabled</TableHead>
+                  <TableHead className="hidden sm:table-cell">Environment</TableHead>
+                  <TableHead className="hidden lg:table-cell">SSH Users</TableHead>
+                  <TableHead className="hidden md:table-cell">Recording</TableHead>
+                  <TableHead className="hidden sm:table-cell">Enabled</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -507,12 +510,12 @@ export default function AdminServers() {
                         </p>
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden sm:table-cell">
                       <Badge variant="secondary" className="text-xs">
                         {server.environment}
                       </Badge>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden lg:table-cell">
                       <div className="flex flex-wrap gap-1">
                         {server.sshUsers?.slice(0, 3).map((user) => (
                           <Badge key={user} variant="outline" className="text-xs font-mono">
@@ -526,7 +529,7 @@ export default function AdminServers() {
                         )}
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden md:table-cell">
                       {server.recordingEnabled ? (
                         <Badge variant="default" className="gap-1 text-xs">
                           <Video className="h-3 w-3" />
@@ -540,7 +543,7 @@ export default function AdminServers() {
                         </Badge>
                       )}
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden sm:table-cell">
                       <Switch
                         checked={server.enabled}
                         onCheckedChange={(enabled) =>

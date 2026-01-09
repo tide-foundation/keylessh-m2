@@ -250,7 +250,7 @@ export default function Dashboard() {
     <div className="p-4 sm:p-6 space-y-6 sm:space-y-8">
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight" data-testid="dashboard-title">
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-foreground" data-testid="dashboard-title">
             Welcome back, {user?.username}
           </h1>
           <p className="text-sm sm:text-base text-muted-foreground">
@@ -280,7 +280,7 @@ export default function Dashboard() {
       {activeSessions.length > 0 && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-base sm:text-lg font-medium flex items-center gap-2">
+            <h2 className="text-base sm:text-lg font-medium flex items-center gap-2 text-foreground">
               <Activity className="h-5 w-5 text-[hsl(var(--neon-green))]" />
               Active Sessions
             </h2>
@@ -298,7 +298,7 @@ export default function Dashboard() {
 
       <div className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-base sm:text-lg font-medium flex items-center gap-2">
+          <h2 className="text-base sm:text-lg font-medium flex items-center gap-2 text-foreground">
             <Server className="h-5 w-5 text-[hsl(var(--neon-cyan))]" />
             Available Servers
           </h2>
@@ -321,7 +321,7 @@ export default function Dashboard() {
           <Card>
             <CardContent className="flex flex-col items-center justify-center py-12">
               <Server className="h-12 w-12 text-muted-foreground mb-4" />
-              <h3 className="font-medium">No servers available</h3>
+              <h3 className="font-medium text-foreground">No servers available</h3>
               <p className="text-sm text-muted-foreground mt-1">
                 Contact your administrator to get server access
               </p>
@@ -332,7 +332,7 @@ export default function Dashboard() {
 
       {recentSessions.length > 0 && (
         <div className="space-y-4">
-          <h2 className="text-base sm:text-lg font-medium flex items-center gap-2">
+          <h2 className="text-base sm:text-lg font-medium flex items-center gap-2 text-foreground">
             <Clock className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
             Recent Connections
           </h2>

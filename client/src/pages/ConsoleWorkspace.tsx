@@ -114,15 +114,15 @@ export default function ConsoleWorkspace() {
   const activeTab = tabs.find((t) => t.id === activeTabId) || null;
 
   return (
-    <div className="h-full p-4 flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Terminal className="h-5 w-5 text-[hsl(var(--neon-cyan))]" />
-          <h1 className="text-lg font-semibold">Terminal Workspace</h1>
+    <div className="h-full p-2 sm:p-4 flex flex-col gap-2 sm:gap-4">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <Terminal className="h-5 w-5 text-[hsl(var(--neon-cyan))] shrink-0" />
+          <h1 className="text-base sm:text-lg font-semibold truncate">Terminal Workspace</h1>
         </div>
-        <Button variant="neon" onClick={() => setNewTabOpen(true)} data-testid="new-terminal-tab">
-          <Plus className="h-4 w-4 mr-2" />
-          New tab
+        <Button variant="neon" onClick={() => setNewTabOpen(true)} data-testid="new-terminal-tab" className="shrink-0" title="New tab">
+          <Plus className="h-4 w-4 sm:mr-2" />
+          <span className="hidden sm:inline">New tab</span>
         </Button>
       </div>
 
