@@ -124,14 +124,14 @@ export default function AdminRecordings() {
   const totalStorage = data?.totalStorage || 0;
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-start justify-between gap-4">
+    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
-            <Video className="h-6 w-6" />
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2 text-foreground">
+            <Video className="h-5 w-5 sm:h-6 sm:w-6" />
             Session Recordings
           </h1>
-          <p className="text-muted-foreground">
+          <p className="text-sm sm:text-base text-muted-foreground">
             View and playback recorded SSH sessions for compliance audits
           </p>
         </div>
@@ -140,14 +140,15 @@ export default function AdminRecordings() {
           isRefreshing={isFetching}
           secondsRemaining={secondsRemaining}
           title="Refresh now"
+          className="self-end sm:self-auto"
         />
       </div>
 
-      <div className="flex items-center gap-4 flex-wrap">
-        <div className="relative flex-1 max-w-sm">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
+        <div className="relative flex-1 sm:max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="Search recordings by command or output..."
+            placeholder="Search recordings..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="pl-9"
@@ -167,7 +168,7 @@ export default function AdminRecordings() {
 
       <Card>
         <div className="p-4 border-b border-border">
-          <h2 className="font-medium flex items-center gap-2">
+          <h2 className="font-medium flex items-center gap-2 text-foreground">
             <Video className="h-4 w-4" />
             Recorded Sessions
           </h2>
@@ -187,94 +188,153 @@ export default function AdminRecordings() {
               ))}
             </div>
           ) : recordings.length > 0 ? (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Server</TableHead>
-                  <TableHead>User</TableHead>
-                  <TableHead>SSH User</TableHead>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Duration</TableHead>
-                  <TableHead>Size</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
+            <>
+              {/* Mobile card layout */}
+              <div className="md:hidden divide-y divide-border">
                 {recordings.map((recording) => (
-                  <TableRow key={recording.id}>
-                    <TableCell>
-                      <div className="flex items-center gap-3">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted">
-                          <Server className="h-4 w-4 text-muted-foreground" />
+                  <div key={recording.id} className="p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-muted">
+                          <Server className="h-5 w-5 text-muted-foreground" />
                         </div>
-                        <div>
-                          <p className="font-medium">{recording.serverName}</p>
-                          <p className="text-xs text-muted-foreground font-mono">
-                            {recording.serverId.slice(0, 8)}...
-                          </p>
+                        <div className="min-w-0">
+                          <p className="font-medium text-foreground truncate">{recording.serverName}</p>
+                          <p className="text-xs text-muted-foreground truncate">{recording.userEmail}</p>
                         </div>
                       </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="space-y-0.5">
-                        <div className="text-sm">{recording.userEmail}</div>
-                        <div className="text-xs font-mono text-muted-foreground">
-                          {recording.userId.slice(0, 8)}...
-                        </div>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className="font-mono">
+                      <Badge variant="outline" className="font-mono shrink-0">
                         {recording.sshUser}
                       </Badge>
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {formatDate(recording.startedAt)}
-                    </TableCell>
-                    <TableCell className="text-sm font-mono">
-                      {formatDuration(recording.duration)}
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {formatBytes(recording.fileSize)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <Button
-                          size="sm"
-                          variant="default"
-                          className="gap-1"
-                          onClick={() => handlePlay(recording)}
-                          disabled={loadingRecordingId === recording.id}
-                        >
-                          <Play className="h-4 w-4" />
-                          {loadingRecordingId === recording.id ? "Loading..." : "Play"}
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="gap-1"
-                          onClick={() => handleDownload(recording.id)}
-                        >
-                          <Download className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          className="gap-1"
-                          onClick={() => setDeletingRecording(recording)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                      <span>{formatDate(recording.startedAt)}</span>
+                      <span>•</span>
+                      <span className="font-mono">{formatDuration(recording.duration)}</span>
+                      <span>•</span>
+                      <span>{formatBytes(recording.fileSize)}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="default"
+                        className="gap-1 flex-1 min-h-[44px]"
+                        onClick={() => handlePlay(recording)}
+                        disabled={loadingRecordingId === recording.id}
+                      >
+                        <Play className="h-4 w-4" />
+                        {loadingRecordingId === recording.id ? "Loading..." : "Play"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="min-h-[44px] min-w-[44px]"
+                        onClick={() => handleDownload(recording.id)}
+                      >
+                        <Download className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        className="min-h-[44px] min-w-[44px]"
+                        onClick={() => setDeletingRecording(recording)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
                 ))}
-              </TableBody>
-            </Table>
+              </div>
+              {/* Desktop table layout */}
+              <Table className="hidden md:table">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Server</TableHead>
+                    <TableHead>User</TableHead>
+                    <TableHead>SSH User</TableHead>
+                    <TableHead>Date</TableHead>
+                    <TableHead>Duration</TableHead>
+                    <TableHead>Size</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {recordings.map((recording) => (
+                    <TableRow key={recording.id}>
+                      <TableCell>
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted">
+                            <Server className="h-4 w-4 text-muted-foreground" />
+                          </div>
+                          <div>
+                            <p className="font-medium">{recording.serverName}</p>
+                            <p className="text-xs text-muted-foreground font-mono">
+                              {recording.serverId.slice(0, 8)}...
+                            </p>
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="space-y-0.5">
+                          <div className="text-sm">{recording.userEmail}</div>
+                          <div className="text-xs font-mono text-muted-foreground">
+                            {recording.userId.slice(0, 8)}...
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="font-mono">
+                          {recording.sshUser}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {formatDate(recording.startedAt)}
+                      </TableCell>
+                      <TableCell className="text-sm font-mono">
+                        {formatDuration(recording.duration)}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {formatBytes(recording.fileSize)}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <Button
+                            size="sm"
+                            variant="default"
+                            className="gap-1"
+                            onClick={() => handlePlay(recording)}
+                            disabled={loadingRecordingId === recording.id}
+                          >
+                            <Play className="h-4 w-4" />
+                            {loadingRecordingId === recording.id ? "Loading..." : "Play"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="gap-1"
+                            onClick={() => handleDownload(recording.id)}
+                          >
+                            <Download className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            className="gap-1"
+                            onClick={() => setDeletingRecording(recording)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </>
           ) : (
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <Video className="h-12 w-12 text-muted-foreground mb-4" />
-              <h3 className="font-medium">No recordings found</h3>
+              <h3 className="font-medium text-foreground">No recordings found</h3>
               <p className="text-sm text-muted-foreground mt-1">
                 {search
                   ? "Try a different search term"
@@ -325,20 +385,22 @@ export default function AdminRecordings() {
 
       {/* Recording Playback Dialog */}
       <Dialog open={!!playingRecording} onOpenChange={(open) => !open && setPlayingRecording(null)}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden">
+        <DialogContent className="w-[95vw] max-w-4xl max-h-[90vh] overflow-hidden p-4 sm:p-6">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Video className="h-5 w-5" />
-              Session Recording
+            <DialogTitle className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+              <div className="flex items-center gap-2">
+                <Video className="h-5 w-5" />
+                Session Recording
+              </div>
               {playingRecording && (
                 <span className="text-sm font-normal text-muted-foreground">
-                  - {playingRecording.serverName} ({playingRecording.sshUser})
+                  {playingRecording.serverName} ({playingRecording.sshUser})
                 </span>
               )}
             </DialogTitle>
           </DialogHeader>
           {playingRecording && (
-            <div className="overflow-hidden">
+            <div className="overflow-auto">
               <RecordingPlayer recording={playingRecording} />
             </div>
           )}

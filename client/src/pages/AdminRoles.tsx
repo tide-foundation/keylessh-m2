@@ -485,14 +485,14 @@ export default function AdminRoles() {
   );
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-roles-title">
-            <KeyRound className="h-6 w-6" />
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-roles-title">
+            <KeyRound className="h-5 w-5 sm:h-6 sm:w-6" />
             Manage Roles
           </h1>
-          <p className="text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Create and manage user roles for access control
           </p>
           <p className="text-xs text-muted-foreground">
@@ -508,9 +508,9 @@ export default function AdminRoles() {
             data-testid="refresh-roles"
             title="Refresh now"
           />
-          <Button onClick={handleCreate} data-testid="add-role-button">
-            <Plus className="h-4 w-4 mr-2" />
-            Add Role
+          <Button onClick={handleCreate} data-testid="add-role-button" className="shrink-0" title="Add Role">
+            <Plus className="h-4 w-4 sm:mr-2" />
+            <span className="hidden sm:inline">Add Role</span>
           </Button>
         </div>
       </div>
@@ -547,8 +547,8 @@ export default function AdminRoles() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Role Name</TableHead>
-                  <TableHead>Description</TableHead>
-                  <TableHead>Type</TableHead>
+                  <TableHead className="hidden sm:table-cell">Description</TableHead>
+                  <TableHead className="hidden md:table-cell">Type</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -570,12 +570,12 @@ export default function AdminRoles() {
                         </div>
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden sm:table-cell">
                       <p className="text-sm text-muted-foreground">
                         {role.description || "No description"}
                       </p>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden md:table-cell">
                       <Badge variant={role.clientRole ? "secondary" : "default"}>
                         {role.clientRole ? "Client Role" : "Realm Role"}
                       </Badge>
@@ -768,7 +768,7 @@ export default function AdminRoles() {
                           })()
                         )}
 
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                           <div className="space-y-2">
                             <Label>Approval Type</Label>
                             <Select
@@ -1061,7 +1061,7 @@ export default function AdminRoles() {
                       </p>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="space-y-2">
                         <Label htmlFor="approvalType">Approval Type</Label>
                         <Select
