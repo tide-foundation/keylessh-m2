@@ -276,14 +276,14 @@ export default function AdminUsers() {
   const isUpdating = updateProfileMutation.isPending || updateRolesMutation.isPending;
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-users-title">
-            <Users className="h-6 w-6" />
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2" data-testid="admin-users-title">
+            <Users className="h-5 w-5 sm:h-6 sm:w-6" />
             Manage Users
           </h1>
-          <p className="text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Manage user accounts, roles, and permissions
           </p>
         </div>
@@ -301,12 +301,13 @@ export default function AdminUsers() {
             title={
               userLimit && !userLimit.allowed
                 ? `User limit reached (${userLimit.current}/${userLimit.limit}). Upgrade your plan to add more.`
-                : undefined
+                : "Add User"
             }
             data-testid="add-user-button"
+            className="shrink-0"
           >
-            <Plus className="h-4 w-4 mr-2" />
-            Add User
+            <Plus className="h-4 w-4 sm:mr-2" />
+            <span className="hidden sm:inline">Add User</span>
           </Button>
         </div>
       </div>
@@ -362,9 +363,9 @@ export default function AdminUsers() {
               <TableHeader>
                 <TableRow>
                   <TableHead>User</TableHead>
-                  <TableHead>Roles</TableHead>
-                  <TableHead>Account Status</TableHead>
-                  <TableHead>Access</TableHead>
+                  <TableHead className="hidden sm:table-cell">Roles</TableHead>
+                  <TableHead className="hidden md:table-cell">Account Status</TableHead>
+                  <TableHead className="hidden lg:table-cell">Access</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -389,7 +390,7 @@ export default function AdminUsers() {
                           </div>
                         </div>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="hidden sm:table-cell">
                         <div className="flex flex-wrap gap-1">
                           {userRoles.length > 0 ? (
                             <>
@@ -409,7 +410,7 @@ export default function AdminUsers() {
                           )}
                         </div>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="hidden md:table-cell">
                         {user.linked ? (
                           <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-400 dark:border-green-800">
                             <Link className="h-3 w-3 mr-1" />
@@ -422,7 +423,7 @@ export default function AdminUsers() {
                           </Badge>
                         )}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="hidden lg:table-cell">
                         {isAdmin ? (
                           <span className="text-xs text-muted-foreground">Admin (cannot disable)</span>
                         ) : (
@@ -478,7 +479,7 @@ export default function AdminUsers() {
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* User Details */}
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>First Name</Label>
                 <Input
@@ -516,7 +517,7 @@ export default function AdminUsers() {
                 </p>
               )}
               <div
-                className={`grid grid-cols-2 gap-4 ${!editingUser?.linked ? "opacity-50 pointer-events-none" : ""}`}
+                className={`grid grid-cols-1 sm:grid-cols-2 gap-4 ${!editingUser?.linked ? "opacity-50 pointer-events-none" : ""}`}
               >
                 {/* Assigned Roles */}
                 <div className="border rounded-md">
@@ -656,7 +657,7 @@ export default function AdminUsers() {
                 required
               />
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="firstName">First Name</Label>
                 <Input
