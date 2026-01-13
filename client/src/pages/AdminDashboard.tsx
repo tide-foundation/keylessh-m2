@@ -3,13 +3,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Server, Users, Activity, Shield, TrendingUp, AlertTriangle } from "lucide-react";
-import type { Server as ServerType, AdminUser, ActiveSession, ServerStatus } from "@shared/schema";
+import type { Server as ServerType, AdminUser, ActiveSession, ServerStatus, Bridge } from "@shared/schema";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { ADMIN_ROLE_SET } from "@shared/config/roles";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
-import { useCallback } from "react";
-import { api } from "@/lib/api";
+import { useCallback, useEffect, useState } from "react";
+import { api, testBridgeConnection, getBridgeWebSocketUrl } from "@/lib/api";
 import type { LicenseInfo } from "@/lib/api";
 import { RefreshButton } from "@/components/RefreshButton";
 
@@ -62,6 +62,10 @@ function StatCardSkeleton() {
 }
 
 export default function AdminDashboard() {
+  // Client-side status checks for servers using external bridges
+  const [clientSideStatus, setClientSideStatus] = useState<Record<string, ServerStatus>>({});
+  const [checkingStatus, setCheckingStatus] = useState<Set<string>>(new Set());
+
   const { data: servers, isLoading: serversLoading, refetch: refetchServers } = useQuery<ServerType[]>({
     queryKey: ["/api/admin/servers"],
   });
@@ -79,6 +83,68 @@ export default function AdminDashboard() {
   const { data: sessions, isLoading: sessionsLoading, refetch: refetchSessions } = useQuery<ActiveSession[]>({
     queryKey: ["/api/admin/sessions"],
   });
+
+  const { data: bridges } = useQuery<Bridge[]>({
+    queryKey: ["/api/admin/bridges"],
+  });
+
+  // Check server status through bridge (client-side for external bridges)
+  const checkServerViaClient = useCallback(async (server: ServerType) => {
+    if (!bridges) return;
+
+    // Determine which bridge to use
+    let bridgeUrl: string;
+    if (server.bridgeId) {
+      const bridge = bridges.find(b => b.id === server.bridgeId && b.enabled);
+      if (!bridge) return;
+      bridgeUrl = bridge.url;
+    } else {
+      // Use default bridge
+      const defaultBridge = bridges.find(b => b.isDefault && b.enabled);
+      bridgeUrl = defaultBridge?.url || getBridgeWebSocketUrl();
+    }
+
+    setCheckingStatus(prev => new Set(prev).add(server.id));
+
+    try {
+      const result = await testBridgeConnection(bridgeUrl, server.host, server.port || 22, 5000);
+      setClientSideStatus(prev => ({
+        ...prev,
+        [server.id]: result.success ? "online" : "offline"
+      }));
+    } catch {
+      setClientSideStatus(prev => ({
+        ...prev,
+        [server.id]: "offline"
+      }));
+    } finally {
+      setCheckingStatus(prev => {
+        const next = new Set(prev);
+        next.delete(server.id);
+        return next;
+      });
+    }
+  }, [bridges]);
+
+  // Check servers with "unknown" status through client-side bridge
+  useEffect(() => {
+    if (!servers || !serverStatusData || !bridges) return;
+
+    const serverStatuses = serverStatusData.statuses || {};
+
+    // Find servers with "unknown" status that haven't been checked yet (limit to first 5 for dashboard)
+    const unknownServers = servers.filter(server =>
+      server.enabled &&
+      serverStatuses[server.id] === "unknown" &&
+      !clientSideStatus[server.id] &&
+      !checkingStatus.has(server.id)
+    ).slice(0, 5);
+
+    // Check up to 3 servers at a time to avoid overwhelming
+    unknownServers.slice(0, 3).forEach(server => {
+      checkServerViaClient(server);
+    });
+  }, [servers, serverStatusData, bridges, clientSideStatus, checkingStatus, checkServerViaClient]);
 
   const { data: accessApprovals } = useQuery({
     queryKey: ["/api/admin/access-approvals"],
@@ -101,6 +167,7 @@ export default function AdminDashboard() {
   const isFetching = isFetchingServers || isFetchingUsers || isFetchingSessions;
 
   const refreshAll = useCallback(async () => {
+    setClientSideStatus({}); // Clear client-side status to re-check via bridge
     await Promise.all([refetchServers(), refetchServerStatus(), refetchUsers(), refetchSessions()]);
   }, [refetchServers, refetchServerStatus, refetchUsers, refetchSessions]);
 
@@ -118,13 +185,17 @@ export default function AdminDashboard() {
   const adminUsers =
     users?.filter((u) => u.role?.some((r) => ADMIN_ROLE_SET.has(r))) || [];
 
-  const statusById = serverStatusData?.statuses || {};
+  const serverStatuses = serverStatusData?.statuses || {};
+  // Merge server-side and client-side statuses (client-side takes precedence)
+  const getEffectiveStatus = (serverId: string): ServerStatus =>
+    clientSideStatus[serverId] || serverStatuses[serverId] || "unknown";
+
   const enabledOnlineCount =
-    enabledServers.filter((s) => (statusById[s.id] || "unknown") === "online").length || 0;
+    enabledServers.filter((s) => getEffectiveStatus(s.id) === "online").length || 0;
   const enabledOfflineCount =
-    enabledServers.filter((s) => (statusById[s.id] || "unknown") === "offline").length || 0;
+    enabledServers.filter((s) => getEffectiveStatus(s.id) === "offline").length || 0;
   const enabledUnknownCount =
-    enabledServers.filter((s) => (statusById[s.id] || "unknown") === "unknown").length || 0;
+    enabledServers.filter((s) => getEffectiveStatus(s.id) === "unknown").length || 0;
 
   const accessPendingCount = Array.isArray(accessApprovals) ? accessApprovals.length : 0;
   const policyPendingCount =
@@ -308,14 +379,15 @@ export default function AdminDashboard() {
               <div className="space-y-3">
                 {servers.slice(0, 5).map((server) => (
                   (() => {
-                    const status = server.enabled ? (statusById[server.id] || "unknown") : "unknown";
-                    const label = !server.enabled ? "Disabled" : status === "online" ? "Online" : status === "offline" ? "Offline" : "Unknown";
+                    const status = server.enabled ? getEffectiveStatus(server.id) : "unknown";
+                    const isChecking = checkingStatus.has(server.id);
+                    const label = !server.enabled ? "Disabled" : isChecking ? "Checking..." : status === "online" ? "Online" : status === "offline" ? "Offline" : "Unknown";
                     const badgeVariant =
-                      !server.enabled ? "secondary" : status === "online" ? "default" : status === "offline" ? "destructive" : "secondary";
+                      !server.enabled ? "secondary" : isChecking ? "secondary" : status === "online" ? "default" : status === "offline" ? "destructive" : "secondary";
                     const iconBg =
-                      !server.enabled ? "bg-muted" : status === "online" ? "bg-chart-2/10" : status === "offline" ? "bg-destructive/10" : "bg-muted";
+                      !server.enabled ? "bg-muted" : isChecking ? "bg-muted" : status === "online" ? "bg-chart-2/10" : status === "offline" ? "bg-destructive/10" : "bg-muted";
                     const iconColor =
-                      !server.enabled ? "text-muted-foreground" : status === "online" ? "text-chart-2" : status === "offline" ? "text-destructive" : "text-muted-foreground";
+                      !server.enabled ? "text-muted-foreground" : isChecking ? "text-muted-foreground" : status === "online" ? "text-chart-2" : status === "offline" ? "text-destructive" : "text-muted-foreground";
                     return (
                   <div key={server.id} className="flex items-center justify-between py-2">
                     <div className="flex items-center gap-3">
