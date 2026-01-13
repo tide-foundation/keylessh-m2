@@ -83,9 +83,8 @@ export function setupWSBridge(httpServer: HTTPServer): void {
   wss.on("connection", async (ws: WebSocket, req) => {
     const url = new URL(req.url || "/", `http://${req.headers.host}`);
     const token = url.searchParams.get("token");
-    // Decode host to handle URL-encoded IPv6 scoped addresses (e.g., %25 -> %)
-    const hostParam = url.searchParams.get("host");
-    const host = hostParam ? decodeURIComponent(hostParam) : null;
+    // searchParams.get() already decodes URL-encoded values (e.g., %25 -> %)
+    const host = url.searchParams.get("host");
     const port = parseInt(url.searchParams.get("port") || "22", 10);
     const sessionId = url.searchParams.get("sessionId");
 
