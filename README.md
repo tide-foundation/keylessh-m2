@@ -53,7 +53,14 @@ cd keylessh/script/tidecloak
 ./start.sh
 ```
 
-### 2. Link your Tide account
+### 2. Activate your free Tide subscription
+
+During initialization, you'll be prompted to:
+
+1. **Enter an email to manage your license** - Provide a valid email address for your Tide subscription
+2. **Accept the Terms & Conditions** - Review the terms at https://tide.org/legal and enter `y` or `yes` to agree
+
+### 3. Link your Tide account
 
 The script will generate an invite link:
 
@@ -66,7 +73,7 @@ Open this link in your browser and either:
 - Create a new  tide account, or
 - Sign in with your existing Tide account
 
-### 3. Wait for initialization
+### 4. Wait for initialization
 
 The script will detect when linking is complete and continue finishing the setup:
 
@@ -74,7 +81,7 @@ The script will detect when linking is complete and continue finishing the setup
 🎉 Tidecloak initialization complete!
 ```
 
-### 4. Start the app
+### 5. Start the app
 
 ```bash
 cd ../..  # back to keylessh root
@@ -123,7 +130,9 @@ Here's how you set up your first SSH server and access it using KeyleSSH:
 You will now need to set up the server's user with a public key authentication. Connect to your server using an SSH client (e.g. Use `ssh user@192.168.0.10` in your local terminal) with the user `user` and run the following commands (replace the string `ssh-ed25519 AA....@keylessh` with what you copied in the latest step above):
 ```bash
 mkdir /home/user/.ssh
-echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIsXOB07HlSdJFuVm9ysWBN2orUkljwHSl2Mlbf9uI/8 user@keylessh" > /home/user/.ssh/authorized_keys
+echo -e "\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIsXOB07HlSdJFuVm9ysWBN2orUkljwHSl2Mlbf9uI/8 user@keylessh" >> /home/user/.ssh/authorized_keys
+chmod 600 /home/user/.ssh/authorized_keys
+chmod 700 /home/user/.ssh
 ```
 
 Now return to the KeyleSSH `Dashboard` page where the "Authorize SSH Session" pop-up is opened, and click the `Authorize & Connect` button.
