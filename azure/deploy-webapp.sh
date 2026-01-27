@@ -16,6 +16,7 @@ fi
 ENV_NAME="${ENV_NAME:-myenv}"
 RESOURCE_GROUP="${RESOURCE_GROUP:-keylessh-${ENV_NAME}}"
 WEBAPP_NAME="${WEBAPP_NAME:-keylessh-${ENV_NAME}}"
+TIDECLOAK_CONFIG="${TIDECLOAK_CONFIG:-$SCRIPT_DIR/tidecloak.json}"
 
 # =============================================================================
 print_header() {
@@ -59,6 +60,15 @@ cp -r dist deploy/
 # Copy package files
 cp package.json deploy/
 cp package-lock.json deploy/
+
+# Copy tidecloak.json if it exists
+if [ -f "$TIDECLOAK_CONFIG" ]; then
+    mkdir -p deploy/data
+    cp "$TIDECLOAK_CONFIG" deploy/data/tidecloak.json
+    echo "Included tidecloak.json from $TIDECLOAK_CONFIG"
+else
+    echo "Warning: tidecloak.json not found at $TIDECLOAK_CONFIG"
+fi
 
 # Install production dependencies only
 cd deploy
