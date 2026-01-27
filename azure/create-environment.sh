@@ -1,6 +1,12 @@
 #!/bin/bash
 set -e
 
+# Load .env file if it exists
+SCRIPT_DIR="$(dirname "$0")"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
+fi
+
 # =============================================================================
 # KeyleSSH Environment Setup Script
 # Creates: Resource Group, Web App (frontend), Container App (TCP Bridge), ACR
