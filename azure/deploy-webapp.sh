@@ -42,6 +42,17 @@ fi
 cd "$SCRIPT_DIR/.."
 
 # =============================================================================
+print_header "Copying TideCloak Config"
+if [ -f "$TIDECLOAK_CONFIG" ]; then
+    # Copy to client adapter (used during build for browser auth)
+    cp "$TIDECLOAK_CONFIG" client/src/tidecloakAdapter.json
+    echo "Copied $TIDECLOAK_CONFIG to client/src/tidecloakAdapter.json"
+else
+    echo "Warning: tidecloak.json not found at $TIDECLOAK_CONFIG"
+    echo "Build will use default client/src/tidecloakAdapter.json"
+fi
+
+# =============================================================================
 print_header "Installing Dependencies"
 npm ci
 
