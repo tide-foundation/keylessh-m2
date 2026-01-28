@@ -34,15 +34,14 @@ export default defineConfig({
     alias: {
       "@": path.resolve(import.meta.dirname, "client", "src"),
       "@shared": path.resolve(import.meta.dirname, "shared"),
+      // Stub node-rsa for browser (Node.js only module)
+      "node-rsa": path.resolve(import.meta.dirname, "client", "src", "stubs", "node-rsa.ts"),
     },
   },
   root: path.resolve(import.meta.dirname, "client"),
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
-    rollupOptions: {
-      external: ["node-rsa"],
-    },
   },
   server: {
     fs: {
