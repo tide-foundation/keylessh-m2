@@ -40,7 +40,8 @@ import { createRequire } from "module";
 import { fileURLToPath } from "url";
 
 // Use createRequire for heimdall-tide (CJS module with broken ESM exports)
-const require = createRequire(import.meta.url || fileURLToPath(new URL(".", import.meta.url)));
+// Note: import.meta.url is undefined in CJS builds, so we fall back to process.cwd()
+const require = createRequire(import.meta.url || `file://${process.cwd()}/`);
 const { PolicySignRequest } = require("heimdall-tide");
 
 // Base64 conversion helpers for Tide request handling
