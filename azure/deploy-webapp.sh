@@ -86,8 +86,7 @@ az webapp deploy \
     --name $WEBAPP_NAME \
     --resource-group $RESOURCE_GROUP \
     --src-path deploy.zip \
-    --type zip \
-    --clean true
+    --type zip
 
 # =============================================================================
 print_header "Cleaning Up"
