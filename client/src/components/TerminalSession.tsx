@@ -366,6 +366,58 @@ export function TerminalSession({
       send(data);
     });
 
+    // Intercept browser shortcuts that conflict with shell/SSH key bindings.
+    // Ctrl+C: copy if text selected, otherwise SIGINT (Windows Terminal / VS Code behaviour)
+    // Ctrl+V: paste from clipboard
+    // All other Ctrl+<letter> combos that browsers steal: preventDefault and let xterm forward to SSH.
+    // Exceptions kept as browser defaults: Ctrl+F (find), Ctrl+R (reload/reverse-search is ambiguous).
+    const PREVENT_BROWSER_KEYS = new Set([
+      'w', // delete word      (browser: close tab)
+      't', // transpose chars  (browser: new tab)
+      'n', // next history     (browser: new window)
+      'k', // kill to EOL      (browser: focus address bar)
+      'l', // clear screen     (browser: focus address bar)
+      'u', // kill to BOL      (browser: view source)
+      'd', // EOF / logout     (browser: bookmark)
+      'h', // backspace        (browser: history)
+      'j', // newline          (browser: downloads)
+      'o', // operate-and-next (browser: open file)
+      'p', // prev history     (browser: print)
+      's', // XOFF             (browser: save page)
+      'q', // XON              (browser: quit in some)
+      'g', // abort / bell     (browser: find next)
+    ]);
+
+    term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      if (e.type !== 'keydown') return true;
+
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'c') {
+        const selection = term.getSelection();
+        if (selection) {
+          navigator.clipboard.writeText(selection);
+          term.clearSelection();
+          return false;
+        }
+        return true; // no selection → SIGINT
+      }
+
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'v') {
+        e.preventDefault();
+        navigator.clipboard.readText().then((text) => {
+          if (text) send(text);
+        }).catch(() => {});
+        return false;
+      }
+
+      // Block browser default for shell-relevant Ctrl+<letter> combos
+      if (e.ctrlKey && !e.shiftKey && !e.metaKey && PREVENT_BROWSER_KEYS.has(e.key)) {
+        e.preventDefault();
+        return true; // let xterm forward to SSH
+      }
+
+      return true;
+    });
+
     const handleResize = () => {
       fitNow();
     };
@@ -409,6 +461,37 @@ export function TerminalSession({
     window.setTimeout(fit, 50);
     window.setTimeout(fit, 150);
   }, [isActive, resize, setDimensions, status]);
+
+  // Auto-focus terminal on any keypress when connected, and prevent
+  // browser shortcuts (Ctrl+W close tab, Ctrl+N new window, etc.) at the
+  // window level so they reach xterm instead of triggering browser actions.
+  useEffect(() => {
+    if (status !== "connected" || !isActive) return;
+
+    xtermRef.current?.focus();
+
+    const PREVENT_BROWSER_KEYS = new Set([
+      'w', 't', 'n', 'k', 'l', 'u', 'd', 'h', 'j', 'o', 'p', 's', 'q', 'g',
+    ]);
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const active = document.activeElement;
+      // Don't steal focus from inputs, textareas, selects, or dialogs
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.closest('[role="dialog"]'))) {
+        return;
+      }
+
+      // Block browser defaults for shell-relevant Ctrl+<letter> combos
+      if (e.ctrlKey && !e.shiftKey && !e.metaKey && PREVENT_BROWSER_KEYS.has(e.key)) {
+        e.preventDefault();
+      }
+
+      xtermRef.current?.focus();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [status, isActive]);
 
   useEffect(() => {
     const prev = prevStatusRef.current;
