@@ -23,6 +23,7 @@ import AdminLogs from "@/pages/AdminLogs";
 import AdminLicense from "@/pages/AdminLicense";
 import AdminRecordings from "@/pages/AdminRecordings";
 import AdminBridges from "@/pages/AdminBridges";
+import Onboarding from "@/pages/Onboarding";
 import NotFound from "@/pages/not-found";
 import { Loader2, Terminal } from "lucide-react";
 
@@ -184,6 +185,7 @@ function Router() {
     <Switch>
       <Route path="/login" component={Login} />
       <Route path="/auth/redirect" component={AuthRedirect} />
+      <Route path="/onboarding" component={Onboarding} />
       {/* All other routes require authentication */}
       <Route>
         <AuthenticatedApp />
