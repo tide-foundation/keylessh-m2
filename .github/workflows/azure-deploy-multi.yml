@@ -52,7 +52,8 @@ jobs:
           cp package.json deploy/
           cp package-lock.json deploy/
 
-          # Install production dependencies only
+          # Install production dependencies only (compiled for Node 20 on Linux)
+          # This ensures better-sqlite3 is compiled for the correct Node version
           cd deploy
           npm ci --omit=dev
 
