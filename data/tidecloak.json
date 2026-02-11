@@ -4,6 +4,8 @@
   "ssl-required": "external",
   "resource": "keylessh",
   "public-client": true,
+  "verify-token-audience": true,
+  "use-resource-role-mappings": true,
   "confidential-port": 0,
   "jwk": {
     "keys": [
@@ -20,5 +22,6 @@
   "vendorId": "3060927805854327144842357223932889256740359428059932213438482668439497636749",
   "homeOrkUrl": "https://ork1.tideprotocol.com",
   "client-origin-auth-http://localhost": "sYJNR2OPkJU6qKWZM92yxgeEVY8EGXstNUJKmIja8HCgIBDxi2K2EmP6mwF39pRzsPvdxFBK3WiP6eBWBbc+Aw==",
-  "client-origin-auth-http://localhost:3000": "Z7BR168myiVH4sx8R/jJnXgYvIgEg4DdIv6wQ0YSofmdO5nzBd03uIxj6fk0h0ps5elJqzWpbbwGIGLEn9HVDA=="
+  "client-origin-auth-https://free.keylessh.com": "DsmGY5saI9QpfQf2LVXfRO1zrLM9LUjSCPU4qPK/ryAoJ9NzHDn79utJXZQCo7XgANTd5dRxh/zCT+ft6xVECw==",
+  "client-origin-auth-http://localhost:3000": "NxhL/pY0is97cpO+ZGSjoxRy4sjH3sldTYeD3emUk/HVTtIPh6IhGN3JpbtzzQ5wjPYy0XFlTKARP/yyFnB0Cw=="
 }
