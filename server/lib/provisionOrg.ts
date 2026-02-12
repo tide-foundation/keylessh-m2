@@ -739,5 +739,65 @@ async function createFreemiumAdminUser(
     throw new Error("Failed to find created freemium user");
   }
 
-  return users[0].id;
+  const userId = users[0].id;
+
+  // Assign default realm role to trigger changeset commit for attributes
+  // This is a workaround for TideCloak IGA - role assignment triggers the changeset
+  // which should include the user attributes set during creation
+  await assignDefaultRealmRole(authServerUrl, token, realmName, userId);
+
+  return userId;
+}
+
+// Assign default realm role (appUser) to trigger changeset in TideCloak IGA
+async function assignDefaultRealmRole(
+  authServerUrl: string,
+  token: string,
+  realmName: string,
+  userId: string
+): Promise<void> {
+  // Get the appUser role (or _tide_enabled as fallback)
+  const rolesResponse = await fetch(
+    `${authServerUrl}/admin/realms/${realmName}/roles`,
+    {
+      headers: {
+        "Authorization": `Bearer ${token}`,
+      },
+    }
+  );
+
+  if (!rolesResponse.ok) {
+    log(`Warning: Failed to get realm roles: ${rolesResponse.status}`);
+    return;
+  }
+
+  const roles = await rolesResponse.json();
+
+  // Look for appUser first, then _tide_enabled
+  const targetRole = roles.find((r: { name: string }) => r.name === "appUser")
+    || roles.find((r: { name: string }) => r.name === "_tide_enabled");
+
+  if (!targetRole) {
+    log("Warning: No appUser or _tide_enabled role found to assign");
+    return;
+  }
+
+  // Assign the role to the user
+  const assignResponse = await fetch(
+    `${authServerUrl}/admin/realms/${realmName}/users/${userId}/role-mappings/realm`,
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify([targetRole]),
+    }
+  );
+
+  if (!assignResponse.ok) {
+    log(`Warning: Failed to assign ${targetRole.name} role: ${assignResponse.status}`);
+  } else {
+    log(`Assigned ${targetRole.name} role to user ${userId}`);
+  }
 }
