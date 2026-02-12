@@ -433,6 +433,19 @@ export default function Onboarding() {
                     </div>
                   </button>
 
+                  {/* Beta Disclaimer for Free Tier */}
+                  {formData.tier === "free" && (
+                    <Alert variant="default" className="border-amber-500/50 bg-amber-500/10">
+                      <AlertCircle className="h-4 w-4 text-amber-500" />
+                      <AlertDescription className="text-sm">
+                        <span className="font-medium text-amber-600 dark:text-amber-400">Beta Notice:</span>{" "}
+                        The Free Tier is currently in beta. Service may experience occasional downtime
+                        for maintenance and improvements. Data stored during beta may be reset.
+                        For production workloads, please consider the Enterprise plan.
+                      </AlertDescription>
+                    </Alert>
+                  )}
+
                   {/* Paid Tier */}
                   <button
                     type="button"
