@@ -116,7 +116,7 @@ import {
   getOrgId,
   type AuthenticatedRequest,
 } from "./auth";
-import { DEFAULT_ORG_ID } from "./config";
+import { DEFAULT_ORG_ID, ENABLE_MULTI_TENANT } from "./config";
 import {
   GetUserChangeRequests,
   GetRoleChangeRequests,
@@ -663,6 +663,13 @@ export async function registerRoutes(
           return;
         }
 
+        // Multi-tenant isolation: ensure server belongs to user's organization
+        if (server.organizationId !== orgId) {
+          log(`[SSH] Org mismatch: user org=${orgId}, server org=${server.organizationId}`);
+          res.status(404).json({ message: "Server not found" });
+          return;
+        }
+
         if (user.role !== "admin" && !server.enabled) {
           res.status(404).json({ message: "Server not found" });
           return;
@@ -812,23 +819,34 @@ export async function registerRoutes(
         return;
       }
 
+      // Multi-tenant isolation: get org from token and verify server belongs to user's org
+      const userOrgId = ENABLE_MULTI_TENANT
+        ? (payload.organization_id || DEFAULT_ORG_ID)
+        : DEFAULT_ORG_ID;
+
+      if (server.organizationId !== userOrgId) {
+        log(`[Bridge] Org mismatch: user org=${userOrgId}, server org=${server.organizationId}`);
+        res.status(403).json({ valid: false, error: "Server access denied" });
+        return;
+      }
+
       // Check subscription limits
       try {
         const users = await tidecloakAdmin.getUsers(token);
         const enabledCount = users.filter(u => u.enabled).length;
-        const subscription = await subscriptionStorage.getSubscription(DEFAULT_ORG_ID);
+        const subscription = await subscriptionStorage.getSubscription(userOrgId);
         const tier = (subscription?.tier as SubscriptionTier) || 'free';
         const tierConfig = subscriptionTiers[tier];
         const userLimit = tierConfig.maxUsers;
         const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
-        const serverCounts = await subscriptionStorage.getServerCounts(DEFAULT_ORG_ID);
+        const serverCounts = await subscriptionStorage.getServerCounts(userOrgId);
         const serverLimit = tierConfig.maxServers;
         const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
-        await subscriptionStorage.updateOverLimitStatus(DEFAULT_ORG_ID, isUsersOverLimit, isServersOverLimit);
+        await subscriptionStorage.updateOverLimitStatus(userOrgId, isUsersOverLimit, isServersOverLimit);
       } catch {
         // If we can't refresh, continue with cached status
       }
-      const sshStatus = await subscriptionStorage.isSshBlocked(DEFAULT_ORG_ID);
+      const sshStatus = await subscriptionStorage.isSshBlocked(userOrgId);
       if (sshStatus.blocked) {
         res.status(403).json({ valid: false, error: "SSH access is currently disabled" });
         return;
