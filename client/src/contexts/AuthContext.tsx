@@ -93,6 +93,28 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
     try {
       if (tidecloak.authenticated) {
         const isAdmin = tidecloak.hasClientRole("tide-realm-admin", "realm-management");
+
+        // Try to get org claims from ID token first, then fall back to access token
+        // Some TideCloak configurations only add claims to access token
+        const getClaimValue = (claimName: string): string | undefined => {
+          const fromIdToken = tidecloak.getValueFromIdToken(claimName) as string | undefined;
+          if (fromIdToken) return fromIdToken;
+
+          // Fall back to access token if not in ID token
+          if (tidecloak.token) {
+            try {
+              const parts = tidecloak.token.split('.');
+              if (parts.length === 3) {
+                const payload = JSON.parse(atob(parts[1]));
+                return payload[claimName] as string | undefined;
+              }
+            } catch (e) {
+              console.warn(`Failed to parse access token for claim ${claimName}:`, e);
+            }
+          }
+          return undefined;
+        };
+
         const user: OIDCUser = {
           id: tidecloak.getValueFromIdToken("sub") || "",
           username:
@@ -102,8 +124,8 @@ function TideCloakAuthBridge({ children, authConfig }: { children: ReactNode; au
           email: tidecloak.getValueFromIdToken("email") || "",
           role: isAdmin ? "admin" : "user",
           allowedServers: (tidecloak.getValueFromIdToken("allowed_servers") as string[]) || [],
-          organizationId: (tidecloak.getValueFromIdToken("organization_id") as string) || "default",
-          orgRole: ((tidecloak.getValueFromIdToken("org_role") as string) || (isAdmin ? "org-admin" : "user")) as OIDCUser["orgRole"],
+          organizationId: getClaimValue("organization_id") || "default",
+          orgRole: (getClaimValue("org_role") || (isAdmin ? "org-admin" : "user")) as OIDCUser["orgRole"],
         };
 
         if (tidecloak.token) {
