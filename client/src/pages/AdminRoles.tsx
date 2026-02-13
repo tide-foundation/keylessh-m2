@@ -48,7 +48,8 @@ import { api, type PolicyTemplate, type TemplateParameter } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
-import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode } from "lucide-react";
+import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode, Info } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { AdminRole } from "@shared/schema";
 import { ADMIN_ROLE_SET } from "@shared/config/roles";
 import { createSshPolicyRequest, createSshPolicyRequestWithCode, bytesToBase64, SSH_MODEL_IDS, SSH_FORSETI_CONTRACT } from "@/lib/sshPolicy";
@@ -108,6 +109,13 @@ export default function AdminRoles() {
     queryFn: api.admin.roles.list,
   });
   const isFetchingRoles = useIsFetching({ queryKey: ["/api/admin/roles"] }) > 0;
+
+  // Get subscription tier to determine if role creation is allowed
+  const { data: licenseInfo } = useQuery({
+    queryKey: ["/api/admin/license"],
+    queryFn: api.admin.license.get,
+  });
+  const isFreeTier = licenseInfo?.subscription?.tier === "free" || !licenseInfo?.subscription;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
     refresh: () => refetchRoles(),
@@ -508,12 +516,30 @@ export default function AdminRoles() {
             data-testid="refresh-roles"
             title="Refresh now"
           />
-          <Button onClick={handleCreate} data-testid="add-role-button" className="shrink-0" title="Add Role">
+          <Button
+            onClick={handleCreate}
+            data-testid="add-role-button"
+            className="shrink-0"
+            title={isFreeTier ? "Upgrade to create custom roles" : "Add Role"}
+            disabled={isFreeTier}
+          >
             <Plus className="h-4 w-4 sm:mr-2" />
             <span className="hidden sm:inline">Add Role</span>
           </Button>
         </div>
       </div>
+
+      {/* Free tier info */}
+      {isFreeTier && (
+        <Alert variant="default" className="border-blue-500/50 bg-blue-500/10">
+          <Info className="h-4 w-4 text-blue-500" />
+          <AlertDescription className="text-sm">
+            <span className="font-medium text-blue-600 dark:text-blue-400">Free Tier:</span>{" "}
+            Role creation is limited. You can use the pre-configured <span className="font-mono">ssh:root</span> and{" "}
+            <span className="font-mono">ssh:user</span> roles for SSH access. Upgrade to create custom roles.
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Card>
         <div className="p-4 border-b border-border">
