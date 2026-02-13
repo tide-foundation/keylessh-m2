@@ -1,5 +1,5 @@
 {
-  "realm": "keylesshmulti",
+  "realm": "keylessh-free",
   "auth-server-url": "https://login.dauth.me",
   "ssl-required": "external",
   "resource": "keylessh",
@@ -10,18 +10,17 @@
   "jwk": {
     "keys": [
       {
-        "kid": "fgjjI4sEyt-YEPP3gYH9d69etcEowWz_4r-_uMrlJAY",
+        "kid": "X4rwtNJQx_bRqIQEHRW52wQ0eXUXD0qE8kajt1wmnxQ",
         "kty": "OKP",
         "alg": "EdDSA",
         "use": "sig",
         "crv": "Ed25519",
-        "x": "ZrZ20hfvoH7emkWdNEEaF2z-od9BE_S_BgZv3v5ReZ8"
+        "x": "LUZ2qOMmznFN2MwqdzWMQ07QmkPPN0VTW4qoIVCIpNs"
       }
     ]
   },
-  "vendorId": "3060927805854327144842357223932889256740359428059932213438482668439497636749",
+  "vendorId": "4732930839663504516222320776113730334837735761259178685271951331217185118658",
   "homeOrkUrl": "https://ork1.tideprotocol.com",
-  "client-origin-auth-http://localhost": "sYJNR2OPkJU6qKWZM92yxgeEVY8EGXstNUJKmIja8HCgIBDxi2K2EmP6mwF39pRzsPvdxFBK3WiP6eBWBbc+Aw==",
-  "client-origin-auth-https://free.keylessh.com": "FWv+xefQyAC9Papi5YqifJPEjpVq6kxfqhNPuaEhId7MpU8FKKDFAZBT8yyk5P6aHzpgHxOnhEnoVrehKkp7DQ==",
-  "client-origin-auth-http://localhost:3000": "5lxPp7Tm/aqQk8waPNZL5EdcQi0itNMcoCwaKoDM5woL4xjpZw7huGsmRWQFFZlrHub/HutvKuM9/R2Jkt0DAg=="
+  "client-origin-auth-https://free.keylessh.com": "L/y2h94WHWe3aEvtU1W1o1Hy/fL4ZHw1aX4WXVTA/otaoauXp2HPIpcsq31ibELpSaMUID+xZXCcunDAVDMCAw==",
+  "client-origin-auth-http://localhost:3000": "etbjOmQasoISHR4ua6cKJnlhalZDIbpL3XQfUy5QSXwiNSBOC3a4/TQCYpH6OrGQtjFiy/zhoRmh8z1igJKiAQ=="
 }
