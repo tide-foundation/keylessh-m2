@@ -193,6 +193,26 @@ To modify:
 3. ORKs compile and IL-vet the contract during policy execution (blocks forbidden namespaces)
 4. Test with a new policy template to get the new contractId
 
+## Troubleshooting
+
+### "Framing violates Content Security Policy" error
+
+If you see a browser console error like:
+
+```
+Framing 'http://localhost:XXXX/' violates the following Content Security Policy directive: "frame-src ..."
+```
+
+The secure enclave (TideCloak/Heimdall) is loaded in a hidden iframe to share the session ID. This error means the enclave's origin isn't allowed by the CSP. To fix it, add the blocked origin to the `frame-src` directive in [`server/index.ts`](../server/index.ts):
+
+```ts
+res.setHeader(
+  "Content-Security-Policy",
+  "frame-src 'self' https://*.tideprotocol.com https://*.dauth.me http://localhost:8080 http://localhost:1001"
+  //                                                                ^^^ add your origin here
+);
+```
+
 ## Related Docs
 
 - Architecture: [docs/ARCHITECTURE.md](ARCHITECTURE.md)

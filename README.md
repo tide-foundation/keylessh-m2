@@ -91,6 +91,9 @@ npm run dev
 
 Access the KeyleSSH app in your browser at: `http://localhost:3000`
 
+> [!IMPORTANT]
+> **CSP iframe error?** The secure enclave (TideCloak/Heimdall) is loaded in a hidden iframe to share the session ID. If you see a console error like `Framing 'http://localhost:XXXX/' violates the Content Security Policy directive: "frame-src ..."`, add the blocked origin to the `frame-src` list in [`server/index.ts`](server/index.ts). See [Troubleshooting](docs/DEVELOPERS.md#troubleshooting) for details.
+
 ## Example server set-up
 
 Here's how you set up a locally-hosted SSH server and access it using KeyleSSH:
