@@ -1174,7 +1174,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/bridges",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const orgId = getOrgId(req as AuthenticatedRequest);
@@ -1191,7 +1191,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/bridges",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const orgId = getOrgId(req as AuthenticatedRequest);
@@ -1218,7 +1218,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/bridges/:id",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const bridge = await bridgeStorage.getBridge(req.params.id);
@@ -1237,7 +1237,7 @@ export async function registerRoutes(
   app.put(
     "/api/admin/bridges/:id",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const { name, url, description, enabled, isDefault } = req.body;
@@ -1263,7 +1263,7 @@ export async function registerRoutes(
   app.delete(
     "/api/admin/bridges/:id",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const deleted = await bridgeStorage.deleteBridge(req.params.id);
