@@ -26,11 +26,15 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
-// Allow embedding *.tideprotocol.com in iframes within this app
+// Content Security Policy: controls which origins can be embedded in iframes.
+// The secure enclave (TideCloak/Heimdall) is loaded in a hidden iframe to share the session ID.
+// If you see a browser console error like:
+//   "Framing 'http://localhost:XXXX/' violates the Content Security Policy directive: frame-src ..."
+// Add the blocked origin (e.g. http://localhost:XXXX) to the frame-src list below.
 app.use((_req, res, next) => {
   res.setHeader(
     "Content-Security-Policy",
-    "frame-src 'self' https://*.tideprotocol.com https://*.dauth.me"
+    "frame-src 'self' https://*.tideprotocol.com https://*.dauth.me http://localhost:8080 http://localhost:1001"
   );
   next();
 });
