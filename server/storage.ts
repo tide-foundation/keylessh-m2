@@ -2523,11 +2523,19 @@ export class BridgeStorage {
     return this.mapRow(row);
   }
 
-  // Get the default bridge
-  async getDefaultBridge(): Promise<Bridge | undefined> {
-    const row = sqlite.prepare(`
-      SELECT * FROM bridges WHERE is_default = 1 AND enabled = 1 LIMIT 1
-    `).get() as any | undefined;
+  // Get the default bridge (optionally filtered by organization)
+  async getDefaultBridge(orgId?: string): Promise<Bridge | undefined> {
+    let row;
+    if (orgId) {
+      row = sqlite.prepare(`
+        SELECT * FROM bridges WHERE is_default = 1 AND enabled = 1 AND organization_id = ? LIMIT 1
+      `).get(orgId) as any | undefined;
+    } else {
+      // Fallback to global default bridge (for backwards compatibility)
+      row = sqlite.prepare(`
+        SELECT * FROM bridges WHERE is_default = 1 AND enabled = 1 LIMIT 1
+      `).get() as any | undefined;
+    }
 
     if (!row) return undefined;
 

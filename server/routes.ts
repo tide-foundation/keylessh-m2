@@ -81,7 +81,7 @@ async function checkServerHealth(server: ServerType): Promise<ServerStatus> {
   }
 
   // Check if there's a default external bridge (not embedded)
-  const defaultBridge = await bridgeStorage.getDefaultBridge();
+  const defaultBridge = await bridgeStorage.getDefaultBridge(server.organizationId);
   if (defaultBridge?.enabled && !defaultBridge.url.includes("localhost") && !defaultBridge.url.includes("127.0.0.1")) {
     // Default bridge is external - can't verify from server unless server has no bridge assigned
     if (!server.bridgeId) {
@@ -411,6 +411,24 @@ export async function registerRoutes(
         return;
       }
 
+      // Step 3: Create default bridge for the new organization if BRIDGE_URL is set
+      const bridgeUrl = process.env.BRIDGE_URL;
+      if (bridgeUrl) {
+        try {
+          await bridgeStorage.createBridge(org.id, {
+            name: "Default Bridge",
+            url: bridgeUrl,
+            description: "Auto-created from BRIDGE_URL environment variable",
+            enabled: true,
+            isDefault: true,
+          });
+          log(`[Onboarding] Created default bridge for org ${org.id}: ${bridgeUrl}`);
+        } catch (bridgeError) {
+          log(`[Onboarding] Warning: Failed to create default bridge: ${bridgeError}`);
+          // Don't fail onboarding if bridge creation fails
+        }
+      }
+
       log(`[Onboarding] Organization provisioned successfully: ${org.name} (realm: ${result.realmName}, tier: ${selectedTier})`);
       res.status(201).json({
         success: true,
@@ -595,8 +613,8 @@ export async function registerRoutes(
         }
       }
       if (!bridgeUrl) {
-        // Try default bridge
-        const defaultBridge = await bridgeStorage.getDefaultBridge();
+        // Try default bridge for the user's org
+        const defaultBridge = await bridgeStorage.getDefaultBridge(orgId);
         if (defaultBridge?.enabled) {
           bridgeUrl = defaultBridge.url;
         }
@@ -1178,7 +1196,25 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const orgId = getOrgId(req as AuthenticatedRequest);
-        const bridgeList = await bridgeStorage.getBridges(orgId);
+        let bridgeList = await bridgeStorage.getBridges(orgId);
+
+        // Auto-create default bridge for the org if none exists and BRIDGE_URL is set
+        if (bridgeList.length === 0 && process.env.BRIDGE_URL) {
+          try {
+            await bridgeStorage.createBridge(orgId, {
+              name: "Default Bridge",
+              url: process.env.BRIDGE_URL,
+              description: "Auto-created from BRIDGE_URL environment variable",
+              enabled: true,
+              isDefault: true,
+            });
+            log(`[Bridges] Auto-created default bridge for org ${orgId}: ${process.env.BRIDGE_URL}`);
+            bridgeList = await bridgeStorage.getBridges(orgId);
+          } catch (createError) {
+            log(`[Bridges] Failed to auto-create default bridge: ${createError}`);
+          }
+        }
+
         res.json(bridgeList);
       } catch (error) {
         log(`Failed to fetch bridges: ${error}`);
