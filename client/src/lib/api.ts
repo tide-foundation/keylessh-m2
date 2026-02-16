@@ -462,7 +462,88 @@ export const api = {
         }),
     },
   },
+  // Org-scoped routes for org-admins (without TideCloak realm-admin)
+  org: {
+    users: {
+      list: () => apiRequest<OrgUser[]>("/api/org/users"),
+      create: (data: { email: string; firstName: string; lastName?: string; orgRole?: string }) =>
+        apiRequest<OrgUser>("/api/org/users", {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      update: (id: string, data: { firstName?: string; lastName?: string; email?: string; orgRole?: string }) =>
+        apiRequest<{ success: boolean }>(`/api/org/users/${id}`, {
+          method: "PUT",
+          body: JSON.stringify(data),
+        }),
+      delete: (id: string) =>
+        apiRequest<{ success: boolean }>(`/api/org/users/${id}`, {
+          method: "DELETE",
+        }),
+      setEnabled: (id: string, enabled: boolean) =>
+        apiRequest<{ success: boolean; enabled: boolean }>(`/api/org/users/${id}/enabled`, {
+          method: "PUT",
+          body: JSON.stringify({ enabled }),
+        }),
+      getTideLinkUrl: (id: string, redirectUri?: string) =>
+        apiRequest<{ linkUrl: string }>(
+          `/api/org/users/${id}/tide-link${redirectUri ? `?redirectUri=${encodeURIComponent(redirectUri)}` : ""}`
+        ),
+      getRoles: (id: string) =>
+        apiRequest<{ roles: OrgClientRole[] }>(`/api/org/users/${id}/roles`),
+      updateRoles: (id: string, data: { rolesToAdd?: string[]; rolesToRemove?: string[] }) =>
+        apiRequest<{ success: boolean }>(`/api/org/users/${id}/roles`, {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+    },
+    roles: {
+      list: () => apiRequest<{ roles: OrgClientRole[] }>("/api/org/roles"),
+      create: (data: { name: string; description?: string; policy?: SshPolicyConfig }) =>
+        apiRequest<{ success: string; role: OrgClientRole }>("/api/org/roles", {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      update: (name: string, data: { description?: string }) =>
+        apiRequest<{ success: string }>(`/api/org/roles/${encodeURIComponent(name)}`, {
+          method: "PUT",
+          body: JSON.stringify(data),
+        }),
+      delete: (name: string) =>
+        apiRequest<{ success: string }>(`/api/org/roles/${encodeURIComponent(name)}`, {
+          method: "DELETE",
+        }),
+      policies: {
+        list: () => apiRequest<{ policies: SshPolicyResponse[] }>("/api/org/roles/policies"),
+        get: (roleName: string) =>
+          apiRequest<{ policy: SshPolicyResponse }>(`/api/org/roles/${encodeURIComponent(roleName)}/policy`),
+      },
+    },
+  },
 };
+
+// Org user type (from org routes)
+export interface OrgUser {
+  id: string;
+  username: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  enabled: boolean;
+  organizationId: string;
+  orgRole: string;
+  linked: boolean;
+  roles?: string[];
+}
+
+// Org client role type
+export interface OrgClientRole {
+  id: string;
+  name: string;
+  description?: string;
+  composite?: boolean;
+  clientRole?: boolean;
+}
 
 // Re-export types for convenience
 export type { PolicyTemplate, InsertPolicyTemplate, TemplateParameter, Bridge, InsertBridge, Organization, OrganizationUser, OrgRole };

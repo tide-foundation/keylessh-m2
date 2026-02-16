@@ -37,10 +37,9 @@ import {
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
-import { api } from "@/lib/api";
+import { api, type OrgUser, type OrgClientRole } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { Users, Pencil, Search, Shield, User as UserIcon, Plus, Trash2, X, Link, Unlink, Copy, Check, AlertCircle, Clock } from "lucide-react";
-import type { AdminUser } from "@shared/schema";
 import type { AccessApproval } from "@/lib/api";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
 import { RefreshButton } from "@/components/RefreshButton";
@@ -56,9 +55,9 @@ interface EditFormData {
 export default function AdminUsers() {
   const { toast } = useToast();
   const [search, setSearch] = useState("");
-  const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
+  const [editingUser, setEditingUser] = useState<OrgUser | null>(null);
   const [creatingUser, setCreatingUser] = useState(false);
-  const [deletingUser, setDeletingUser] = useState<AdminUser | null>(null);
+  const [deletingUser, setDeletingUser] = useState<OrgUser | null>(null);
   const [copyStatus, setCopyStatus] = useState<string>("");
   const [formData, setFormData] = useState<EditFormData>({
     id: "",
@@ -76,9 +75,9 @@ export default function AdminUsers() {
     email: "",
   });
 
-  const { data: users, isLoading: usersLoading, refetch: refetchUsers } = useQuery<AdminUser[]>({
-    queryKey: ["/api/admin/users"],
-    queryFn: api.admin.users.list,
+  const { data: users, isLoading: usersLoading, refetch: refetchUsers } = useQuery<OrgUser[]>({
+    queryKey: ["/api/org/users"],
+    queryFn: api.org.users.list,
   });
 
   const { data: userLimit, refetch: refetchUserLimit } = useQuery({
@@ -90,7 +89,7 @@ export default function AdminUsers() {
     queryKey: ["/api/admin/license"],
     queryFn: api.admin.license.get,
   });
-  const isFetchingUsers = useIsFetching({ queryKey: ["/api/admin/users"] }) > 0;
+  const isFetchingUsers = useIsFetching({ queryKey: ["/api/org/users"] }) > 0;
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
     refresh: () => Promise.all([refetchUsers(), refetchUserLimit(), refetchLicense(), refetchAccessApprovals()]),
@@ -98,8 +97,8 @@ export default function AdminUsers() {
   });
 
   const { data: rolesData } = useQuery({
-    queryKey: ["/api/admin/roles/all"],
-    queryFn: api.admin.roles.listAll,
+    queryKey: ["/api/org/roles"],
+    queryFn: api.org.roles.list,
   });
 
   const { data: accessApprovals, refetch: refetchAccessApprovals } = useQuery<AccessApproval[]>({
@@ -119,10 +118,10 @@ export default function AdminUsers() {
 
   const updateProfileMutation = useMutation({
     mutationFn: (data: { id: string; firstName: string; lastName: string; email: string }) =>
-      api.admin.users.updateProfile(data),
+      api.org.users.update(data.id, { firstName: data.firstName, lastName: data.lastName, email: data.email }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/org/users"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/org/users"] });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to update user profile", description: error.message, variant: "destructive" });
@@ -131,11 +130,11 @@ export default function AdminUsers() {
 
   const updateRolesMutation = useMutation({
     mutationFn: (data: { id: string; rolesToAdd?: string[]; rolesToRemove?: string[] }) =>
-      api.admin.users.updateRoles(data),
+      api.org.users.updateRoles(data.id, { rolesToAdd: data.rolesToAdd, rolesToRemove: data.rolesToRemove }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/org/users"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/access-approvals"] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/org/users"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/access-approvals"] });
     },
     onError: (error: Error) => {
@@ -145,11 +144,11 @@ export default function AdminUsers() {
 
   const createMutation = useMutation({
     mutationFn: (data: { username: string; firstName: string; lastName: string; email: string }) =>
-      api.admin.users.add(data),
+      api.org.users.create({ email: data.email, firstName: data.firstName, lastName: data.lastName }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/org/users"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/license/check/user"] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/org/users"] });
       setCreatingUser(false);
       setCreateFormData({ username: "", firstName: "", lastName: "", email: "" });
       toast({ title: "User created successfully" });
@@ -160,12 +159,12 @@ export default function AdminUsers() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (userId: string) => api.admin.users.delete(userId),
+    mutationFn: (userId: string) => api.org.users.delete(userId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/org/users"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/license/check/user"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/access-approvals"] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/org/users"] });
       void queryClient.refetchQueries({ queryKey: ["/api/admin/access-approvals"] });
       setDeletingUser(null);
       setEditingUser(null);
@@ -178,11 +177,11 @@ export default function AdminUsers() {
 
   const setEnabledMutation = useMutation({
     mutationFn: ({ userId, enabled }: { userId: string; enabled: boolean }) =>
-      api.admin.users.setEnabled(userId, enabled),
+      api.org.users.setEnabled(userId, enabled),
     onSuccess: (_, { enabled }) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/org/users"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/license"] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/users"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/org/users"] });
       toast({ title: enabled ? "User enabled" : "User disabled" });
     },
     onError: (error: Error) => {
@@ -190,8 +189,8 @@ export default function AdminUsers() {
     },
   });
 
-  const handleEdit = (user: AdminUser) => {
-    const userRoles = Array.isArray(user.role) ? user.role : user.role ? [user.role] : [];
+  const handleEdit = (user: OrgUser) => {
+    const userRoles = user.roles || [];
     setEditingUser(user);
     setInitialRoles(userRoles);
     setRemovedPendingRoles([]);
@@ -271,7 +270,7 @@ export default function AdminUsers() {
     if (!editingUser) return;
     try {
       const currentUrl = window.location.origin;
-      const response = await api.admin.users.getTideLinkUrl(editingUser.id, currentUrl);
+      const response = await api.org.users.getTideLinkUrl(editingUser.id, currentUrl);
       await navigator.clipboard.writeText(response.linkUrl);
       setCopyStatus("Copied!");
       setTimeout(() => setCopyStatus(""), 2000);
@@ -413,8 +412,8 @@ export default function AdminUsers() {
               </TableHeader>
               <TableBody>
                 {filteredUsers.map((user) => {
-                  const userRoles = Array.isArray(user.role) ? user.role : user.role ? [user.role] : [];
-                  const isAdmin = userRoles.some((r) => r.toLowerCase().includes("admin"));
+                  const userRoles = user.roles || [];
+                  const isAdmin = userRoles.some((r) => r.toLowerCase().includes("admin")) || user.orgRole === "org-admin";
                   return (
                     <TableRow key={user.id} data-testid={`user-row-${user.id}`}>
                       <TableCell>

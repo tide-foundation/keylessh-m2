@@ -44,13 +44,12 @@ import {
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
-import { api, type PolicyTemplate, type TemplateParameter } from "@/lib/api";
+import { api, type PolicyTemplate, type TemplateParameter, type OrgClientRole } from "@/lib/api";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
 import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode, Info } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import type { AdminRole } from "@shared/schema";
 import { ADMIN_ROLE_SET } from "@shared/config/roles";
 import { createSshPolicyRequest, createSshPolicyRequestWithCode, bytesToBase64, SSH_MODEL_IDS, SSH_FORSETI_CONTRACT } from "@/lib/sshPolicy";
 
@@ -84,9 +83,9 @@ export default function AdminRoles() {
   const { initializeTideRequest } = useAuth();
   const authConfig = useAuthConfig();
   const [search, setSearch] = useState("");
-  const [editingRole, setEditingRole] = useState<AdminRole | null>(null);
+  const [editingRole, setEditingRole] = useState<OrgClientRole | null>(null);
   const [creatingRole, setCreatingRole] = useState(false);
-  const [deletingRole, setDeletingRole] = useState<AdminRole | null>(null);
+  const [deletingRole, setDeletingRole] = useState<OrgClientRole | null>(null);
   const [createAsSshRole, setCreateAsSshRole] = useState(true);
   const [isCreatingPolicy, setIsCreatingPolicy] = useState(false);
   const [formData, setFormData] = useState<{ name: string; description: string }>({
@@ -105,10 +104,10 @@ export default function AdminRoles() {
   };
 
   const { data: rolesData, isLoading: rolesLoading, refetch: refetchRoles } = useQuery({
-    queryKey: ["/api/admin/roles"],
-    queryFn: api.admin.roles.list,
+    queryKey: ["/api/org/roles"],
+    queryFn: api.org.roles.list,
   });
-  const isFetchingRoles = useIsFetching({ queryKey: ["/api/admin/roles"] }) > 0;
+  const isFetchingRoles = useIsFetching({ queryKey: ["/api/org/roles"] }) > 0;
 
   // Get subscription tier to determine if role creation is allowed
   const { data: licenseInfo } = useQuery({
@@ -131,10 +130,10 @@ export default function AdminRoles() {
   });
   const templates = templatesData?.templates || [];
 
-  // Query for admin users to calculate approval threshold
+  // Query for org users to calculate approval threshold
   const { data: usersData } = useQuery({
-    queryKey: ["/api/admin/users"],
-    queryFn: api.admin.users.list,
+    queryKey: ["/api/org/users"],
+    queryFn: api.org.users.list,
   });
 
   // Query for access approvals to identify pending admin role assignments
@@ -159,10 +158,11 @@ export default function AdminRoles() {
     );
 
     // Filter to get active admins, excluding those with pending admin role
+    // For org users, check if orgRole is org-admin or if they have admin in their roles
     return usersData.filter((u) =>
       u.enabled &&
       u.linked &&
-      u.isAdmin &&
+      (u.orgRole === "org-admin" || u.orgRole === "global-admin" || u.roles?.some(r => r.toLowerCase().includes("admin"))) &&
       !pendingAdminUsernames.has(u.username || "")
     ).length;
   }, [usersData, accessApprovalsData]);
@@ -188,10 +188,10 @@ export default function AdminRoles() {
 
   const createMutation = useMutation({
     mutationFn: (data: { name: string; description?: string; policy?: PolicyConfig }) =>
-      api.admin.roles.create(data),
+      api.org.roles.create(data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/roles"] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/roles"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/org/roles"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/org/roles"] });
       setCreatingRole(false);
       setFormData({ name: "", description: "" });
       setPolicyConfig(defaultPolicyConfig);
@@ -205,10 +205,10 @@ export default function AdminRoles() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: (data: { name: string; description?: string }) => api.admin.roles.update(data),
+    mutationFn: (data: { name: string; description?: string }) => api.org.roles.update(data.name, { description: data.description }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/roles"] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/roles"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/org/roles"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/org/roles"] });
       setEditingRole(null);
       toast({ title: "Role updated successfully" });
     },
@@ -218,20 +218,15 @@ export default function AdminRoles() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (roleName: string) => api.admin.roles.delete(roleName),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/roles"] });
-      void queryClient.refetchQueries({ queryKey: ["/api/admin/roles"] });
+    mutationFn: (roleName: string) => api.org.roles.delete(roleName),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/org/roles"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/org/roles"] });
       // Also invalidate role approvals since an approval may have been created
       queryClient.invalidateQueries({ queryKey: ["/api/admin/role-approvals"] });
       setDeletingRole(null);
       setEditingRole(null);
-      // Show appropriate message based on whether an approval was created
-      if (data.approvalCreated) {
-        toast({ title: "Approval request created", description: "Role has users assigned. An approval request has been created for review." });
-      } else {
-        toast({ title: "Role deleted successfully" });
-      }
+      toast({ title: "Role deleted successfully" });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to delete role", description: error.message, variant: "destructive" });
@@ -245,7 +240,7 @@ export default function AdminRoles() {
   const [editSelectedTemplateId, setEditSelectedTemplateId] = useState<string | null>(null);
   const [editTemplateParams, setEditTemplateParams] = useState<Record<string, any>>({});
 
-  const handleEdit = async (role: AdminRole) => {
+  const handleEdit = async (role: OrgClientRole) => {
     setEditingRole(role);
     setFormData({
       name: role.name,
@@ -259,7 +254,7 @@ export default function AdminRoles() {
       setEditSelectedTemplateId(null);
       setEditTemplateParams({});
       try {
-        const { policy } = await api.admin.roles.policies.get(role.name);
+        const { policy } = await api.org.roles.policies.get(role.name);
         if (policy) {
           setEditingPolicyConfig({
             enabled: true,

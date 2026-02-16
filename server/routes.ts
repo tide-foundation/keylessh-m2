@@ -1692,6 +1692,232 @@ export async function registerRoutes(
   );
 
   // ============================================
+  // Org-Scoped Role Management Routes
+  // These routes allow org-admins to manage roles without TideCloak realm permissions.
+  // ============================================
+
+  // GET /api/org/roles - List all client roles
+  app.get(
+    "/api/org/roles",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { getOrgRoles } = await import("./lib/orgRoleManagement");
+        const roles = await getOrgRoles();
+        res.json({ roles });
+      } catch (error) {
+        log(`Failed to fetch org roles: ${error}`);
+        res.status(500).json({ error: "Failed to fetch roles" });
+      }
+    }
+  );
+
+  // POST /api/org/roles - Create a new role
+  app.post(
+    "/api/org/roles",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const orgId = getOrgId(req);
+        const { name, description, policy } = req.body;
+
+        if (!name) {
+          res.status(400).json({ error: "Role name is required" });
+          return;
+        }
+
+        const { createOrgRole } = await import("./lib/orgRoleManagement");
+        const role = await createOrgRole(name, description);
+
+        // If policy config is provided and enabled, store the SSH policy
+        if (policy && policy.enabled) {
+          try {
+            await policyStorage.upsertPolicy({
+              roleId: name,
+              contractType: policy.contractType,
+              approvalType: policy.approvalType,
+              executionType: policy.executionType,
+              threshold: policy.threshold,
+            });
+            log(`Created SSH policy for role: ${name}`);
+          } catch (policyError) {
+            log(`Warning: Role created but failed to save policy: ${policyError}`);
+          }
+        }
+
+        res.status(201).json({ success: "Role has been added!", role });
+      } catch (error) {
+        log(`Failed to create org role: ${error}`);
+        res.status(400).json({ error: "Failed to create role" });
+      }
+    }
+  );
+
+  // PUT /api/org/roles/:name - Update a role
+  app.put(
+    "/api/org/roles/:name",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const roleName = req.params.name;
+        const { description } = req.body;
+
+        const { updateOrgRole } = await import("./lib/orgRoleManagement");
+        await updateOrgRole(roleName, { description });
+
+        res.json({ success: "Role has been updated!" });
+      } catch (error) {
+        log(`Failed to update org role: ${error}`);
+        res.status(400).json({ error: "Failed to update role" });
+      }
+    }
+  );
+
+  // DELETE /api/org/roles/:name - Delete a role
+  app.delete(
+    "/api/org/roles/:name",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const roleName = req.params.name;
+
+        const { deleteOrgRole } = await import("./lib/orgRoleManagement");
+        await deleteOrgRole(roleName);
+
+        // Also delete any associated SSH policy
+        try {
+          await policyStorage.deletePolicy(roleName);
+        } catch (policyError) {
+          log(`Warning: Role deleted but failed to delete policy: ${policyError}`);
+        }
+
+        res.json({ success: "Role has been deleted!" });
+      } catch (error) {
+        log(`Failed to delete org role: ${error}`);
+        res.status(400).json({ error: "Failed to delete role" });
+      }
+    }
+  );
+
+  // POST /api/org/users/:id/roles - Update user roles
+  app.post(
+    "/api/org/users/:id/roles",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const orgId = getOrgId(req);
+        const userId = req.params.id;
+        const { rolesToAdd, rolesToRemove } = req.body;
+
+        // Verify user belongs to this org
+        const { getOrgUsers } = await import("./lib/orgUserManagement");
+        const orgUsers = await getOrgUsers(orgId);
+        const userInOrg = orgUsers.find(u => u.id === userId);
+        if (!userInOrg) {
+          res.status(403).json({ error: "User not found in your organization" });
+          return;
+        }
+
+        const { grantOrgRoleToUser, removeOrgRoleFromUser } = await import("./lib/orgRoleManagement");
+
+        // Add roles
+        if (rolesToAdd && rolesToAdd.length > 0) {
+          for (const role of rolesToAdd) {
+            await grantOrgRoleToUser(userId, role);
+          }
+        }
+
+        // Remove roles
+        if (rolesToRemove && rolesToRemove.length > 0) {
+          for (const role of rolesToRemove) {
+            await removeOrgRoleFromUser(userId, role);
+          }
+        }
+
+        res.json({ success: true });
+      } catch (error) {
+        log(`Failed to update org user roles: ${error}`);
+        res.status(400).json({ error: "Failed to update user roles" });
+      }
+    }
+  );
+
+  // GET /api/org/users/:id/roles - Get user's roles
+  app.get(
+    "/api/org/users/:id/roles",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const orgId = getOrgId(req);
+        const userId = req.params.id;
+
+        // Verify user belongs to this org
+        const { getOrgUsers } = await import("./lib/orgUserManagement");
+        const orgUsers = await getOrgUsers(orgId);
+        const userInOrg = orgUsers.find(u => u.id === userId);
+        if (!userInOrg) {
+          res.status(403).json({ error: "User not found in your organization" });
+          return;
+        }
+
+        const { getUserOrgRoles } = await import("./lib/orgRoleManagement");
+        const roles = await getUserOrgRoles(userId);
+
+        res.json({ roles });
+      } catch (error) {
+        log(`Failed to get org user roles: ${error}`);
+        res.status(400).json({ error: "Failed to get user roles" });
+      }
+    }
+  );
+
+  // GET /api/org/roles/policies - Get all SSH policies
+  app.get(
+    "/api/org/roles/policies",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const orgId = getOrgId(req as AuthenticatedRequest);
+        const policies = await policyStorage.getAllPolicies(orgId);
+        res.json({ policies });
+      } catch (error) {
+        log(`Failed to fetch policies: ${error}`);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    }
+  );
+
+  // GET /api/org/roles/:roleName/policy - Get SSH policy for a specific role
+  app.get(
+    "/api/org/roles/:roleName/policy",
+    authenticate,
+    requireOrgAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { roleName } = req.params;
+        const policy = await policyStorage.getPolicy(roleName);
+
+        if (!policy) {
+          res.status(404).json({ error: "Policy not found for this role" });
+          return;
+        }
+
+        res.json({ policy });
+      } catch (error) {
+        log(`Failed to fetch policy: ${error}`);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    }
+  );
+
+  // ============================================
   // Admin Role Routes
   // ============================================
 

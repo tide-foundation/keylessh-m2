@@ -9,7 +9,7 @@
  */
 
 import { log } from "../logger";
-import { getAuthOverrideUrl, getRealm } from "./auth/tidecloakConfig";
+import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
 
 interface OrgUser {
   id: string;
@@ -21,6 +21,7 @@ interface OrgUser {
   organizationId: string;
   orgRole: string;
   linked: boolean;
+  roles?: string[];
 }
 
 interface CreateOrgUserParams {
@@ -98,18 +99,65 @@ export async function getOrgUsers(organizationId: string): Promise<OrgUser[]> {
   }
 
   const users = await response.json();
+  const clientId = getResource();
 
-  return users.map((u: any) => ({
-    id: u.id,
-    username: u.username || "",
-    email: u.email || "",
-    firstName: u.firstName || "",
-    lastName: u.lastName || "",
-    enabled: u.enabled !== false,
-    organizationId: u.attributes?.organization_id?.[0] || "",
-    orgRole: u.attributes?.org_role?.[0] || "user",
-    linked: !!u.attributes?.vuid?.[0],
-  }));
+  // Get client UUID for role lookups
+  const clientResponse = await fetch(
+    `${authServerUrl}/admin/realms/${realmName}/clients?clientId=${clientId}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  let clientUuid = "";
+  if (clientResponse.ok) {
+    const clients = await clientResponse.json();
+    clientUuid = clients[0]?.id || "";
+  }
+
+  // Fetch roles for each user
+  const usersWithRoles = await Promise.all(
+    users.map(async (u: any) => {
+      let roles: string[] = [];
+
+      if (clientUuid) {
+        try {
+          const rolesResponse = await fetch(
+            `${authServerUrl}/admin/realms/${realmName}/users/${u.id}/role-mappings/clients/${clientUuid}`,
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+            }
+          );
+
+          if (rolesResponse.ok) {
+            const userRoles = await rolesResponse.json();
+            roles = userRoles.map((r: any) => r.name);
+          }
+        } catch (e) {
+          log(`Failed to fetch roles for user ${u.id}: ${e}`);
+        }
+      }
+
+      return {
+        id: u.id,
+        username: u.username || "",
+        email: u.email || "",
+        firstName: u.firstName || "",
+        lastName: u.lastName || "",
+        enabled: u.enabled !== false,
+        organizationId: u.attributes?.organization_id?.[0] || "",
+        orgRole: u.attributes?.org_role?.[0] || "user",
+        linked: !!u.attributes?.vuid?.[0],
+        roles,
+      };
+    })
+  );
+
+  return usersWithRoles;
 }
 
 /**
