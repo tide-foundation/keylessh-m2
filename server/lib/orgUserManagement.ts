@@ -213,8 +213,13 @@ export async function createOrgUser(params: CreateOrgUserParams): Promise<OrgUse
   }
 
   const u = users[0];
+  const userId = u.id;
+
+  // Assign default realm roles (appUser and _tide_enabled) to the new user
+  await assignDefaultRealmRoles(authServerUrl, token, realmName, userId);
+
   return {
-    id: u.id,
+    id: userId,
     username: u.username || "",
     email: u.email || "",
     firstName: u.firstName || "",
@@ -224,6 +229,65 @@ export async function createOrgUser(params: CreateOrgUserParams): Promise<OrgUse
     orgRole: u.attributes?.org_role?.[0] || params.orgRole || "user",
     linked: false,
   };
+}
+
+/**
+ * Assign default realm roles (appUser and _tide_enabled) to a user.
+ * These roles are required for TideCloak IGA and proper user functionality.
+ */
+async function assignDefaultRealmRoles(
+  authServerUrl: string,
+  token: string,
+  realmName: string,
+  userId: string
+): Promise<void> {
+  // Get all realm roles
+  const rolesResponse = await fetch(
+    `${authServerUrl}/admin/realms/${realmName}/roles`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  if (!rolesResponse.ok) {
+    log(`Warning: Failed to get realm roles for default assignment: ${rolesResponse.status}`);
+    return;
+  }
+
+  const roles = await rolesResponse.json();
+
+  // Find appUser and _tide_enabled roles
+  const defaultRoleNames = ["appUser", "_tide_enabled"];
+  const rolesToAssign = roles.filter((r: { name: string }) =>
+    defaultRoleNames.includes(r.name)
+  );
+
+  if (rolesToAssign.length === 0) {
+    log("Warning: No default realm roles (appUser, _tide_enabled) found to assign");
+    return;
+  }
+
+  // Assign the roles to the user
+  const assignResponse = await fetch(
+    `${authServerUrl}/admin/realms/${realmName}/users/${userId}/role-mappings/realm`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(rolesToAssign),
+    }
+  );
+
+  if (!assignResponse.ok) {
+    const text = await assignResponse.text();
+    log(`Warning: Failed to assign default realm roles: ${assignResponse.status} ${text}`);
+  } else {
+    log(`Assigned default realm roles to user ${userId}: ${rolesToAssign.map((r: { name: string }) => r.name).join(", ")}`);
+  }
 }
 
 /**
