@@ -1086,7 +1086,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/servers",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const orgId = getOrgId(req as AuthenticatedRequest);
@@ -1101,7 +1101,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/servers/status",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (_req: AuthenticatedRequest, res) => {
       try {
         const orgId = getOrgId(_req as AuthenticatedRequest);
@@ -1121,7 +1121,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/servers",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const orgId = getOrgId(req as AuthenticatedRequest);
@@ -1151,7 +1151,7 @@ export async function registerRoutes(
   app.patch(
     "/api/admin/servers/:id",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const server = await storage.updateServer(req.params.id, req.body);
@@ -1169,7 +1169,7 @@ export async function registerRoutes(
   app.delete(
     "/api/admin/servers/:id",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const success = await storage.deleteServer(req.params.id);
