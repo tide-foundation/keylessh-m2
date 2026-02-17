@@ -24,7 +24,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, FileCode, CreditCard, Video, Zap, Sun, Moon, Network } from "lucide-react";
+import { Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, CreditCard, Video, Zap, Sun, Moon, Network } from "lucide-react";
 
 function KeyleSSHLogo({ className = "" }: { className?: string }) {
   return (
@@ -84,7 +84,6 @@ const adminNavGroups = [
     items: [
       { title: "Users", url: "/admin/users", icon: Users },
       { title: "Roles", url: "/admin/roles", icon: KeyRound },
-      { title: "Policies", url: "/admin/policy-templates", icon: FileCode },
     ],
   },
   {
@@ -104,10 +103,11 @@ const adminNavGroups = [
 ];
 
 export function AppLayout({ children }: AppLayoutProps) {
-  const { user, logout, hasRole, refreshToken } = useAuth();
+  const { user, logout, hasRole, refreshToken, orgRole } = useAuth();
   const { toast } = useToast();
   const [location] = useLocation();
-  const isAdmin = hasRole("admin");
+  // Allow admin access for: legacy admin role (tide-realm-admin), org-admin, or global-admin
+  const isAdmin = hasRole("admin") || orgRole === "org-admin" || orgRole === "global-admin";
   const [isBrowserOnline, setIsBrowserOnline] = useState(() => navigator.onLine);
 
   // Check if Stripe is configured to determine if License page should be shown

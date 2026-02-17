@@ -16,13 +16,13 @@ import AdminDashboard from "@/pages/AdminDashboard";
 import AdminServers from "@/pages/AdminServers";
 import AdminUsers from "@/pages/AdminUsers";
 import AdminRoles from "@/pages/AdminRoles";
-import AdminPolicyTemplates from "@/pages/AdminPolicyTemplates";
 import AdminApprovals from "@/pages/AdminApprovals";
 import AdminSessions from "@/pages/AdminSessions";
 import AdminLogs from "@/pages/AdminLogs";
 import AdminLicense from "@/pages/AdminLicense";
 import AdminRecordings from "@/pages/AdminRecordings";
 import AdminBridges from "@/pages/AdminBridges";
+import Onboarding from "@/pages/Onboarding";
 import NotFound from "@/pages/not-found";
 import { Loader2, Terminal } from "lucide-react";
 
@@ -88,11 +88,12 @@ function ConsoleLegacyRedirect() {
  * so SSH connections persist across page navigation.
  */
 function AuthenticatedApp() {
-  const { isAuthenticated, isLoading, hasRole } = useAuth();
+  const { isAuthenticated, isLoading, hasRole, orgRole } = useAuth();
   const [location] = useLocation();
   const [, setLocation] = useLocation();
   const [showRetry, setShowRetry] = useState(false);
-  const isAdmin = hasRole("admin");
+  // Allow admin access for: legacy admin role, org-admin, or global-admin
+  const isAdmin = hasRole("admin") || orgRole === "org-admin" || orgRole === "global-admin";
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -154,7 +155,7 @@ function AuthenticatedApp() {
             {isAdmin ? <AdminRoles /> : <Redirect to="/app" />}
           </Route>
           <Route path="/admin/policy-templates">
-            {isAdmin ? <AdminPolicyTemplates /> : <Redirect to="/app" />}
+            <Redirect to="/admin" />
           </Route>
           <Route path="/admin/approvals">
             {isAdmin ? <AdminApprovals /> : <Redirect to="/app" />}
@@ -183,6 +184,7 @@ function Router() {
     <Switch>
       <Route path="/login" component={Login} />
       <Route path="/auth/redirect" component={AuthRedirect} />
+      <Route path="/onboarding" component={Onboarding} />
       {/* All other routes require authentication */}
       <Route>
         <AuthenticatedApp />
