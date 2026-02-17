@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import type { Server } from "http";
-import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, organizationStorage, type ApprovalType } from "./storage";
+import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, type ApprovalType } from "./storage";
 import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
 import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
@@ -109,14 +109,10 @@ async function checkServersHealth(servers: ServerType[]): Promise<Map<string, Se
 import {
   authenticate,
   requireAdmin,
-  requireOrgAdmin,
-  requireGlobalAdmin,
   requirePolicyCreator,
   tidecloakAdmin,
-  getOrgId,
   type AuthenticatedRequest,
 } from "./auth";
-import { DEFAULT_ORG_ID } from "./config";
 import {
   GetUserChangeRequests,
   GetRoleChangeRequests,
@@ -194,8 +190,6 @@ export async function registerRoutes(
           if (session.mode === "subscription" && session.subscription) {
             const subscriptionId = session.subscription as string;
             const customerId = session.customer as string;
-            // Extract org ID from session metadata (set during checkout creation)
-            const webhookOrgId = session.metadata?.organization_id || DEFAULT_ORG_ID;
 
             // Get the subscription to find the price/tier
             const stripeSubscription = await stripeLib.getSubscription(subscriptionId);
@@ -204,7 +198,7 @@ export async function registerRoutes(
 
             const currentPeriodEnd = stripeSubscription.current_period_end ?? null;
 
-            await subscriptionStorage.upsertSubscription(webhookOrgId, {
+            await subscriptionStorage.upsertSubscription({
               tier,
               stripeCustomerId: customerId,
               stripeSubscriptionId: subscriptionId,
@@ -213,7 +207,7 @@ export async function registerRoutes(
               currentPeriodEnd: currentPeriodEnd ?? undefined,
             });
 
-            log(`Subscription created/updated: ${tier} tier for customer ${customerId} (org: ${webhookOrgId})`);
+            log(`Subscription created/updated: ${tier} tier for customer ${customerId}`);
           }
           break;
         }
@@ -222,10 +216,8 @@ export async function registerRoutes(
           const subscription = event.data.object as any;
           const priceId = subscription.items.data[0]?.price.id;
           const tier = stripeLib.getTierFromPriceId(priceId || "");
-          // Extract org ID from subscription metadata
-          const webhookOrgId = subscription.metadata?.organization_id || DEFAULT_ORG_ID;
 
-          await subscriptionStorage.upsertSubscription(webhookOrgId, {
+          await subscriptionStorage.upsertSubscription({
             tier,
             stripeSubscriptionId: subscription.id,
             stripePriceId: priceId,
@@ -234,37 +226,26 @@ export async function registerRoutes(
             cancelAtPeriodEnd: subscription.cancel_at_period_end,
           });
 
-          log(`Subscription updated: ${tier} tier, status: ${subscription.status} (org: ${webhookOrgId})`);
+          log(`Subscription updated: ${tier} tier, status: ${subscription.status}`);
           break;
         }
 
         case "customer.subscription.deleted": {
-          const subscription = event.data.object as any;
-          const webhookOrgId = subscription.metadata?.organization_id || DEFAULT_ORG_ID;
           // Subscription cancelled - revert to free tier
-          await subscriptionStorage.upsertSubscription(webhookOrgId, {
+          await subscriptionStorage.upsertSubscription({
             tier: "free",
             status: "canceled",
             stripeSubscriptionId: null as any,
             stripePriceId: null as any,
           });
 
-          log(`Subscription deleted - reverted to free tier (org: ${webhookOrgId})`);
+          log(`Subscription deleted - reverted to free tier`);
           break;
         }
 
         case "invoice.paid": {
           const invoice = event.data.object as any;
-          // Try to get org from subscription metadata
-          const subId = invoice.subscription as string | undefined;
-          let webhookOrgId = DEFAULT_ORG_ID;
-          if (subId) {
-            try {
-              const sub = await stripeLib.getSubscription(subId);
-              webhookOrgId = (sub as any).metadata?.organization_id || DEFAULT_ORG_ID;
-            } catch { /* fallback to default */ }
-          }
-          await subscriptionStorage.addBillingRecord(webhookOrgId, {
+          await subscriptionStorage.addBillingRecord({
             stripeInvoiceId: invoice.id,
             amount: invoice.amount_paid,
             currency: invoice.currency,
@@ -273,26 +254,17 @@ export async function registerRoutes(
             description: invoice.lines?.data?.[0]?.description || "Subscription payment",
           });
 
-          log(`Invoice paid: ${invoice.id} for ${invoice.amount_paid / 100} ${invoice.currency.toUpperCase()} (org: ${webhookOrgId})`);
+          log(`Invoice paid: ${invoice.id} for ${invoice.amount_paid / 100} ${invoice.currency.toUpperCase()}`);
           break;
         }
 
         case "invoice.payment_failed": {
           const invoice = event.data.object as any;
-          // Try to get org from subscription metadata
-          const subId = invoice.subscription as string | undefined;
-          let webhookOrgId = DEFAULT_ORG_ID;
-          if (subId) {
-            try {
-              const sub = await stripeLib.getSubscription(subId);
-              webhookOrgId = (sub as any).metadata?.organization_id || DEFAULT_ORG_ID;
-            } catch { /* fallback to default */ }
-          }
-          await subscriptionStorage.upsertSubscription(webhookOrgId, {
+          await subscriptionStorage.upsertSubscription({
             status: "past_due",
           });
 
-          await subscriptionStorage.addBillingRecord(webhookOrgId, {
+          await subscriptionStorage.addBillingRecord({
             stripeInvoiceId: invoice.id,
             amount: invoice.amount_due,
             currency: invoice.currency,
@@ -300,7 +272,7 @@ export async function registerRoutes(
             description: "Payment failed",
           });
 
-          log(`Invoice payment failed: ${invoice.id} (org: ${webhookOrgId})`);
+          log(`Invoice payment failed: ${invoice.id}`);
           break;
         }
 
@@ -330,130 +302,21 @@ export async function registerRoutes(
   });
 
   // ============================================
-  // Public Onboarding (unauthenticated - for initial org setup)
-  // ============================================
-
-  // POST /api/onboarding - Create and provision a new organization (unauthenticated)
-  // This is used for initial organization setup before any users exist
-  // Supports two tiers:
-  //   - "free": Uses shared TideCloak realm with organization_id attribute
-  //   - "paid": Creates dedicated TideCloak realm for full isolation
-  app.post("/api/onboarding", async (req, res) => {
-    try {
-      const { tier, organizationName, organizationSlug, adminEmail, adminFirstName, adminLastName } = req.body;
-
-      // Validate required fields
-      if (!organizationName || !organizationSlug || !adminEmail || !adminFirstName || !adminLastName) {
-        res.status(400).json({ error: "All fields are required: organizationName, organizationSlug, adminEmail, adminFirstName, adminLastName" });
-        return;
-      }
-
-      // Validate tier (default to "free" if not specified)
-      const selectedTier = tier === "paid" ? "paid" : "free";
-
-      // Validate name format (alphanumeric and spaces only)
-      const isValidOrgNamePublic = (name: string): boolean => /^[a-zA-Z0-9 ]+$/.test(name);
-      if (!isValidOrgNamePublic(organizationName)) {
-        res.status(400).json({ error: "Organization name can only contain letters, numbers, and spaces" });
-        return;
-      }
-
-      // Validate slug format (lowercase alphanumeric only)
-      const isValidOrgSlugPublic = (slug: string): boolean => /^[a-z0-9]+$/.test(slug);
-      if (!isValidOrgSlugPublic(organizationSlug)) {
-        res.status(400).json({ error: "Organization slug can only contain lowercase letters and numbers" });
-        return;
-      }
-
-      // Validate email format
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(adminEmail)) {
-        res.status(400).json({ error: "Invalid email format" });
-        return;
-      }
-
-      // Check if slug already exists
-      const existing = await organizationStorage.getOrganizationBySlug(organizationSlug);
-      if (existing) {
-        res.status(409).json({ error: "An organization with that slug already exists" });
-        return;
-      }
-
-      // Step 1: Create organization in database
-      log(`[Onboarding] Creating organization: ${organizationName} (${organizationSlug}) - tier: ${selectedTier}`);
-      const org = await organizationStorage.createOrganization(organizationName, organizationSlug);
-
-      // Step 2: Provision based on tier
-      const clientAppUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
-      let result;
-
-      if (selectedTier === "paid") {
-        // Paid tier: Create dedicated TideCloak realm
-        log(`[Onboarding] Provisioning dedicated TideCloak realm for: ${org.name}`);
-        const { provisionOrganization } = await import("./lib/provisionOrg");
-        result = await provisionOrganization({
-          organizationId: org.id,
-          organizationSlug: org.slug,
-          organizationName: org.name,
-          adminEmail,
-          adminFirstName,
-          adminLastName,
-          clientAppUrl,
-        });
-      } else {
-        // Free tier: Create user in shared realm with organization_id attribute
-        log(`[Onboarding] Provisioning freemium user in shared realm for: ${org.name}`);
-        const { provisionFreemiumOrganization } = await import("./lib/provisionOrg");
-        result = await provisionFreemiumOrganization({
-          organizationId: org.id,
-          organizationSlug: org.slug,
-          organizationName: org.name,
-          adminEmail,
-          adminFirstName,
-          adminLastName,
-          clientAppUrl,
-        });
-      }
-
-      if (!result.success) {
-        // Rollback: delete the organization from database
-        await organizationStorage.deleteOrganization(org.id);
-        log(`[Onboarding] Provisioning failed, rolled back org: ${result.error}`);
-        res.status(500).json({ error: result.error || "Failed to provision organization" });
-        return;
-      }
-
-      log(`[Onboarding] Organization provisioned successfully: ${org.name} (realm: ${result.realmName}, tier: ${selectedTier})`);
-      res.status(201).json({
-        success: true,
-        organization: org,
-        tier: selectedTier,
-        realmName: result.realmName,
-        inviteLink: result.inviteLink,
-      });
-    } catch (error) {
-      log(`[Onboarding] Failed: ${error}`);
-      res.status(500).json({ error: "Failed to create organization" });
-    }
-  });
-
-  // ============================================
   // User Routes (authenticated users)
   // ============================================
 
   app.get("/api/servers", authenticate, async (req: AuthenticatedRequest, res) => {
     try {
       const user = req.user!;
-      const orgId = getOrgId(req as AuthenticatedRequest);
       const allowedSshUsersFromToken = getAllowedSshUsersFromToken(req.tokenPayload);
 
       let servers;
       if (user.role === "admin") {
-        servers = await storage.getServers(orgId);
+        servers = await storage.getServers();
       } else {
         // Non-admin users can view all configured servers (connect access is still gated
         // by server existence/enabled and WS/session validation).
-        servers = (await storage.getServers(orgId)).filter((s) => s.enabled);
+        servers = (await storage.getServers()).filter((s) => s.enabled);
       }
 
       // Check health status for all servers in parallel
@@ -505,9 +368,8 @@ export async function registerRoutes(
   app.get("/api/sessions", authenticate, async (req: AuthenticatedRequest, res) => {
     try {
       const user = req.user!;
-      const orgId = getOrgId(req as AuthenticatedRequest);
       const sessions = await storage.getSessionsByUserId(user.id);
-      const servers = await storage.getServers(orgId);
+      const servers = await storage.getServers();
 
       const activeSessions: ActiveSession[] = sessions.map((session) => {
         const server = servers.find((s) => s.id === session.serverId);
@@ -527,7 +389,6 @@ export async function registerRoutes(
   app.post("/api/sessions", authenticate, async (req: AuthenticatedRequest, res) => {
     try {
       const user = req.user!;
-      const orgId = getOrgId(req as AuthenticatedRequest);
       const { serverId, sshUser } = req.body;
       const allowedSshUsersFromToken = getAllowedSshUsersFromToken(req.tokenPayload);
 
@@ -549,20 +410,20 @@ export async function registerRoutes(
           const users = await tidecloakAdmin.getUsers(token);
           // Count ALL enabled users (including admins) for the limit check
           const enabledCount = users.filter(u => u.enabled).length;
-          const subscription = await subscriptionStorage.getSubscription(orgId);
+          const subscription = await subscriptionStorage.getSubscription();
           const tier = (subscription?.tier as SubscriptionTier) || 'free';
           const tierConfig = subscriptionTiers[tier];
           const userLimit = tierConfig.maxUsers;
           const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
-          const serverCounts = await subscriptionStorage.getServerCounts(orgId);
+          const serverCounts = await subscriptionStorage.getServerCounts();
           const serverLimit = tierConfig.maxServers;
           const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
-          await subscriptionStorage.updateOverLimitStatus(orgId, isUsersOverLimit, isServersOverLimit);
+          await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
         } catch {
           // If we can't refresh, continue with cached status
         }
       }
-      const sshStatus = await subscriptionStorage.isSshBlocked(orgId);
+      const sshStatus = await subscriptionStorage.isSshBlocked();
       if (sshStatus.blocked) {
         res.status(403).json({ message: sshStatus.reason || "SSH access is currently disabled" });
         return;
@@ -582,7 +443,7 @@ export async function registerRoutes(
         return;
       }
 
-      const session = await storage.createSession(orgId, {
+      const session = await storage.createSession({
         userId: user.id,
         userUsername: user.username,
         userEmail: user.email,
@@ -660,7 +521,6 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.user!;
-        const orgId = getOrgId(req as AuthenticatedRequest);
         const allowedSshUsersFromToken = getAllowedSshUsersFromToken(req.tokenPayload);
         const { serverId } = req.body;
 
@@ -687,20 +547,20 @@ export async function registerRoutes(
             const users = await tidecloakAdmin.getUsers(token);
             // Count ALL enabled users (including admins) for the limit check
             const enabledCount = users.filter(u => u.enabled).length;
-            const subscription = await subscriptionStorage.getSubscription(orgId);
+            const subscription = await subscriptionStorage.getSubscription();
             const tier = (subscription?.tier as SubscriptionTier) || 'free';
             const tierConfig = subscriptionTiers[tier];
             const userLimit = tierConfig.maxUsers;
             const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
-            const serverCounts = await subscriptionStorage.getServerCounts(orgId);
+            const serverCounts = await subscriptionStorage.getServerCounts();
             const serverLimit = tierConfig.maxServers;
             const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
-            await subscriptionStorage.updateOverLimitStatus(orgId, isUsersOverLimit, isServersOverLimit);
+            await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
           } catch {
             // If we can't refresh, continue with cached status
           }
         }
-        const sshStatus = await subscriptionStorage.isSshBlocked(orgId);
+        const sshStatus = await subscriptionStorage.isSshBlocked();
         if (sshStatus.blocked) {
           res.status(403).json({ message: sshStatus.reason || "SSH access is currently disabled" });
           return;
@@ -728,7 +588,6 @@ export async function registerRoutes(
     authenticate,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
         // Refresh the over-limit status using the user's token for real-time accuracy
         const token = req.accessToken;
         if (token) {
@@ -737,16 +596,16 @@ export async function registerRoutes(
             // Count ALL enabled users (including admins) for the limit check
             // Admins count toward the limit, they just can't be individually disabled
             const enabledCount = users.filter(u => u.enabled).length;
-            const subscription = await subscriptionStorage.getSubscription(orgId);
+            const subscription = await subscriptionStorage.getSubscription();
             const tier = (subscription?.tier as SubscriptionTier) || 'free';
             const tierConfig = subscriptionTiers[tier];
             const userLimit = tierConfig.maxUsers;
             const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
-            const serverCounts = await subscriptionStorage.getServerCounts(orgId);
+            const serverCounts = await subscriptionStorage.getServerCounts();
             const serverLimit = tierConfig.maxServers;
             const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
             log(`SSH access check: ${enabledCount} enabled users (limit: ${userLimit}), ${serverCounts.enabled} enabled servers (limit: ${serverLimit}), usersOver: ${isUsersOverLimit}, serversOver: ${isServersOverLimit}`);
-            await subscriptionStorage.updateOverLimitStatus(orgId, isUsersOverLimit, isServersOverLimit);
+            await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
           } catch (err) {
             log(`Failed to refresh over-limit status: ${err}`);
           }
@@ -754,7 +613,7 @@ export async function registerRoutes(
           log(`SSH access check: no token available`);
         }
 
-        const status = await subscriptionStorage.isSshBlocked(orgId);
+        const status = await subscriptionStorage.isSshBlocked();
         res.json(status);
       } catch (error) {
         log(`Failed to check SSH access status: ${error}`);
@@ -828,19 +687,19 @@ export async function registerRoutes(
       try {
         const users = await tidecloakAdmin.getUsers(token);
         const enabledCount = users.filter(u => u.enabled).length;
-        const subscription = await subscriptionStorage.getSubscription(DEFAULT_ORG_ID);
+        const subscription = await subscriptionStorage.getSubscription();
         const tier = (subscription?.tier as SubscriptionTier) || 'free';
         const tierConfig = subscriptionTiers[tier];
         const userLimit = tierConfig.maxUsers;
         const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
-        const serverCounts = await subscriptionStorage.getServerCounts(DEFAULT_ORG_ID);
+        const serverCounts = await subscriptionStorage.getServerCounts();
         const serverLimit = tierConfig.maxServers;
         const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
-        await subscriptionStorage.updateOverLimitStatus(DEFAULT_ORG_ID, isUsersOverLimit, isServersOverLimit);
+        await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
       } catch {
         // If we can't refresh, continue with cached status
       }
-      const sshStatus = await subscriptionStorage.isSshBlocked(DEFAULT_ORG_ID);
+      const sshStatus = await subscriptionStorage.isSshBlocked();
       if (sshStatus.blocked) {
         res.status(403).json({ valid: false, error: "SSH access is currently disabled" });
         return;
@@ -1032,7 +891,7 @@ export async function registerRoutes(
         return;
       }
 
-      await fileOperationStorage.logOperation(getOrgId(req as AuthenticatedRequest), {
+      await fileOperationStorage.logOperation({
         sessionId,
         serverId: session.serverId,
         userId: user.id,
@@ -1065,8 +924,7 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
-        const servers = await storage.getServers(orgId);
+        const servers = await storage.getServers();
         res.json(servers);
       } catch (error) {
         res.status(500).json({ message: "Failed to fetch servers" });
@@ -1080,8 +938,7 @@ export async function registerRoutes(
     requireAdmin,
     async (_req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(_req as AuthenticatedRequest);
-        const servers = await storage.getServers(orgId);
+        const servers = await storage.getServers();
         const healthStatusMap = await checkServersHealth(servers);
         const statuses: Record<string, ServerStatus> = {};
         for (const s of servers) {
@@ -1100,10 +957,9 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
         // Check server limit before creating
-        const serverCount = await subscriptionStorage.getServerCount(orgId);
-        const limitCheck = await subscriptionStorage.checkCanAdd(orgId, 'server', serverCount);
+        const serverCount = await subscriptionStorage.getServerCount();
+        const limitCheck = await subscriptionStorage.checkCanAdd('server', serverCount);
         if (!limitCheck.allowed) {
           res.status(403).json({
             error: 'Server limit reached',
@@ -1116,7 +972,7 @@ export async function registerRoutes(
           return;
         }
 
-        const server = await storage.createServer(orgId, req.body);
+        const server = await storage.createServer(req.body);
         res.json(server);
       } catch (error) {
         res.status(500).json({ message: "Failed to create server" });
@@ -1171,8 +1027,7 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
-        const bridgeList = await bridgeStorage.getBridges(orgId);
+        const bridgeList = await bridgeStorage.getBridges();
         res.json(bridgeList);
       } catch (error) {
         log(`Failed to fetch bridges: ${error}`);
@@ -1188,12 +1043,11 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
         const { name, url, description, enabled, isDefault } = req.body;
         if (!name || !url) {
           return res.status(400).json({ message: "Name and URL are required" });
         }
-        const bridge = await bridgeStorage.createBridge(orgId, {
+        const bridge = await bridgeStorage.createBridge({
           name,
           url,
           description,
@@ -1356,7 +1210,6 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
-        const orgId = getOrgId(req as AuthenticatedRequest);
         const userId = req.query.userId as string;
 
         if (!userId) {
@@ -1370,15 +1223,15 @@ export async function registerRoutes(
         // Count ALL enabled users (including admins) for the limit check
         const users = await tidecloakAdmin.getUsers(token);
         const enabledCount = users.filter(u => u.enabled).length;
-        const subscription = await subscriptionStorage.getSubscription(orgId);
+        const subscription = await subscriptionStorage.getSubscription();
         const tier = (subscription?.tier as SubscriptionTier) || 'free';
         const tierConfig = subscriptionTiers[tier];
         const userLimit = tierConfig.maxUsers;
         const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
-        const serverCounts = await subscriptionStorage.getServerCounts(orgId);
+        const serverCounts = await subscriptionStorage.getServerCounts();
         const serverLimit = tierConfig.maxServers;
         const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
-        await subscriptionStorage.updateOverLimitStatus(orgId, isUsersOverLimit, isServersOverLimit);
+        await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
 
         res.json({ success: true });
       } catch (error) {
@@ -1396,7 +1249,6 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
-        const orgId = getOrgId(req as AuthenticatedRequest);
         const userId = req.params.id;
         const { enabled } = req.body;
 
@@ -1411,15 +1263,15 @@ export async function registerRoutes(
         // Count ALL enabled users (including admins) for the limit check
         const users = await tidecloakAdmin.getUsers(token);
         const enabledCount = users.filter(u => u.enabled).length;
-        const subscription = await subscriptionStorage.getSubscription(orgId);
+        const subscription = await subscriptionStorage.getSubscription();
         const tier = (subscription?.tier as SubscriptionTier) || 'free';
         const tierConfig = subscriptionTiers[tier];
         const userLimit = tierConfig.maxUsers;
         const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
-        const serverCounts = await subscriptionStorage.getServerCounts(orgId);
+        const serverCounts = await subscriptionStorage.getServerCounts();
         const serverLimit = tierConfig.maxServers;
         const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
-        await subscriptionStorage.updateOverLimitStatus(orgId, isUsersOverLimit, isServersOverLimit);
+        await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
 
         res.json({ success: true, enabled });
       } catch (error) {
@@ -1437,7 +1289,6 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
-        const orgId = getOrgId(req as AuthenticatedRequest);
         const { username, firstName, lastName, email } = req.body;
 
         if (!username || !firstName || !lastName || !email) {
@@ -1447,7 +1298,7 @@ export async function registerRoutes(
 
         // Check user limit before creating
         const users = await tidecloakAdmin.getUsers(token);
-        const limitCheck = await subscriptionStorage.checkCanAdd(orgId, 'user', users.length);
+        const limitCheck = await subscriptionStorage.checkCanAdd('user', users.length);
         if (!limitCheck.allowed) {
           res.status(403).json({
             error: 'User limit reached',
@@ -1466,15 +1317,15 @@ export async function registerRoutes(
         // Count ALL enabled users (including admins) for the limit check
         const updatedUsers = await tidecloakAdmin.getUsers(token);
         const enabledCount = updatedUsers.filter(u => u.enabled).length;
-        const subscription = await subscriptionStorage.getSubscription(orgId);
+        const subscription = await subscriptionStorage.getSubscription();
         const tier = (subscription?.tier as SubscriptionTier) || 'free';
         const tierConfig = subscriptionTiers[tier];
         const userLimit = tierConfig.maxUsers;
         const isUsersOverLimit = userLimit !== -1 && enabledCount > userLimit;
-        const serverCounts = await subscriptionStorage.getServerCounts(orgId);
+        const serverCounts = await subscriptionStorage.getServerCounts();
         const serverLimit = tierConfig.maxServers;
         const isServersOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
-        await subscriptionStorage.updateOverLimitStatus(orgId, isUsersOverLimit, isServersOverLimit);
+        await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
 
         res.json({ message: "User has been added" });
       } catch (error) {
@@ -1509,177 +1360,6 @@ export async function registerRoutes(
         res.json({ linkUrl });
       } catch (error) {
         log(`Failed to get Tide link URL: ${error}`);
-        res.status(400).json({ error: "Failed to get Tide link URL" });
-      }
-    }
-  );
-
-  // ============================================
-  // Org-Scoped User Management Routes
-  // These routes allow org-admins to manage users in their organization
-  // without needing TideCloak realm-level permissions.
-  // Uses master admin credentials with organization_id attribute filtering.
-  // ============================================
-
-  // GET /api/org/users - List users in the org-admin's organization
-  app.get(
-    "/api/org/users",
-    authenticate,
-    requireOrgAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const orgId = getOrgId(req);
-        const { getOrgUsers } = await import("./lib/orgUserManagement");
-        const users = await getOrgUsers(orgId);
-        res.json(users);
-      } catch (error) {
-        log(`Failed to fetch org users: ${error}`);
-        res.status(500).json({ error: "Failed to fetch users" });
-      }
-    }
-  );
-
-  // POST /api/org/users - Create a new user in the organization
-  app.post(
-    "/api/org/users",
-    authenticate,
-    requireOrgAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const orgId = getOrgId(req);
-        const { email, firstName, lastName, orgRole } = req.body;
-
-        if (!email || !firstName) {
-          res.status(400).json({ error: "Email and firstName are required" });
-          return;
-        }
-
-        // Check user limit before creating
-        const { getOrgUsers } = await import("./lib/orgUserManagement");
-        const existingUsers = await getOrgUsers(orgId);
-        const limitCheck = await subscriptionStorage.checkCanAdd(orgId, "user", existingUsers.length);
-        if (!limitCheck.allowed) {
-          res.status(403).json({
-            error: "User limit reached",
-            message: `Your ${limitCheck.tierName} plan allows ${limitCheck.limit} users. Upgrade to add more.`,
-            current: limitCheck.current,
-            limit: limitCheck.limit,
-            tier: limitCheck.tier,
-            upgradeRequired: true,
-          });
-          return;
-        }
-
-        const { createOrgUser } = await import("./lib/orgUserManagement");
-        const user = await createOrgUser({
-          email,
-          firstName,
-          lastName: lastName || "",
-          organizationId: orgId,
-          orgRole: orgRole || "user",
-        });
-
-        res.status(201).json(user);
-      } catch (error) {
-        log(`Failed to create org user: ${error}`);
-        res.status(400).json({ error: "Failed to create user" });
-      }
-    }
-  );
-
-  // PUT /api/org/users/:id - Update a user in the organization
-  app.put(
-    "/api/org/users/:id",
-    authenticate,
-    requireOrgAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const orgId = getOrgId(req);
-        const userId = req.params.id;
-        const { firstName, lastName, email, orgRole } = req.body;
-
-        const { updateOrgUser } = await import("./lib/orgUserManagement");
-        await updateOrgUser(userId, orgId, { firstName, lastName, email, orgRole });
-
-        res.json({ success: true });
-      } catch (error) {
-        log(`Failed to update org user: ${error}`);
-        res.status(400).json({ error: "Failed to update user" });
-      }
-    }
-  );
-
-  // PUT /api/org/users/:id/enabled - Enable or disable a user
-  app.put(
-    "/api/org/users/:id/enabled",
-    authenticate,
-    requireOrgAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const orgId = getOrgId(req);
-        const userId = req.params.id;
-        const { enabled } = req.body;
-
-        if (typeof enabled !== "boolean") {
-          res.status(400).json({ error: "enabled must be a boolean" });
-          return;
-        }
-
-        const { setOrgUserEnabled } = await import("./lib/orgUserManagement");
-        await setOrgUserEnabled(userId, orgId, enabled);
-
-        res.json({ success: true, enabled });
-      } catch (error) {
-        log(`Failed to set org user enabled status: ${error}`);
-        res.status(400).json({ error: "Failed to update user status" });
-      }
-    }
-  );
-
-  // DELETE /api/org/users/:id - Delete a user from the organization
-  app.delete(
-    "/api/org/users/:id",
-    authenticate,
-    requireOrgAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const orgId = getOrgId(req);
-        const userId = req.params.id;
-
-        // Prevent self-deletion
-        if (userId === req.user?.id) {
-          res.status(400).json({ error: "Cannot delete yourself" });
-          return;
-        }
-
-        const { deleteOrgUser } = await import("./lib/orgUserManagement");
-        await deleteOrgUser(userId, orgId);
-
-        res.json({ success: true });
-      } catch (error) {
-        log(`Failed to delete org user: ${error}`);
-        res.status(400).json({ error: "Failed to delete user" });
-      }
-    }
-  );
-
-  // GET /api/org/users/:id/tide-link - Get Tide account linking URL
-  app.get(
-    "/api/org/users/:id/tide-link",
-    authenticate,
-    requireOrgAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const orgId = getOrgId(req);
-        const userId = req.params.id;
-        const redirectUri = req.query.redirectUri as string || `${req.protocol}://${req.get("host")}/admin/users`;
-
-        const { getOrgUserTideLinkUrl } = await import("./lib/orgUserManagement");
-        const linkUrl = await getOrgUserTideLinkUrl(userId, orgId, redirectUri);
-
-        res.json({ linkUrl });
-      } catch (error) {
-        log(`Failed to get org user Tide link URL: ${error}`);
         res.status(400).json({ error: "Failed to get Tide link URL" });
       }
     }
@@ -1821,8 +1501,7 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
-        const policies = await policyStorage.getAllPolicies(orgId);
+        const policies = await policyStorage.getAllPolicies();
         res.json({ policies });
       } catch (error) {
         log(`Failed to fetch policies: ${error}`);
@@ -1923,8 +1602,7 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
-        const policies = await pendingPolicyStorage.getAllPendingPolicies(orgId);
+        const policies = await pendingPolicyStorage.getAllPendingPolicies();
         res.json({ policies });
       } catch (error) {
         log(`Failed to fetch pending policies: ${error}`);
@@ -2336,9 +2014,8 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
-        const sessions = await storage.getSessions(orgId);
-        const servers = await storage.getServers(orgId);
+        const sessions = await storage.getSessions();
+        const servers = await storage.getServers();
 
         const activeSessions: ActiveSession[] = sessions.map((session) => {
           const server = servers.find((s) => s.id === session.serverId);
@@ -2408,8 +2085,7 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
-        const approvals = await approvalStorage.getPendingApprovals(orgId);
+        const approvals = await approvalStorage.getPendingApprovals();
         res.json(approvals);
       } catch (error) {
         log(`Failed to fetch approvals: ${error}`);
@@ -2465,9 +2141,7 @@ export async function registerRoutes(
           return;
         }
 
-        const orgId = getOrgId(req as AuthenticatedRequest);
         const id = await approvalStorage.createApproval(
-          orgId,
           type,
           user.email,
           data,
@@ -2803,7 +2477,7 @@ export async function registerRoutes(
         const requests = await GetRoleChangeRequests(token);
 
         // Transform to match frontend expectations
-        const approvals = requests.map((req) => ({
+        const approvals: AccessApproval[] = requests.map((req) => ({
           id: req.retrievalInfo.changeSetId,
           requestType: req.data.actionType || req.data.action,
           status: req.data.status,
@@ -3018,10 +2692,9 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
         const limit = parseInt(req.query.limit as string) || 100;
         const offset = parseInt(req.query.offset as string) || 0;
-        const operations = await fileOperationStorage.getOperations(orgId, limit, offset);
+        const operations = await fileOperationStorage.getOperations(limit, offset);
         const total = await fileOperationStorage.getOperationCount();
 
         // Enrich operations with server names
@@ -3054,8 +2727,7 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
-        const templates = await templateStorage.getAllTemplates(orgId);
+        const templates = await templateStorage.getAllTemplates();
         res.json({ templates });
       } catch (error) {
         log(`Failed to fetch policy templates: ${error}`);
@@ -3216,7 +2888,6 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
-        const orgId = getOrgId(req as AuthenticatedRequest);
         // Get users from TideCloak and count total/enabled
         // Admins count toward the limit, they just can't be individually disabled
         const users = await tidecloakAdmin.getUsers(token);
@@ -3228,7 +2899,7 @@ export async function registerRoutes(
         // Always validate local subscription against Stripe to ensure consistency
         if (stripeLib.isStripeConfigured()) {
           try {
-            const existing = await subscriptionStorage.getSubscription(orgId);
+            const existing = await subscriptionStorage.getSubscription();
 
             // If we have a Stripe subscription ID, verify it's still valid
             if (existing?.stripeSubscriptionId) {
@@ -3248,7 +2919,7 @@ export async function registerRoutes(
                 const tier = shouldGrantPaidTier && priceId ? stripeLib.getTierFromPriceId(priceId) : "free";
 
                 // Sync current state from Stripe
-                await subscriptionStorage.upsertSubscription(orgId, {
+                await subscriptionStorage.upsertSubscription({
                   tier,
                   stripeCustomerId: typeof stripeSubscription.customer === "string"
                     ? stripeSubscription.customer
@@ -3263,7 +2934,7 @@ export async function registerRoutes(
                 // Subscription not found in Stripe - revert to free
                 if (stripeError?.statusCode === 404 || stripeError?.code === "resource_missing") {
                   log(`Stripe subscription ${existing.stripeSubscriptionId} not found - reverting to free tier`);
-                  await subscriptionStorage.upsertSubscription(orgId, {
+                  await subscriptionStorage.upsertSubscription({
                     tier: "free",
                     status: "active",
                     stripeSubscriptionId: null as any,
@@ -3288,7 +2959,7 @@ export async function registerRoutes(
                 const shouldGrantPaidTier = isActiveSub || isCanceledButValid;
                 const tier = shouldGrantPaidTier && priceId ? stripeLib.getTierFromPriceId(priceId) : "free";
 
-                await subscriptionStorage.upsertSubscription(orgId, {
+                await subscriptionStorage.upsertSubscription({
                   tier,
                   stripeCustomerId: existing.stripeCustomerId,
                   stripeSubscriptionId: shouldGrantPaidTier ? stripeSubscription.id : null as any,
@@ -3300,7 +2971,7 @@ export async function registerRoutes(
               } else {
                 // Customer exists but no active subscription - ensure free tier
                 if (existing.tier !== "free") {
-                  await subscriptionStorage.upsertSubscription(orgId, {
+                  await subscriptionStorage.upsertSubscription({
                     tier: "free",
                     status: "active",
                     stripeSubscriptionId: null as any,
@@ -3327,7 +2998,7 @@ export async function registerRoutes(
                     const shouldGrantPaidTier = isActiveSub || isCanceledButValid;
                     const tier = shouldGrantPaidTier && priceId ? stripeLib.getTierFromPriceId(priceId) : "free";
 
-                    await subscriptionStorage.upsertSubscription(orgId, {
+                    await subscriptionStorage.upsertSubscription({
                       tier,
                       stripeCustomerId: customer.id,
                       stripeSubscriptionId: shouldGrantPaidTier ? stripeSubscription.id : null as any,
@@ -3345,12 +3016,12 @@ export async function registerRoutes(
           }
         }
 
-        const licenseInfo = await subscriptionStorage.getLicenseInfo(orgId, userCounts);
+        const licenseInfo = await subscriptionStorage.getLicenseInfo(userCounts);
 
         // Cache the over-limit status for SSH access control
         const isUsersOverLimit = licenseInfo.overLimit?.users.isOverLimit || false;
         const isServersOverLimit = licenseInfo.overLimit?.servers.isOverLimit || false;
-        await subscriptionStorage.updateOverLimitStatus(orgId, isUsersOverLimit, isServersOverLimit);
+        await subscriptionStorage.updateOverLimitStatus(isUsersOverLimit, isServersOverLimit);
 
         res.json({ ...licenseInfo, stripeConfigured: stripeLib.isStripeConfigured() });
       } catch (error) {
@@ -3367,7 +3038,6 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
         const { resource } = req.params;
         if (resource !== 'user' && resource !== 'server') {
           res.status(400).json({ error: "Resource must be 'user' or 'server'" });
@@ -3380,10 +3050,10 @@ export async function registerRoutes(
           const users = await tidecloakAdmin.getUsers(token);
           currentCount = users.length;
         } else {
-          currentCount = await subscriptionStorage.getServerCount(orgId);
+          currentCount = await subscriptionStorage.getServerCount();
         }
 
-        const limitCheck = await subscriptionStorage.checkCanAdd(orgId, resource, currentCount);
+        const limitCheck = await subscriptionStorage.checkCanAdd(resource, currentCount);
         res.json(limitCheck);
       } catch (error) {
         log(`Failed to check license limit: ${error}`);
@@ -3399,7 +3069,6 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
         if (!stripeLib.isStripeConfigured()) {
           res.status(503).json({ error: "Stripe is not configured" });
           return;
@@ -3411,7 +3080,7 @@ export async function registerRoutes(
           return;
         }
 
-        const subscription = await subscriptionStorage.getSubscription(orgId);
+        const subscription = await subscriptionStorage.getSubscription();
         const appUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
 
         let session;
@@ -3422,13 +3091,12 @@ export async function registerRoutes(
             priceId,
             successUrl: `${appUrl}/admin/license?success=true&session_id={CHECKOUT_SESSION_ID}`,
             cancelUrl: `${appUrl}/admin/license?canceled=true`,
-            metadata: { organization_id: orgId },
           });
         } catch (checkoutError: any) {
           // If customer doesn't exist in Stripe, clear bad ID and retry with email
           if (checkoutError?.code === "resource_missing" || checkoutError?.message?.includes("No such customer")) {
             log(`Stripe customer ${subscription?.stripeCustomerId} not found - clearing and using email`);
-            await subscriptionStorage.upsertSubscription(orgId, {
+            await subscriptionStorage.upsertSubscription({
               stripeCustomerId: null as any,
             });
             session = await stripeLib.createCheckoutSession({
@@ -3436,7 +3104,6 @@ export async function registerRoutes(
               priceId,
               successUrl: `${appUrl}/admin/license?success=true&session_id={CHECKOUT_SESSION_ID}`,
               cancelUrl: `${appUrl}/admin/license?canceled=true`,
-              metadata: { organization_id: orgId },
             });
           } else {
             throw checkoutError;
@@ -3458,13 +3125,12 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
         if (!stripeLib.isStripeConfigured()) {
           res.status(503).json({ error: "Stripe is not configured" });
           return;
         }
 
-        const subscription = await subscriptionStorage.getSubscription(orgId);
+        const subscription = await subscriptionStorage.getSubscription();
         if (!subscription?.stripeCustomerId) {
           res.status(400).json({ error: "No active subscription found" });
           return;
@@ -3491,8 +3157,7 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
-        const history = await subscriptionStorage.getBillingHistory(orgId);
+        const history = await subscriptionStorage.getBillingHistory();
         res.json(history);
       } catch (error) {
         log(`Failed to fetch billing history: ${error}`);
@@ -3529,7 +3194,6 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
         if (!stripeLib.isStripeConfigured()) {
           res.status(503).json({ error: "Stripe is not configured" });
           return;
@@ -3557,7 +3221,7 @@ export async function registerRoutes(
         const priceId = stripeSubscription.items.data[0]?.price?.id || null;
         const tier = priceId ? stripeLib.getTierFromPriceId(priceId) : "free";
 
-        await subscriptionStorage.upsertSubscription(orgId, {
+        await subscriptionStorage.upsertSubscription({
           tier,
           stripeCustomerId: customerId || undefined,
           stripeSubscriptionId: subscriptionId,
@@ -3582,7 +3246,6 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
         if (!stripeLib.isStripeConfigured()) {
           res.status(503).json({ error: "Stripe is not configured" });
           return;
@@ -3613,7 +3276,7 @@ export async function registerRoutes(
           ? stripeSubscription.customer
           : stripeSubscription.customer?.id;
 
-        await subscriptionStorage.upsertSubscription(orgId, {
+        await subscriptionStorage.upsertSubscription({
           tier,
           stripeCustomerId: customerIdFromSub || customerId || undefined,
           stripeSubscriptionId: stripeSubscription.id,
@@ -3643,7 +3306,6 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const orgId = getOrgId(req as AuthenticatedRequest);
         const limit = parseInt(req.query.limit as string) || 50;
         const offset = parseInt(req.query.offset as string) || 0;
         const serverId = req.query.serverId as string | undefined;
@@ -3652,13 +3314,13 @@ export async function registerRoutes(
 
         let recordings;
         if (search) {
-          recordings = await recordingStorage.searchRecordings(orgId, search, limit);
+          recordings = await recordingStorage.searchRecordings(search, limit);
         } else if (serverId) {
           recordings = await recordingStorage.getRecordingsByServer(serverId, limit);
         } else if (userId) {
           recordings = await recordingStorage.getRecordingsByUser(userId, limit);
         } else {
-          recordings = await recordingStorage.getRecordings(orgId, limit, offset);
+          recordings = await recordingStorage.getRecordings(limit, offset);
         }
 
         // Get total count and storage usage
@@ -3838,324 +3500,6 @@ export async function registerRoutes(
       } catch (error) {
         log(`Failed to get recording stats: ${error}`);
         res.status(500).json({ error: "Internal Server Error" });
-      }
-    }
-  );
-
-  // ───── Organization Management Routes (global-admin only) ─────
-
-  // Organization name/slug validation: alphanumeric and spaces only (no hyphens, underscores, or special chars)
-  const isValidOrgName = (name: string): boolean => /^[a-zA-Z0-9 ]+$/.test(name);
-  const isValidOrgSlug = (slug: string): boolean => /^[a-z0-9]+$/.test(slug);
-
-  // POST /api/admin/organizations - Create a new organization
-  app.post(
-    "/api/admin/organizations",
-    authenticate,
-    requireGlobalAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const { name, slug } = req.body;
-        if (!name || !slug) {
-          res.status(400).json({ error: "name and slug are required" });
-          return;
-        }
-
-        // Validate name format (alphanumeric and spaces only)
-        if (!isValidOrgName(name)) {
-          res.status(400).json({ error: "Organization name can only contain letters, numbers, and spaces" });
-          return;
-        }
-
-        // Validate slug format (lowercase alphanumeric only)
-        if (!isValidOrgSlug(slug)) {
-          res.status(400).json({ error: "Organization slug can only contain lowercase letters and numbers (no spaces, hyphens, or special characters)" });
-          return;
-        }
-
-        const existing = await organizationStorage.getOrganizationBySlug(slug);
-        if (existing) {
-          res.status(409).json({ error: "An organization with that slug already exists" });
-          return;
-        }
-
-        const org = await organizationStorage.createOrganization(name, slug);
-        log(`Organization created: ${org.name} (${org.id})`);
-        res.status(201).json(org);
-      } catch (error) {
-        log(`Failed to create organization: ${error}`);
-        res.status(500).json({ error: "Failed to create organization" });
-      }
-    }
-  );
-
-  // GET /api/admin/organizations - List all organizations
-  app.get(
-    "/api/admin/organizations",
-    authenticate,
-    requireGlobalAdmin,
-    async (_req: AuthenticatedRequest, res) => {
-      try {
-        const orgs = await organizationStorage.listOrganizations();
-        res.json(orgs);
-      } catch (error) {
-        log(`Failed to list organizations: ${error}`);
-        res.status(500).json({ error: "Failed to list organizations" });
-      }
-    }
-  );
-
-  // GET /api/admin/organizations/:id - Get organization details
-  app.get(
-    "/api/admin/organizations/:id",
-    authenticate,
-    requireGlobalAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const org = await organizationStorage.getOrganization(req.params.id);
-        if (!org) {
-          res.status(404).json({ error: "Organization not found" });
-          return;
-        }
-        res.json(org);
-      } catch (error) {
-        log(`Failed to get organization: ${error}`);
-        res.status(500).json({ error: "Failed to get organization" });
-      }
-    }
-  );
-
-  // PATCH /api/admin/organizations/:id - Update organization
-  app.patch(
-    "/api/admin/organizations/:id",
-    authenticate,
-    requireGlobalAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const { name, slug } = req.body;
-
-        // Validate name format if provided
-        if (name !== undefined && !isValidOrgName(name)) {
-          res.status(400).json({ error: "Organization name can only contain letters, numbers, and spaces" });
-          return;
-        }
-
-        // Validate slug format if provided
-        if (slug !== undefined && !isValidOrgSlug(slug)) {
-          res.status(400).json({ error: "Organization slug can only contain lowercase letters and numbers (no spaces, hyphens, or special characters)" });
-          return;
-        }
-
-        // Check slug uniqueness if changing
-        if (slug !== undefined) {
-          const existing = await organizationStorage.getOrganizationBySlug(slug);
-          if (existing && existing.id !== req.params.id) {
-            res.status(409).json({ error: "An organization with that slug already exists" });
-            return;
-          }
-        }
-
-        const updated = await organizationStorage.updateOrganization(req.params.id, req.body);
-        if (!updated) {
-          res.status(404).json({ error: "Organization not found" });
-          return;
-        }
-        log(`Organization updated: ${updated.name} (${updated.id})`);
-        res.json(updated);
-      } catch (error) {
-        log(`Failed to update organization: ${error}`);
-        res.status(500).json({ error: "Failed to update organization" });
-      }
-    }
-  );
-
-  // DELETE /api/admin/organizations/:id - Delete organization
-  app.delete(
-    "/api/admin/organizations/:id",
-    authenticate,
-    requireGlobalAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const deleted = await organizationStorage.deleteOrganization(req.params.id);
-        if (!deleted) {
-          res.status(404).json({ error: "Organization not found" });
-          return;
-        }
-        log(`Organization deleted: ${req.params.id}`);
-        res.json({ success: true });
-      } catch (error) {
-        log(`Failed to delete organization: ${error}`);
-        res.status(500).json({ error: "Failed to delete organization" });
-      }
-    }
-  );
-
-  // POST /api/admin/organizations/:id/provision - Provision TideCloak realm for organization
-  app.post(
-    "/api/admin/organizations/:id/provision",
-    authenticate,
-    requireGlobalAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const { adminEmail, adminFirstName, adminLastName } = req.body;
-
-        if (!adminEmail || !adminFirstName || !adminLastName) {
-          res.status(400).json({ error: "adminEmail, adminFirstName, and adminLastName are required" });
-          return;
-        }
-
-        // Validate email format
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(adminEmail)) {
-          res.status(400).json({ error: "Invalid email format" });
-          return;
-        }
-
-        const org = await organizationStorage.getOrganization(req.params.id);
-        if (!org) {
-          res.status(404).json({ error: "Organization not found" });
-          return;
-        }
-
-        // Import and run provisioning
-        const { provisionOrganization } = await import("./lib/provisionOrg");
-
-        const clientAppUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
-
-        const result = await provisionOrganization({
-          organizationId: org.id,
-          organizationSlug: org.slug,
-          organizationName: org.name,
-          adminEmail,
-          adminFirstName,
-          adminLastName,
-          clientAppUrl,
-        });
-
-        if (!result.success) {
-          res.status(500).json({ error: result.error || "Provisioning failed" });
-          return;
-        }
-
-        log(`Organization provisioned: ${org.name} (realm: ${result.realmName})`);
-        res.json({
-          success: true,
-          realmName: result.realmName,
-          inviteLink: result.inviteLink,
-        });
-      } catch (error) {
-        log(`Failed to provision organization: ${error}`);
-        res.status(500).json({ error: "Failed to provision organization" });
-      }
-    }
-  );
-
-  // POST /api/admin/organizations/:id/users - Add user to organization
-  app.post(
-    "/api/admin/organizations/:id/users",
-    authenticate,
-    requireGlobalAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const { userId, role } = req.body;
-        if (!userId) {
-          res.status(400).json({ error: "userId is required" });
-          return;
-        }
-
-        const org = await organizationStorage.getOrganization(req.params.id);
-        if (!org) {
-          res.status(404).json({ error: "Organization not found" });
-          return;
-        }
-
-        const membership = await organizationStorage.addUserToOrg(
-          req.params.id,
-          userId,
-          role || "user"
-        );
-        log(`User ${userId} added to org ${req.params.id} with role ${role || "user"}`);
-        res.status(201).json(membership);
-      } catch (error) {
-        log(`Failed to add user to organization: ${error}`);
-        res.status(500).json({ error: "Failed to add user to organization" });
-      }
-    }
-  );
-
-  // DELETE /api/admin/organizations/:id/users/:userId - Remove user from organization
-  app.delete(
-    "/api/admin/organizations/:id/users/:userId",
-    authenticate,
-    requireGlobalAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const removed = await organizationStorage.removeUserFromOrg(
-          req.params.id,
-          req.params.userId
-        );
-        if (!removed) {
-          res.status(404).json({ error: "Membership not found" });
-          return;
-        }
-        log(`User ${req.params.userId} removed from org ${req.params.id}`);
-        res.json({ success: true });
-      } catch (error) {
-        log(`Failed to remove user from organization: ${error}`);
-        res.status(500).json({ error: "Failed to remove user from organization" });
-      }
-    }
-  );
-
-  // PATCH /api/admin/organizations/:id/users/:userId - Update user role in organization
-  app.patch(
-    "/api/admin/organizations/:id/users/:userId",
-    authenticate,
-    requireGlobalAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const { role } = req.body;
-        if (!role) {
-          res.status(400).json({ error: "role is required" });
-          return;
-        }
-
-        const updated = await organizationStorage.updateUserOrgRole(
-          req.params.id,
-          req.params.userId,
-          role
-        );
-        if (!updated) {
-          res.status(404).json({ error: "Membership not found" });
-          return;
-        }
-        log(`User ${req.params.userId} role updated to ${role} in org ${req.params.id}`);
-        res.json(updated);
-      } catch (error) {
-        log(`Failed to update user role: ${error}`);
-        res.status(500).json({ error: "Failed to update user role" });
-      }
-    }
-  );
-
-  // GET /api/admin/organizations/:id/users - List users in organization
-  app.get(
-    "/api/admin/organizations/:id/users",
-    authenticate,
-    requireGlobalAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const org = await organizationStorage.getOrganization(req.params.id);
-        if (!org) {
-          res.status(404).json({ error: "Organization not found" });
-          return;
-        }
-
-        const users = await organizationStorage.getOrgUsers(req.params.id);
-        res.json(users);
-      } catch (error) {
-        log(`Failed to list org users: ${error}`);
-        res.status(500).json({ error: "Failed to list organization users" });
       }
     }
   );
