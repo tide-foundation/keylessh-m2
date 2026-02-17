@@ -4,8 +4,6 @@
   "ssl-required": "external",
   "resource": "keylessh",
   "public-client": true,
-  "verify-token-audience": true,
-  "use-resource-role-mappings": true,
   "confidential-port": 0,
   "jwk": {
     "keys": [
