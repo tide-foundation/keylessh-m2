@@ -9,20 +9,23 @@ fi
 
 # =============================================================================
 # KeyleSSH Environment Setup Script
-# Creates: Web App (uses existing Resource Group, Storage Account, and Bridge)
+# Creates: Resource Group, Web App (frontend), Container App (TCP Bridge), ACR
 # =============================================================================
 
-# Configuration - Uses existing resources
-RESOURCE_GROUP="${RESOURCE_GROUP:-KeyleSSH}"
-LOCATION="${LOCATION:-australiaeast}"
+# Configuration - CHANGE THESE for each new realm/environment
+ENV_NAME="${ENV_NAME:-myenv}"                    # Environment name (e.g., prod, staging, dev)
+LOCATION="${LOCATION:-australiaeast}"            # Azure region
+RESOURCE_GROUP="${RESOURCE_GROUP:-keylessh-${ENV_NAME}}"
 
-# Resource names
-WEBAPP_NAME="${WEBAPP_NAME:-keylessh-multi}"
-APP_SERVICE_PLAN="${APP_SERVICE_PLAN:-keylessh-plan}"
+# Derived names (can override via env vars)
+WEBAPP_NAME="${WEBAPP_NAME:-keylessh-${ENV_NAME}}"
+BRIDGE_APP_NAME="${BRIDGE_APP_NAME:-keylessh-bridge-${ENV_NAME}}"
+ACR_NAME="${ACR_NAME:-keylesshacr${ENV_NAME}}"   # Must be globally unique, alphanumeric only
+CONTAINER_ENV_NAME="${CONTAINER_ENV_NAME:-keylessh-env-${ENV_NAME}}"
+APP_SERVICE_PLAN="${APP_SERVICE_PLAN:-keylessh-plan-${ENV_NAME}}"
 
-# Existing resources
-STORAGE_ACCOUNT="${STORAGE_ACCOUNT:-keylesshstorage}"
-BRIDGE_URL="${BRIDGE_URL:-wss://keylessh-bridge-devops.icybay-5c9a159d.australiaeast.azurecontainerapps.io}"
+# TideCloak config (required for TCP bridge JWT verification)
+TIDECLOAK_CONFIG="${TIDECLOAK_CONFIG:-../data/tidecloak.json}"
 
 # =============================================================================
 print_header() {
@@ -33,11 +36,12 @@ print_header() {
 }
 
 print_header "KeyleSSH Environment Setup"
+echo "Environment:      $ENV_NAME"
 echo "Resource Group:   $RESOURCE_GROUP"
 echo "Location:         $LOCATION"
 echo "Web App:          $WEBAPP_NAME"
-echo "Storage Account:  $STORAGE_ACCOUNT (existing)"
-echo "Bridge URL:       $BRIDGE_URL (existing)"
+echo "TCP Bridge:       $BRIDGE_APP_NAME"
+echo "Container Registry: $ACR_NAME"
 echo ""
 
 # Check if logged in
@@ -46,37 +50,35 @@ if ! az account show &> /dev/null; then
     exit 1
 fi
 
-# =============================================================================
-print_header "Checking Resource Group"
-az group show --name $RESOURCE_GROUP --output none 2>/dev/null || {
-    echo "Error: Resource group $RESOURCE_GROUP does not exist!"
-    exit 1
-}
-echo "Using existing resource group: $RESOURCE_GROUP"
-
-# =============================================================================
-print_header "Getting Storage Account Key"
-STORAGE_KEY=$(az storage account keys list \
-    --account-name $STORAGE_ACCOUNT \
-    --resource-group $RESOURCE_GROUP \
-    --query "[0].value" -o tsv)
-
-if [ -z "$STORAGE_KEY" ]; then
-    echo "Error: Could not get storage account key for $STORAGE_ACCOUNT"
-    exit 1
+# Check if tidecloak.json exists
+if [ ! -f "$TIDECLOAK_CONFIG" ]; then
+    echo "Warning: TideCloak config not found at $TIDECLOAK_CONFIG"
+    echo "TCP Bridge will be created but JWT verification won't work without it."
+    echo "You can update the secret later with:"
+    echo "  az containerapp secret set --name $BRIDGE_APP_NAME --resource-group $RESOURCE_GROUP --secrets tidecloak-config=\$(base64 -w0 path/to/tidecloak.json)"
+    TIDECLOAK_CONFIG_B64=""
+else
+    TIDECLOAK_CONFIG_B64=$(base64 -w0 "$TIDECLOAK_CONFIG")
 fi
-echo "Got storage key for: $STORAGE_ACCOUNT"
-
-# Ensure file share exists
-az storage share create \
-    --name keylessh-multi \
-    --account-name $STORAGE_ACCOUNT \
-    --account-key "$STORAGE_KEY" \
-    --quota 5 \
-    --output none 2>/dev/null || echo "File share already exists"
 
 # =============================================================================
-print_header "Creating App Service Plan"
+print_header "Creating Resource Group"
+az group create \
+    --name $RESOURCE_GROUP \
+    --location $LOCATION \
+    --output none 2>/dev/null || echo "Resource group already exists"
+
+# =============================================================================
+print_header "Creating Azure Container Registry"
+az acr create \
+    --resource-group $RESOURCE_GROUP \
+    --name $ACR_NAME \
+    --sku Basic \
+    --admin-enabled true \
+    --output none 2>/dev/null || echo "Container registry already exists"
+
+# =============================================================================
+print_header "Creating App Service Plan (for Web App)"
 az appservice plan create \
     --name $APP_SERVICE_PLAN \
     --resource-group $RESOURCE_GROUP \
@@ -86,7 +88,7 @@ az appservice plan create \
     --output none 2>/dev/null || echo "App Service Plan already exists"
 
 # =============================================================================
-print_header "Creating Web App"
+print_header "Creating Web App (Frontend)"
 az webapp create \
     --name $WEBAPP_NAME \
     --resource-group $RESOURCE_GROUP \
@@ -109,28 +111,70 @@ az webapp config set \
     --startup-file "node dist/index.cjs" \
     --output none
 
-# Mount Azure Files for persistent storage
-echo "Mounting Azure Files..."
-az webapp config storage-account add \
-    --name $WEBAPP_NAME \
-    --resource-group $RESOURCE_GROUP \
-    --custom-id keylessh-multi \
-    --storage-type AzureFiles \
-    --share-name keylessh-multi \
-    --account-name $STORAGE_ACCOUNT \
-    --access-key "$STORAGE_KEY" \
-    --mount-path /home/site/data \
-    --output none 2>/dev/null || echo "Storage mount already exists"
+# =============================================================================
+print_header "Building and Pushing TCP Bridge Image"
+cd "$(dirname "$0")/../tcp-bridge"
 
-# Enable Always On (prevents cold starts)
-az webapp config set \
-    --name $WEBAPP_NAME \
+az acr build \
+    --registry $ACR_NAME \
+    --image $BRIDGE_APP_NAME:latest \
+    --file Dockerfile \
+    .
+
+cd - > /dev/null
+
+# =============================================================================
+print_header "Creating Container Apps Environment"
+az containerapp env create \
+    --name $CONTAINER_ENV_NAME \
     --resource-group $RESOURCE_GROUP \
-    --always-on true \
-    --output none
+    --location $LOCATION \
+    --output none 2>/dev/null || echo "Container Apps environment already exists"
+
+# =============================================================================
+print_header "Deploying TCP Bridge Container App"
+
+# Get ACR credentials
+ACR_SERVER=$(az acr show --name $ACR_NAME --query loginServer -o tsv)
+ACR_USERNAME=$(az acr credential show --name $ACR_NAME --query username -o tsv)
+ACR_PASSWORD=$(az acr credential show --name $ACR_NAME --query "passwords[0].value" -o tsv)
+
+# Build the create command
+CREATE_CMD="az containerapp create \
+    --name $BRIDGE_APP_NAME \
+    --resource-group $RESOURCE_GROUP \
+    --environment $CONTAINER_ENV_NAME \
+    --image $ACR_SERVER/$BRIDGE_APP_NAME:latest \
+    --registry-server $ACR_SERVER \
+    --registry-username $ACR_USERNAME \
+    --registry-password $ACR_PASSWORD \
+    --target-port 8080 \
+    --ingress external \
+    --min-replicas 0 \
+    --max-replicas 100 \
+    --cpu 0.25 \
+    --memory 0.5Gi \
+    --scale-rule-name http-connections \
+    --scale-rule-type http \
+    --scale-rule-http-concurrency 10"
+
+# Add secrets if tidecloak config exists
+if [ -n "$TIDECLOAK_CONFIG_B64" ]; then
+    CREATE_CMD="$CREATE_CMD \
+        --secrets tidecloak-config=$TIDECLOAK_CONFIG_B64 \
+        --env-vars TIDECLOAK_CONFIG_B64=secretref:tidecloak-config"
+fi
+
+eval $CREATE_CMD
 
 # =============================================================================
 print_header "Configuring Web App Environment Variables"
+
+# Get the bridge URL
+BRIDGE_FQDN=$(az containerapp show \
+    --name $BRIDGE_APP_NAME \
+    --resource-group $RESOURCE_GROUP \
+    --query "properties.configuration.ingress.fqdn" -o tsv)
 
 # Get Web App URL
 WEBAPP_URL=$(az webapp show \
@@ -144,44 +188,34 @@ az webapp config appsettings set \
     --resource-group $RESOURCE_GROUP \
     --settings \
         NODE_ENV=production \
-        DATABASE_URL=/home/site/data/keylessh.db \
-        BRIDGE_URL=$BRIDGE_URL \
-        ENABLE_MULTI_TENANT=true \
+        BRIDGE_URL=wss://$BRIDGE_FQDN \
     --output none
 
 # =============================================================================
-print_header "Setup Complete!"
+print_header "Deployment Complete!"
 
 echo ""
-echo "Resources:"
-echo "  Resource Group:   $RESOURCE_GROUP"
-echo "  Web App:          https://$WEBAPP_URL"
-echo "  Storage Account:  $STORAGE_ACCOUNT"
-echo "  Bridge URL:       $BRIDGE_URL"
+echo "Resources Created:"
+echo "  Resource Group:     $RESOURCE_GROUP"
+echo "  Web App:            https://$WEBAPP_URL"
+echo "  TCP Bridge:         wss://$BRIDGE_FQDN"
+echo "  Container Registry: $ACR_SERVER"
 echo ""
 echo "Web App Settings Applied:"
+echo "  BRIDGE_URL=wss://$BRIDGE_FQDN"
 echo "  NODE_ENV=production"
-echo "  DATABASE_URL=/home/site/data/keylessh.db"
-echo "  BRIDGE_URL=$BRIDGE_URL"
-echo "  ENABLE_MULTI_TENANT=true"
 echo ""
 echo "Next Steps:"
+echo "  1. Configure GitHub Actions secret AZURE_WEBAPP_PUBLISH_PROFILE_${ENV_NAME^^}"
+echo "     Get it with: az webapp deployment list-publishing-profiles --name $WEBAPP_NAME --resource-group $RESOURCE_GROUP --xml"
 echo ""
-echo "  1. Set TideCloak admin credentials (for multi-tenancy user provisioning):"
+echo "  2. Add remaining environment variables to Web App:"
 echo "     az webapp config appsettings set --name $WEBAPP_NAME --resource-group $RESOURCE_GROUP --settings \\"
-echo "       KC_USER=admin \\"
-echo "       KC_PASSWORD=your-tidecloak-admin-password"
+echo "       DATABASE_URL=./data/keylessh.db \\"
+echo "       COMPILER_IMAGE=ghcr.io/tide-foundation/forseti-compiler:latest"
 echo ""
-echo "  2. Upload tidecloak.json to Azure Files:"
-echo "     az storage file upload \\"
-echo "       --account-name $STORAGE_ACCOUNT \\"
-echo "       --share-name keylessh-multi \\"
-echo "       --source ./data/tidecloak.json \\"
-echo "       --path tidecloak.json"
+echo "  3. Mount persistent storage for data/ volume (SQLite + tidecloak.json)"
 echo ""
-echo "  3. Configure GitHub Actions secret AZURE_WEBAPP_PUBLISH_PROFILE:"
-echo "     az webapp deployment list-publishing-profiles --name $WEBAPP_NAME --resource-group $RESOURCE_GROUP --xml"
-echo ""
-echo "  4. Deploy the app via GitHub Actions (push to main) or manually:"
-echo "     ./azure/deploy-webapp.sh"
+echo "  4. Deploy the app code via GitHub Actions or:"
+echo "     az webapp deployment source config-zip --name $WEBAPP_NAME --resource-group $RESOURCE_GROUP --src deploy.zip"
 echo ""
