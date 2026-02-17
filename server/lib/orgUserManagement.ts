@@ -218,6 +218,9 @@ export async function createOrgUser(params: CreateOrgUserParams): Promise<OrgUse
   // Assign default realm roles (appUser and _tide_enabled) to the new user
   await assignDefaultRealmRoles(authServerUrl, token, realmName, userId);
 
+  // Assign default client roles (ssh:root, ssh:user, ssh:orguser) to the new user
+  await assignDefaultClientRoles(authServerUrl, token, realmName, userId);
+
   return {
     id: userId,
     username: u.username || "",
@@ -287,6 +290,90 @@ async function assignDefaultRealmRoles(
     log(`Warning: Failed to assign default realm roles: ${assignResponse.status} ${text}`);
   } else {
     log(`Assigned default realm roles to user ${userId}: ${rolesToAssign.map((r: { name: string }) => r.name).join(", ")}`);
+  }
+}
+
+/**
+ * Assign default client roles (ssh:root, ssh:user, ssh:orguser) to a user.
+ * These roles grant SSH access to servers.
+ */
+async function assignDefaultClientRoles(
+  authServerUrl: string,
+  token: string,
+  realmName: string,
+  userId: string
+): Promise<void> {
+  const clientId = getResource();
+
+  // Get the client UUID
+  const clientResponse = await fetch(
+    `${authServerUrl}/admin/realms/${realmName}/clients?clientId=${clientId}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  if (!clientResponse.ok) {
+    log(`Warning: Failed to get client for default role assignment: ${clientResponse.status}`);
+    return;
+  }
+
+  const clients = await clientResponse.json();
+  if (!clients.length) {
+    log(`Warning: Client ${clientId} not found for default role assignment`);
+    return;
+  }
+
+  const clientUuid = clients[0].id;
+
+  // Get all client roles
+  const rolesResponse = await fetch(
+    `${authServerUrl}/admin/realms/${realmName}/clients/${clientUuid}/roles`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  if (!rolesResponse.ok) {
+    log(`Warning: Failed to get client roles for default assignment: ${rolesResponse.status}`);
+    return;
+  }
+
+  const roles = await rolesResponse.json();
+
+  // Find the default SSH roles: ssh:root, ssh:user, ssh:orguser
+  const defaultClientRoleNames = ["ssh:root", "ssh:user", "ssh:orguser"];
+  const rolesToAssign = roles.filter((r: { name: string }) =>
+    defaultClientRoleNames.includes(r.name)
+  );
+
+  if (rolesToAssign.length === 0) {
+    log("Warning: No default client roles (ssh:root, ssh:user, ssh:orguser) found to assign");
+    return;
+  }
+
+  // Assign the roles to the user
+  const assignResponse = await fetch(
+    `${authServerUrl}/admin/realms/${realmName}/users/${userId}/role-mappings/clients/${clientUuid}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(rolesToAssign),
+    }
+  );
+
+  if (!assignResponse.ok) {
+    const text = await assignResponse.text();
+    log(`Warning: Failed to assign default client roles: ${assignResponse.status} ${text}`);
+  } else {
+    log(`Assigned default client roles to user ${userId}: ${rolesToAssign.map((r: { name: string }) => r.name).join(", ")}`);
   }
 }
 
