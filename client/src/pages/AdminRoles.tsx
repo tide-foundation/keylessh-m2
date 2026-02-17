@@ -80,7 +80,7 @@ const defaultPolicyConfig: PolicyConfig = {
 
 export default function AdminRoles() {
   const { toast } = useToast();
-  const { initializeTideRequest } = useAuth();
+  const { initializeTideRequest, organizationId } = useAuth();
   const authConfig = useAuthConfig();
   const [search, setSearch] = useState("");
   const [editingRole, setEditingRole] = useState<OrgClientRole | null>(null);
@@ -327,6 +327,7 @@ export default function AdminRoles() {
             resource: authConfig.resource,
             vendorId: authConfig.vendorId,
             contractCode: usedContractCode,
+            organizationId: organizationId || undefined,
           });
           policyRequest = request;
         } else {
@@ -340,6 +341,7 @@ export default function AdminRoles() {
             modelId: SSH_MODEL_IDS.BASIC,
             resource: authConfig.resource,
             vendorId: authConfig.vendorId,
+            organizationId: organizationId || undefined,
           });
         }
 
@@ -417,6 +419,7 @@ export default function AdminRoles() {
             resource: authConfig.resource,
             vendorId: authConfig.vendorId,
             contractCode: usedContractCode,
+            organizationId: organizationId || undefined,
           });
           policyRequest = request;
         } else {
@@ -430,6 +433,7 @@ export default function AdminRoles() {
             modelId: SSH_MODEL_IDS.BASIC,
             resource: authConfig.resource,
             vendorId: authConfig.vendorId,
+            organizationId: organizationId || undefined,
           });
         }
 

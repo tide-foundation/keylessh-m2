@@ -25,6 +25,7 @@ using System.Text;
 /// SSH Challenge Signing Policy for Keyle-SSH.
 /// Uses [PolicyParam] attributes for automatic parameter binding and
 /// DecisionBuilder for composable policy validation.
+/// Includes organization validation for multi-tenant isolation.
 /// </summary>
 public class Contract : IAccessPolicy
 {
@@ -33,6 +34,9 @@ public class Contract : IAccessPolicy
 
     [PolicyParam(Required = true, Description = "Resource identifier for role check")]
     public string Resource { get; set; }
+
+    [PolicyParam(Required = false, Description = "Organization ID for multi-tenant isolation")]
+    public string OrganizationId { get; set; }
 
     /// <summary>
     /// Validate the request data. Always called.
@@ -65,7 +69,7 @@ public class Contract : IAccessPolicy
 
         if (parsed.PublicKeyAlgorithm != "ssh-ed25519")
             return PolicyDecision.Deny("Only ssh-ed25519 allowed");
-        
+
         if(parsed.Username != userRole) {
             return PolicyDecision.Deny("Not allowed to log in as " + parsed.Username);
         }
@@ -76,17 +80,39 @@ public class Contract : IAccessPolicy
     public PolicyDecision ValidateApprovers(ApproversContext ctx)
     {
         var approvers = DokenDto.WrapAll(ctx.Dokens);
-        return Decision
+        var decision = Decision
             .Require(approvers != null && approvers.Count > 0, "No approver dokens provided")
             .RequireAnyWithRole(approvers, Resource, Role);
+
+        // If OrganizationId is set, validate that at least one approver belongs to the same org
+        if (!string.IsNullOrWhiteSpace(OrganizationId))
+        {
+            decision = decision.Require(
+                approvers.Exists(a => a.HasClaim("organization_id", OrganizationId)),
+                $"No approver belongs to organization {OrganizationId}"
+            );
+        }
+
+        return decision;
     }
 
     public PolicyDecision ValidateExecutor(ExecutorContext ctx)
     {
         var executor = new DokenDto(ctx.Doken);
-        return Decision
+        var decision = Decision
             .RequireNotExpired(executor)
             .RequireRole(executor, Resource, Role);
+
+        // If OrganizationId is set, validate that the executor belongs to the same org
+        if (!string.IsNullOrWhiteSpace(OrganizationId))
+        {
+            decision = decision.Require(
+                executor.HasClaim("organization_id", OrganizationId),
+                $"Executor does not belong to organization {OrganizationId}"
+            );
+        }
+
+        return decision;
     }
 
     internal static class SshPublicKeyChallenge
@@ -330,6 +356,7 @@ export interface SshPolicyConfig {
   modelId: SshModelId | string;
   resource: string;
   vendorId: string;
+  organizationId?: string; // Optional org ID for multi-tenant isolation
 }
 
 export interface SshPolicyConfigWithCode extends SshPolicyConfig {
@@ -376,6 +403,9 @@ export async function createSshPolicyRequest(
   policyParams.set("resource", config.resource);
   policyParams.set("approval_type", config.approvalType);
   policyParams.set("execution_type", config.executionType);
+  if (config.organizationId) {
+    policyParams.set("organization_id", config.organizationId);
+  }
 
   // Version 2 includes approvalType and executionType in the serialized format
   const policy = new Policy({
@@ -438,6 +468,9 @@ export async function createSshPolicyRequestWithCode(
   policyParams.set("resource", config.resource);
   policyParams.set("approval_type", config.approvalType);
   policyParams.set("execution_type", config.executionType);
+  if (config.organizationId) {
+    policyParams.set("organization_id", config.organizationId);
+  }
 
   // Version 2 includes approvalType and executionType in the serialized format
   const policy = new Policy({
