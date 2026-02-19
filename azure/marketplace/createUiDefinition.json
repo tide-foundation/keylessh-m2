@@ -59,9 +59,11 @@
             "type": "Microsoft.Common.TextBox",
             "label": "TideCloak Configuration (Base64)",
             "toolTip": "Base64-encoded tidecloak.json configuration file",
+            "multiLine": true,
             "constraints": {
               "required": true,
-              "validationMessage": "TideCloak configuration is required"
+              "regex": "^[A-Za-z0-9+/=]+$",
+              "validationMessage": "Must be a valid Base64 encoded string"
             }
           }
         ]
@@ -80,7 +82,12 @@
                 "type": "Microsoft.Common.TextBox",
                 "label": "Container Image",
                 "defaultValue": "tideorg/keylessh:latest",
-                "toolTip": "Docker image for KeyleSSH"
+                "toolTip": "Docker image for KeyleSSH",
+                "constraints": {
+                  "required": true,
+                  "regex": "^[a-z0-9][a-z0-9._/-]*:[a-zA-Z0-9._-]+$",
+                  "validationMessage": "Must be a valid container image (e.g., registry/image:tag)"
+                }
               },
               {
                 "name": "keylesshCpu",
@@ -124,7 +131,12 @@
                 "type": "Microsoft.Common.TextBox",
                 "label": "Container Image",
                 "defaultValue": "tideorg/keylessh-bridge:latest",
-                "toolTip": "Docker image for TCP Bridge"
+                "toolTip": "Docker image for TCP Bridge",
+                "constraints": {
+                  "required": true,
+                  "regex": "^[a-z0-9][a-z0-9._/-]*:[a-zA-Z0-9._-]+$",
+                  "validationMessage": "Must be a valid container image (e.g., registry/image:tag)"
+                }
               },
               {
                 "name": "bridgeMinReplicas",
