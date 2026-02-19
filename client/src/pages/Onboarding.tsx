@@ -62,9 +62,14 @@ interface OnboardingFormData {
   adminFirstName: string;
   adminLastName: string;
   termsAccepted: boolean;
+  // Enterprise contact fields
+  companySize: string;
+  serverCount: string;
+  useCase: string;
+  phone: string;
 }
 
-type OnboardingStep = "welcome" | "tier" | "organization" | "admin" | "provisioning" | "complete";
+type OnboardingStep = "welcome" | "tier" | "organization" | "admin" | "provisioning" | "complete" | "enterprise-contact" | "enterprise-submitted";
 
 interface ProvisioningStatus {
   step: string;
@@ -91,6 +96,11 @@ export default function Onboarding() {
     adminFirstName: "",
     adminLastName: "",
     termsAccepted: false,
+    // Enterprise contact fields
+    companySize: "",
+    serverCount: "",
+    useCase: "",
+    phone: "",
   });
 
   const [errors, setErrors] = useState<Partial<Record<keyof OnboardingFormData, string>>>({});
@@ -167,13 +177,94 @@ export default function Onboarding() {
     return Object.keys(newErrors).length === 0;
   };
 
+  const validateEnterpriseContact = (): boolean => {
+    const newErrors: Partial<Record<keyof OnboardingFormData, string>> = {};
+
+    if (!formData.organizationName.trim()) {
+      newErrors.organizationName = "Company name is required";
+    }
+
+    if (!formData.adminEmail.trim()) {
+      newErrors.adminEmail = "Email is required";
+    } else if (!isValidEmail(formData.adminEmail)) {
+      newErrors.adminEmail = "Please enter a valid email address";
+    }
+
+    if (!formData.adminFirstName.trim()) {
+      newErrors.adminFirstName = "First name is required";
+    }
+
+    if (!formData.adminLastName.trim()) {
+      newErrors.adminLastName = "Last name is required";
+    }
+
+    if (!formData.companySize) {
+      newErrors.companySize = "Please select company size";
+    }
+
+    if (!formData.termsAccepted) {
+      newErrors.termsAccepted = "You must accept the terms and conditions";
+    }
+
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const submitEnterpriseContact = async () => {
+    setIsLoading(true);
+
+    try {
+      const response = await fetch("/api/enterprise-contact", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          companyName: formData.organizationName,
+          contactEmail: formData.adminEmail,
+          contactFirstName: formData.adminFirstName,
+          contactLastName: formData.adminLastName,
+          phone: formData.phone,
+          companySize: formData.companySize,
+          serverCount: formData.serverCount,
+          useCase: formData.useCase,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `Failed with status ${response.status}`);
+      }
+
+      setCurrentStep("enterprise-submitted");
+      toast({
+        title: "Request Submitted",
+        description: "Our team will contact you within 1-2 business days.",
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Submission failed";
+      toast({
+        title: "Submission Failed",
+        description: errorMessage,
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleNext = () => {
     switch (currentStep) {
       case "welcome":
         setCurrentStep("tier");
         break;
       case "tier":
-        setCurrentStep("organization");
+        // Route based on tier selection
+        if (formData.tier === "paid") {
+          setCurrentStep("enterprise-contact");
+        } else {
+          setCurrentStep("organization");
+        }
         break;
       case "organization":
         if (validateOrganizationStep()) {
@@ -183,6 +274,11 @@ export default function Onboarding() {
       case "admin":
         if (validateAdminStep()) {
           startProvisioning();
+        }
+        break;
+      case "enterprise-contact":
+        if (validateEnterpriseContact()) {
+          submitEnterpriseContact();
         }
         break;
     }
@@ -198,6 +294,9 @@ export default function Onboarding() {
         break;
       case "admin":
         setCurrentStep("organization");
+        break;
+      case "enterprise-contact":
+        setCurrentStep("tier");
         break;
     }
   };
@@ -284,11 +383,21 @@ export default function Onboarding() {
       case "admin": return 4;
       case "provisioning": return 5;
       case "complete": return 6;
+      case "enterprise-contact": return 3;
+      case "enterprise-submitted": return 4;
       default: return 1;
     }
   };
 
-  const totalSteps = 6;
+  const getTotalSteps = (): number => {
+    // Enterprise flow has fewer steps (no provisioning)
+    if (formData.tier === "paid") {
+      return 4; // welcome, tier, contact, submitted
+    }
+    return 6;
+  };
+
+  const totalSteps = getTotalSteps();
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -693,6 +802,298 @@ export default function Onboarding() {
             </Card>
           )}
 
+          {/* Enterprise Contact Form */}
+          {currentStep === "enterprise-contact" && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Building2 className="h-5 w-5" />
+                  Enterprise Inquiry
+                </CardTitle>
+                <CardDescription>
+                  Tell us about your organization and we'll get in touch to set up your dedicated environment
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div className="space-y-4">
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="entFirstName">First Name *</Label>
+                      <Input
+                        id="entFirstName"
+                        placeholder="John"
+                        value={formData.adminFirstName}
+                        onChange={(e) => {
+                          setFormData(prev => ({ ...prev, adminFirstName: e.target.value }));
+                          setErrors(prev => ({ ...prev, adminFirstName: undefined }));
+                        }}
+                        className={errors.adminFirstName ? "border-destructive" : ""}
+                      />
+                      {errors.adminFirstName && (
+                        <p className="text-sm text-destructive">{errors.adminFirstName}</p>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="entLastName">Last Name *</Label>
+                      <Input
+                        id="entLastName"
+                        placeholder="Doe"
+                        value={formData.adminLastName}
+                        onChange={(e) => {
+                          setFormData(prev => ({ ...prev, adminLastName: e.target.value }));
+                          setErrors(prev => ({ ...prev, adminLastName: undefined }));
+                        }}
+                        className={errors.adminLastName ? "border-destructive" : ""}
+                      />
+                      {errors.adminLastName && (
+                        <p className="text-sm text-destructive">{errors.adminLastName}</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="entCompany">Company Name *</Label>
+                    <Input
+                      id="entCompany"
+                      placeholder="Acme Corporation"
+                      value={formData.organizationName}
+                      onChange={(e) => {
+                        setFormData(prev => ({ ...prev, organizationName: e.target.value }));
+                        setErrors(prev => ({ ...prev, organizationName: undefined }));
+                      }}
+                      className={errors.organizationName ? "border-destructive" : ""}
+                    />
+                    {errors.organizationName && (
+                      <p className="text-sm text-destructive">{errors.organizationName}</p>
+                    )}
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="entEmail">Work Email *</Label>
+                      <Input
+                        id="entEmail"
+                        type="email"
+                        placeholder="john@acmecorp.com"
+                        value={formData.adminEmail}
+                        onChange={(e) => {
+                          setFormData(prev => ({ ...prev, adminEmail: e.target.value }));
+                          setErrors(prev => ({ ...prev, adminEmail: undefined }));
+                        }}
+                        className={errors.adminEmail ? "border-destructive" : ""}
+                      />
+                      {errors.adminEmail && (
+                        <p className="text-sm text-destructive">{errors.adminEmail}</p>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="entPhone">Phone (Optional)</Label>
+                      <Input
+                        id="entPhone"
+                        type="tel"
+                        placeholder="+1 (555) 123-4567"
+                        value={formData.phone}
+                        onChange={(e) => {
+                          setFormData(prev => ({ ...prev, phone: e.target.value }));
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="entCompanySize">Company Size *</Label>
+                      <select
+                        id="entCompanySize"
+                        value={formData.companySize}
+                        onChange={(e) => {
+                          setFormData(prev => ({ ...prev, companySize: e.target.value }));
+                          setErrors(prev => ({ ...prev, companySize: undefined }));
+                        }}
+                        className={`flex h-10 w-full rounded-md border bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
+                          errors.companySize ? "border-destructive" : "border-input"
+                        }`}
+                      >
+                        <option value="">Select...</option>
+                        <option value="1-10">1-10 employees</option>
+                        <option value="11-50">11-50 employees</option>
+                        <option value="51-200">51-200 employees</option>
+                        <option value="201-500">201-500 employees</option>
+                        <option value="501-1000">501-1000 employees</option>
+                        <option value="1000+">1000+ employees</option>
+                      </select>
+                      {errors.companySize && (
+                        <p className="text-sm text-destructive">{errors.companySize}</p>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="entServerCount">Expected Servers</Label>
+                      <select
+                        id="entServerCount"
+                        value={formData.serverCount}
+                        onChange={(e) => {
+                          setFormData(prev => ({ ...prev, serverCount: e.target.value }));
+                        }}
+                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                      >
+                        <option value="">Select...</option>
+                        <option value="1-10">1-10 servers</option>
+                        <option value="11-50">11-50 servers</option>
+                        <option value="51-100">51-100 servers</option>
+                        <option value="101-500">101-500 servers</option>
+                        <option value="500+">500+ servers</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="entUseCase">Use Case (Optional)</Label>
+                    <textarea
+                      id="entUseCase"
+                      placeholder="Tell us about your SSH access management needs..."
+                      value={formData.useCase}
+                      onChange={(e) => {
+                        setFormData(prev => ({ ...prev, useCase: e.target.value }));
+                      }}
+                      className="flex min-h-[100px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    />
+                  </div>
+
+                  <div className="flex items-start space-x-3 pt-2">
+                    <Checkbox
+                      id="entTerms"
+                      checked={formData.termsAccepted}
+                      onCheckedChange={(checked) => {
+                        setFormData(prev => ({ ...prev, termsAccepted: checked === true }));
+                        setErrors(prev => ({ ...prev, termsAccepted: undefined }));
+                      }}
+                    />
+                    <div className="space-y-1">
+                      <Label htmlFor="entTerms" className="text-sm font-normal cursor-pointer">
+                        I agree to the{" "}
+                        <a
+                          href="https://tide.org/legal"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-primary hover:underline inline-flex items-center gap-1"
+                        >
+                          Terms & Conditions
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      </Label>
+                      {errors.termsAccepted && (
+                        <p className="text-sm text-destructive">{errors.termsAccepted}</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex gap-3">
+                  <Button variant="outline" onClick={handleBack} className="gap-2">
+                    <ArrowLeft className="h-4 w-4" />
+                    Back
+                  </Button>
+                  <Button onClick={handleNext} className="flex-1 gap-2" disabled={isLoading}>
+                    {isLoading ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Submitting...
+                      </>
+                    ) : (
+                      <>
+                        Submit Request
+                        <ArrowRight className="h-4 w-4" />
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Enterprise Submitted Confirmation */}
+          {currentStep === "enterprise-submitted" && (
+            <Card>
+              <CardHeader className="text-center pb-2">
+                <div className="flex justify-center mb-4">
+                  <div className="h-16 w-16 rounded-2xl bg-green-500/10 flex items-center justify-center">
+                    <CheckCircle className="h-8 w-8 text-green-500" />
+                  </div>
+                </div>
+                <CardTitle className="text-2xl">Request Submitted!</CardTitle>
+                <CardDescription className="text-base">
+                  Thank you for your interest in KeyleSSH Enterprise
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <Alert>
+                  <Terminal className="h-4 w-4" />
+                  <AlertDescription>
+                    Our team will review your request and contact you at{" "}
+                    <span className="font-medium">{formData.adminEmail}</span> within 1-2 business days.
+                  </AlertDescription>
+                </Alert>
+
+                <div className="space-y-3 pt-4 border-t">
+                  <h3 className="font-medium">What happens next?</h3>
+                  <ul className="space-y-2 text-sm text-muted-foreground">
+                    <li className="flex items-start gap-2">
+                      <span className="text-primary font-medium">1.</span>
+                      Our team reviews your requirements
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="text-primary font-medium">2.</span>
+                      We schedule a call to discuss your needs and demo KeyleSSH
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="text-primary font-medium">3.</span>
+                      We provision your dedicated TideCloak realm
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="text-primary font-medium">4.</span>
+                      You receive your configuration and can deploy KeyleSSH
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="flex gap-3 pt-4">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setCurrentStep("welcome");
+                      setFormData({
+                        tier: "free",
+                        organizationName: "",
+                        organizationSlug: "",
+                        adminEmail: "",
+                        adminFirstName: "",
+                        adminLastName: "",
+                        termsAccepted: false,
+                        companySize: "",
+                        serverCount: "",
+                        useCase: "",
+                        phone: "",
+                      });
+                    }}
+                    className="flex-1 gap-2"
+                  >
+                    Start Over
+                  </Button>
+                  <Button
+                    onClick={() => window.location.href = "https://keylessh.com"}
+                    className="flex-1 gap-2"
+                  >
+                    Visit KeyleSSH
+                    <ExternalLink className="h-4 w-4" />
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           {/* Provisioning Step */}
           {currentStep === "provisioning" && provisioningStatus && (
             <Card>
@@ -841,6 +1242,10 @@ export default function Onboarding() {
                         adminFirstName: "",
                         adminLastName: "",
                         termsAccepted: false,
+                        companySize: "",
+                        serverCount: "",
+                        useCase: "",
+                        phone: "",
                       });
                       setInviteLink(null);
                     }}

@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import type { Server } from "http";
-import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, organizationStorage, type ApprovalType } from "./storage";
+import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, organizationStorage, enterpriseLeadStorage, type ApprovalType } from "./storage";
 import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
 import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
@@ -440,6 +440,70 @@ export async function registerRoutes(
     } catch (error) {
       log(`[Onboarding] Failed: ${error}`);
       res.status(500).json({ error: "Failed to create organization" });
+    }
+  });
+
+  // POST /api/enterprise-contact - Submit enterprise contact form (unauthenticated)
+  // This captures enterprise leads for manual follow-up
+  app.post("/api/enterprise-contact", async (req, res) => {
+    try {
+      const {
+        companyName,
+        contactEmail,
+        contactFirstName,
+        contactLastName,
+        phone,
+        companySize,
+        serverCount,
+        useCase
+      } = req.body;
+
+      // Validate required fields
+      if (!companyName || !contactEmail || !contactFirstName || !contactLastName || !companySize) {
+        res.status(400).json({
+          error: "Required fields: companyName, contactEmail, contactFirstName, contactLastName, companySize"
+        });
+        return;
+      }
+
+      // Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(contactEmail)) {
+        res.status(400).json({ error: "Invalid email format" });
+        return;
+      }
+
+      // Valid company sizes
+      const validCompanySizes = ["1-10", "11-50", "51-200", "201-500", "501-1000", "1000+"];
+      if (!validCompanySizes.includes(companySize)) {
+        res.status(400).json({ error: "Invalid company size" });
+        return;
+      }
+
+      // Create the lead
+      const lead = await enterpriseLeadStorage.createLead({
+        companyName,
+        contactEmail,
+        contactFirstName,
+        contactLastName,
+        phone: phone || null,
+        companySize,
+        serverCount: serverCount || null,
+        useCase: useCase || null,
+        status: "new",
+        notes: null,
+      });
+
+      log(`[Enterprise Contact] New lead submitted: ${companyName} (${contactEmail})`);
+
+      res.status(201).json({
+        success: true,
+        message: "Thank you for your interest. Our team will contact you within 1-2 business days.",
+        leadId: lead.id,
+      });
+    } catch (error) {
+      log(`[Enterprise Contact] Failed: ${error}`);
+      res.status(500).json({ error: "Failed to submit contact form" });
     }
   });
 

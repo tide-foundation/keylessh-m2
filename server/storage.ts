@@ -15,6 +15,7 @@ import {
   bridges,
   organizations,
   organizationUsers,
+  enterpriseLeads,
   subscriptionTiers,
   type User,
   type InsertUser,
@@ -39,6 +40,8 @@ import {
   type OrganizationUser,
   type InsertOrganization,
   type InsertOrganizationUser,
+  type EnterpriseLead,
+  type InsertEnterpriseLead,
   type SubscriptionTier,
   type LicenseInfo,
   type LimitCheck,
@@ -345,6 +348,25 @@ sqlite.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_org_users_org ON organization_users(organization_id);
   CREATE INDEX IF NOT EXISTS idx_org_users_user ON organization_users(user_id);
+
+  -- Enterprise leads (contact form submissions)
+  CREATE TABLE IF NOT EXISTS enterprise_leads (
+    id TEXT PRIMARY KEY,
+    company_name TEXT NOT NULL,
+    contact_email TEXT NOT NULL,
+    contact_first_name TEXT NOT NULL,
+    contact_last_name TEXT NOT NULL,
+    phone TEXT,
+    company_size TEXT NOT NULL,
+    server_count TEXT,
+    use_case TEXT,
+    status TEXT NOT NULL DEFAULT 'new',
+    notes TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_enterprise_leads_status ON enterprise_leads(status);
+  CREATE INDEX IF NOT EXISTS idx_enterprise_leads_created ON enterprise_leads(created_at);
 `);
 
 // Lightweight migrations for existing DBs (CREATE TABLE IF NOT EXISTS doesn't alter).
@@ -2712,6 +2734,55 @@ export class OrganizationStorage {
   }
 }
 
+// Enterprise leads storage for contact form submissions
+export class EnterpriseLeadStorage {
+  async createLead(data: InsertEnterpriseLead): Promise<EnterpriseLead> {
+    const id = randomUUID();
+    const now = new Date();
+    const lead: EnterpriseLead = {
+      id,
+      companyName: data.companyName,
+      contactEmail: data.contactEmail,
+      contactFirstName: data.contactFirstName,
+      contactLastName: data.contactLastName,
+      phone: data.phone ?? null,
+      companySize: data.companySize,
+      serverCount: data.serverCount ?? null,
+      useCase: data.useCase ?? null,
+      status: data.status || "new",
+      notes: data.notes ?? null,
+      createdAt: now,
+      updatedAt: null,
+    };
+    db.insert(enterpriseLeads).values(lead).run();
+    return lead;
+  }
+
+  async getLead(id: string): Promise<EnterpriseLead | undefined> {
+    return db.select().from(enterpriseLeads).where(eq(enterpriseLeads.id, id)).get();
+  }
+
+  async listLeads(status?: string): Promise<EnterpriseLead[]> {
+    if (status) {
+      return db.select().from(enterpriseLeads).where(eq(enterpriseLeads.status, status)).orderBy(desc(enterpriseLeads.createdAt)).all();
+    }
+    return db.select().from(enterpriseLeads).orderBy(desc(enterpriseLeads.createdAt)).all();
+  }
+
+  async updateLead(id: string, data: Partial<Pick<EnterpriseLead, "status" | "notes">>): Promise<EnterpriseLead | undefined> {
+    const existing = await this.getLead(id);
+    if (!existing) return undefined;
+    const updated = { ...existing, ...data, updatedAt: new Date() };
+    db.update(enterpriseLeads).set(updated).where(eq(enterpriseLeads.id, id)).run();
+    return updated;
+  }
+
+  async deleteLead(id: string): Promise<boolean> {
+    const result = db.delete(enterpriseLeads).where(eq(enterpriseLeads.id, id)).run();
+    return result.changes > 0;
+  }
+}
+
 export const storage = new SQLiteStorage();
 export const approvalStorage = new ApprovalStorage();
 export const policyStorage = new PolicyStorage();
@@ -2722,3 +2793,4 @@ export const recordingStorage = new RecordingStorage();
 export const fileOperationStorage = new FileOperationStorage();
 export const bridgeStorage = new BridgeStorage();
 export const organizationStorage = new OrganizationStorage();
+export const enterpriseLeadStorage = new EnterpriseLeadStorage();

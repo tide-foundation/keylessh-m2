@@ -151,6 +151,23 @@ export const billingHistory = sqliteTable("billing_history", {
   organizationId: text("organization_id").notNull().default("default"),
 });
 
+// Enterprise leads - contact form submissions for enterprise inquiries
+export const enterpriseLeads = sqliteTable("enterprise_leads", {
+  id: text("id").primaryKey(),
+  companyName: text("company_name").notNull(),
+  contactEmail: text("contact_email").notNull(),
+  contactFirstName: text("contact_first_name").notNull(),
+  contactLastName: text("contact_last_name").notNull(),
+  phone: text("phone"),
+  companySize: text("company_size").notNull(), // "1-10", "11-50", etc.
+  serverCount: text("server_count"), // "1-10", "11-50", etc.
+  useCase: text("use_case"),
+  status: text("status").notNull().default("new"), // "new", "contacted", "qualified", "converted", "closed"
+  notes: text("notes"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }),
+});
+
 export const insertUserSchema = createInsertSchema(users).omit({ id: true });
 export const insertServerSchema = createInsertSchema(servers).omit({ id: true });
 export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true, startedAt: true, endedAt: true });
@@ -159,6 +176,7 @@ export const insertBillingHistorySchema = createInsertSchema(billingHistory).omi
 export const insertBridgeSchema = createInsertSchema(bridges).omit({ id: true, createdAt: true });
 export const insertOrganizationSchema = createInsertSchema(organizations).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertOrganizationUserSchema = createInsertSchema(organizationUsers).omit({ id: true, joinedAt: true });
+export const insertEnterpriseLeadSchema = createInsertSchema(enterpriseLeads).omit({ id: true, createdAt: true, updatedAt: true });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type InsertServer = z.infer<typeof insertServerSchema>;
@@ -168,6 +186,7 @@ export type InsertBillingHistory = z.infer<typeof insertBillingHistorySchema>;
 export type InsertBridge = z.infer<typeof insertBridgeSchema>;
 export type InsertOrganization = z.infer<typeof insertOrganizationSchema>;
 export type InsertOrganizationUser = z.infer<typeof insertOrganizationUserSchema>;
+export type InsertEnterpriseLead = z.infer<typeof insertEnterpriseLeadSchema>;
 
 export type User = typeof users.$inferSelect;
 export type Server = typeof servers.$inferSelect;
@@ -178,6 +197,7 @@ export type BillingHistory = typeof billingHistory.$inferSelect;
 export type Bridge = typeof bridges.$inferSelect;
 export type Organization = typeof organizations.$inferSelect;
 export type OrganizationUser = typeof organizationUsers.$inferSelect;
+export type EnterpriseLead = typeof enterpriseLeads.$inferSelect;
 
 // File operation types for API
 export type FileOperationType = "upload" | "download" | "delete" | "mkdir" | "rename" | "chmod";
