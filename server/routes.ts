@@ -4492,6 +4492,100 @@ export async function registerRoutes(
     }
   );
 
+  // ============================================
+  // Enterprise Leads Admin Routes (global admin only)
+  // ============================================
+
+  // GET /api/admin/enterprise-leads - List all enterprise leads
+  app.get(
+    "/api/admin/enterprise-leads",
+    authenticate,
+    requireGlobalAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const status = req.query.status as string | undefined;
+        const leads = await enterpriseLeadStorage.listLeads(status);
+        res.json(leads);
+      } catch (error) {
+        log(`Failed to list enterprise leads: ${error}`);
+        res.status(500).json({ error: "Failed to list enterprise leads" });
+      }
+    }
+  );
+
+  // GET /api/admin/enterprise-leads/:id - Get a specific lead
+  app.get(
+    "/api/admin/enterprise-leads/:id",
+    authenticate,
+    requireGlobalAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const lead = await enterpriseLeadStorage.getLead(req.params.id);
+        if (!lead) {
+          res.status(404).json({ error: "Lead not found" });
+          return;
+        }
+        res.json(lead);
+      } catch (error) {
+        log(`Failed to get enterprise lead: ${error}`);
+        res.status(500).json({ error: "Failed to get enterprise lead" });
+      }
+    }
+  );
+
+  // PATCH /api/admin/enterprise-leads/:id - Update lead status/notes
+  app.patch(
+    "/api/admin/enterprise-leads/:id",
+    authenticate,
+    requireGlobalAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { status, notes } = req.body;
+
+        // Validate status if provided
+        const validStatuses = ["new", "contacted", "qualified", "converted", "closed"];
+        if (status && !validStatuses.includes(status)) {
+          res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(", ")}` });
+          return;
+        }
+
+        const lead = await enterpriseLeadStorage.updateLead(req.params.id, { status, notes });
+        if (!lead) {
+          res.status(404).json({ error: "Lead not found" });
+          return;
+        }
+
+        log(`[Enterprise Lead] Updated lead ${req.params.id}: status=${status || 'unchanged'}`);
+        res.json(lead);
+      } catch (error) {
+        log(`Failed to update enterprise lead: ${error}`);
+        res.status(500).json({ error: "Failed to update enterprise lead" });
+      }
+    }
+  );
+
+  // DELETE /api/admin/enterprise-leads/:id - Delete a lead
+  app.delete(
+    "/api/admin/enterprise-leads/:id",
+    authenticate,
+    requireGlobalAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const deleted = await enterpriseLeadStorage.deleteLead(req.params.id);
+        if (!deleted) {
+          res.status(404).json({ error: "Lead not found" });
+          return;
+        }
+
+        log(`[Enterprise Lead] Deleted lead ${req.params.id}`);
+        res.json({ success: true });
+      } catch (error) {
+        log(`Failed to delete enterprise lead: ${error}`);
+        res.status(500).json({ error: "Failed to delete enterprise lead" });
+      }
+    }
+  );
+
   return httpServer;
 }
 
