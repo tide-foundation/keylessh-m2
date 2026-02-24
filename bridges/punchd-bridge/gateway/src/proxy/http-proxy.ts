@@ -1050,6 +1050,16 @@ export function createProxy(options: ProxyOptions): {
                   `var O=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){` +
                     `if(n(u))arguments[1]=P+u;` +
                     `return O.apply(this,arguments)};` +
+                  // Intercept element.src setter (video, audio, img, source, script, iframe)
+                  `["HTMLMediaElement","HTMLSourceElement","HTMLImageElement","HTMLScriptElement","HTMLIFrameElement"].forEach(function(c){` +
+                    `var E=window[c];if(!E)return;` +
+                    `var d=Object.getOwnPropertyDescriptor(E.prototype,"src");if(!d||!d.set)return;` +
+                    `Object.defineProperty(E.prototype,"src",{get:d.get,set:function(v){d.set.call(this,n(v)?P+v:v)},configurable:true})` +
+                  `});` +
+                  // Intercept setAttribute for src/href
+                  `var SA=Element.prototype.setAttribute;Element.prototype.setAttribute=function(a,v){` +
+                    `if((a==="src"||a==="href")&&typeof v==="string"&&n(v))v=P+v;` +
+                    `return SA.call(this,a,v)};` +
                   `})()</script>`;
                 if (html.includes("<head>")) {
                   html = html.replace("<head>", `<head>${patchScript}`);
