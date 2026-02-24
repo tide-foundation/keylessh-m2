@@ -5,7 +5,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { log } from "./logger";
 import { setupWSBridge } from "./wsBridge";
-import { storage } from "./storage";
+import { storage, initDatabase } from "./storage";
 
 const app = express();
 const httpServer = createServer(app);
@@ -62,6 +62,9 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  // Initialize PostgreSQL connection pool and run seeds
+  await initDatabase();
+
   await registerRoutes(httpServer, app);
 
   // Setup embedded WebSocket bridge for local development (when BRIDGE_URL not set)

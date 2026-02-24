@@ -1,14 +1,11 @@
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/node-postgres";
+import pg from "pg";
 import { eq, desc, inArray, and, lt } from "drizzle-orm";
 import { randomUUID } from "crypto";
-import { mkdirSync, existsSync } from "fs";
-import { dirname } from "path";
 import {
   users,
   servers,
   sessions,
-  recordings,
   fileOperations,
   subscriptions,
   billingHistory,
@@ -16,6 +13,7 @@ import {
   organizations,
   organizationUsers,
   enterpriseLeads,
+  policyTemplates,
   subscriptionTiers,
   type User,
   type InsertUser,
@@ -33,13 +31,10 @@ import {
   type Subscription,
   type InsertSubscription,
   type BillingHistory,
-  type InsertBillingHistory,
   type Bridge,
   type InsertBridge,
   type Organization,
   type OrganizationUser,
-  type InsertOrganization,
-  type InsertOrganizationUser,
   type EnterpriseLead,
   type InsertEnterpriseLead,
   type SubscriptionTier,
@@ -53,7 +48,6 @@ import { DEFAULT_ORG_ID, DEFAULT_ORG_NAME, DEFAULT_ORG_SLUG } from "./config";
 import { createRequire } from "module";
 
 // Use createRequire for heimdall-tide (CJS module with broken ESM exports)
-// In CJS bundle __filename is available; in ESM dev mode use import.meta.url
 const require = createRequire(
   typeof __filename !== "undefined" ? __filename : import.meta.url
 );
@@ -90,1358 +84,78 @@ export interface IStorage {
   endSession(id: string): Promise<boolean>;
 }
 
-// Database path
-const DB_PATH = process.env.DATABASE_URL || "./data/keylessh.db";
+// PostgreSQL connection pool and Drizzle instance
+let pool: pg.Pool;
+let db: ReturnType<typeof drizzle>;
 
-// Ensure data directory exists
-const dbDir = dirname(DB_PATH);
-if (!existsSync(dbDir)) {
-  mkdirSync(dbDir, { recursive: true });
-}
+export async function initDatabase() {
+  const connectionString = process.env.DATABASE_URL || "postgresql://localhost:5432/keylessh";
 
-// Initialize SQLite database
-const sqlite = new Database(DB_PATH);
-sqlite.pragma("journal_mode = WAL");
+  pool = new pg.Pool({
+    connectionString,
+    max: 20,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
+    ssl: connectionString.includes('azure') ? { rejectUnauthorized: false } : undefined,
+  });
 
-// Initialize Drizzle
-const db = drizzle(sqlite);
+  pool.on("error", (err: Error) => {
+    console.error("Unexpected PG pool error:", err);
+  });
 
-// Create tables if they don't exist
-sqlite.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    username TEXT NOT NULL UNIQUE,
-    email TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'user',
-    allowed_servers TEXT NOT NULL DEFAULT '[]'
-  );
+  db = drizzle(pool);
 
-  CREATE TABLE IF NOT EXISTS servers (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    host TEXT NOT NULL,
-    port INTEGER NOT NULL DEFAULT 22,
-    environment TEXT NOT NULL DEFAULT 'production',
-    tags TEXT NOT NULL DEFAULT '[]',
-    enabled INTEGER NOT NULL DEFAULT 1,
-    ssh_users TEXT NOT NULL DEFAULT '[]'
-  );
-
-  CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    user_username TEXT,
-    user_email TEXT,
-    server_id TEXT NOT NULL,
-    ssh_user TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    started_at INTEGER NOT NULL,
-    ended_at INTEGER
-  );
-
-  -- Approval tables
-  CREATE TABLE IF NOT EXISTS pending_approvals (
-    id TEXT PRIMARY KEY,
-    type TEXT NOT NULL CHECK(type IN ('user_create', 'user_update', 'user_delete', 'role_assign', 'role_remove')),
-    requested_by TEXT NOT NULL,
-    target_user_id TEXT,
-    target_user_email TEXT,
-    data TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'denied', 'committed', 'cancelled')),
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    updated_at INTEGER
-  );
-
-  CREATE TABLE IF NOT EXISTS approval_decisions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    approval_id TEXT NOT NULL,
-    user_vuid TEXT NOT NULL,
-    user_email TEXT NOT NULL,
-    decision INTEGER NOT NULL CHECK(decision IN (0, 1)),
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    FOREIGN KEY (approval_id) REFERENCES pending_approvals(id) ON DELETE CASCADE,
-    UNIQUE(approval_id, user_vuid)
-  );
-
-  CREATE TABLE IF NOT EXISTS access_change_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    type TEXT NOT NULL CHECK(type IN ('created', 'approved', 'denied', 'deleted', 'committed', 'cancelled')),
-    approval_id TEXT NOT NULL,
-    user_email TEXT NOT NULL,
-    target_user TEXT,
-    details TEXT
-  );
-  CREATE INDEX IF NOT EXISTS idx_access_change_logs_timestamp ON access_change_logs(timestamp DESC);
-  CREATE INDEX IF NOT EXISTS idx_access_change_logs_approval_id ON access_change_logs(approval_id);
-
-  -- SSH signing policies for roles (committed policies)
-  CREATE TABLE IF NOT EXISTS ssh_policies (
-    role_id TEXT PRIMARY KEY,
-    contract_type TEXT NOT NULL,
-    approval_type TEXT NOT NULL CHECK(approval_type IN ('implicit', 'explicit')),
-    execution_type TEXT NOT NULL CHECK(execution_type IN ('public', 'private')),
-    threshold INTEGER NOT NULL DEFAULT 1,
-    policy_data TEXT,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    updated_at INTEGER
-  );
-
-  -- Pending SSH policy requests (awaiting approval)
-  CREATE TABLE IF NOT EXISTS pending_ssh_policies (
-    id TEXT PRIMARY KEY,
-    role_id TEXT NOT NULL,
-    requested_by TEXT NOT NULL,
-    requested_by_email TEXT,
-    policy_request_data TEXT NOT NULL,
-    contract_code TEXT,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'committed', 'cancelled')),
-    threshold INTEGER NOT NULL DEFAULT 1,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    updated_at INTEGER
-  );
-
-  -- SSH policy approval decisions
-  CREATE TABLE IF NOT EXISTS ssh_policy_decisions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    policy_request_id TEXT NOT NULL,
-    user_vuid TEXT NOT NULL,
-    user_email TEXT NOT NULL,
-    decision INTEGER NOT NULL CHECK(decision IN (0, 1)),
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    UNIQUE(policy_request_id, user_vuid)
-  );
-
-  -- SSH policy change logs
-  CREATE TABLE IF NOT EXISTS ssh_policy_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    type TEXT NOT NULL CHECK(type IN ('created', 'approved', 'denied', 'committed', 'cancelled')),
-    policy_request_id TEXT NOT NULL,
-    user_email TEXT NOT NULL,
-    role_id TEXT,
-    details TEXT,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'committed', 'cancelled')),
-    approval_count INTEGER NOT NULL DEFAULT 0,
-    threshold INTEGER NOT NULL DEFAULT 1
-  );
-  CREATE INDEX IF NOT EXISTS idx_ssh_policy_logs_timestamp ON ssh_policy_logs(timestamp DESC);
-
-  -- Policy templates for reusable Forseti contracts
-  CREATE TABLE IF NOT EXISTS policy_templates (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT NOT NULL,
-    cs_code TEXT NOT NULL,
-    parameters TEXT NOT NULL DEFAULT '[]',
-    created_by TEXT NOT NULL,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    updated_at INTEGER
-  );
-
-  -- Subscription table for license management
-  CREATE TABLE IF NOT EXISTS subscriptions (
-    id TEXT PRIMARY KEY,
-    tier TEXT NOT NULL DEFAULT 'free',
-    stripe_customer_id TEXT,
-    stripe_subscription_id TEXT,
-    stripe_price_id TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
-    current_period_end INTEGER,
-    cancel_at_period_end INTEGER DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER
-  );
-
-  -- Billing history table
-  CREATE TABLE IF NOT EXISTS billing_history (
-    id TEXT PRIMARY KEY,
-    subscription_id TEXT NOT NULL,
-    stripe_invoice_id TEXT,
-    amount INTEGER NOT NULL,
-    currency TEXT NOT NULL DEFAULT 'usd',
-    status TEXT NOT NULL,
-    invoice_pdf TEXT,
-    description TEXT,
-    created_at INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_billing_history_subscription ON billing_history(subscription_id);
-  CREATE INDEX IF NOT EXISTS idx_billing_history_created ON billing_history(created_at DESC);
-
-  -- Session recordings table
-  CREATE TABLE IF NOT EXISTS recordings (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    server_id TEXT NOT NULL,
-    server_name TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    user_email TEXT NOT NULL,
-    ssh_user TEXT NOT NULL,
-    started_at INTEGER NOT NULL,
-    ended_at INTEGER,
-    duration INTEGER,
-    terminal_width INTEGER NOT NULL DEFAULT 80,
-    terminal_height INTEGER NOT NULL DEFAULT 24,
-    data TEXT NOT NULL DEFAULT '',
-    text_content TEXT NOT NULL DEFAULT '',
-    file_size INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE INDEX IF NOT EXISTS idx_recordings_session ON recordings(session_id);
-  CREATE INDEX IF NOT EXISTS idx_recordings_server ON recordings(server_id);
-  CREATE INDEX IF NOT EXISTS idx_recordings_user ON recordings(user_id);
-  CREATE INDEX IF NOT EXISTS idx_recordings_started ON recordings(started_at DESC);
-
-  -- File operations log table
-  CREATE TABLE IF NOT EXISTS file_operations (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    server_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    user_email TEXT,
-    ssh_user TEXT NOT NULL,
-    operation TEXT NOT NULL,
-    path TEXT NOT NULL,
-    target_path TEXT,
-    file_size INTEGER,
-    mode TEXT NOT NULL,
-    status TEXT NOT NULL,
-    error_message TEXT,
-    timestamp INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id);
-  CREATE INDEX IF NOT EXISTS idx_file_ops_server ON file_operations(server_id);
-  CREATE INDEX IF NOT EXISTS idx_file_ops_user ON file_operations(user_id);
-  CREATE INDEX IF NOT EXISTS idx_file_ops_timestamp ON file_operations(timestamp DESC);
-
-  -- SSH bridges - WebSocket-to-TCP relay endpoints
-  CREATE TABLE IF NOT EXISTS bridges (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    url TEXT NOT NULL,
-    description TEXT,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    is_default INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    organization_id TEXT NOT NULL DEFAULT 'default'
-  );
-  CREATE INDEX IF NOT EXISTS idx_bridges_enabled ON bridges(enabled);
-  CREATE INDEX IF NOT EXISTS idx_bridges_default ON bridges(is_default);
-  CREATE INDEX IF NOT EXISTS idx_bridges_org ON bridges(organization_id);
-
-  -- Organizations (multi-tenancy)
-  CREATE TABLE IF NOT EXISTS organizations (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    slug TEXT NOT NULL UNIQUE,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER
-  );
-
-  -- Organization user membership
-  CREATE TABLE IF NOT EXISTS organization_users (
-    id TEXT PRIMARY KEY,
-    organization_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'user',
-    joined_at INTEGER NOT NULL,
-    UNIQUE(organization_id, user_id)
-  );
-  CREATE INDEX IF NOT EXISTS idx_org_users_org ON organization_users(organization_id);
-  CREATE INDEX IF NOT EXISTS idx_org_users_user ON organization_users(user_id);
-
-  -- Enterprise leads (contact form submissions)
-  CREATE TABLE IF NOT EXISTS enterprise_leads (
-    id TEXT PRIMARY KEY,
-    company_name TEXT NOT NULL,
-    contact_email TEXT NOT NULL,
-    contact_first_name TEXT NOT NULL,
-    contact_last_name TEXT NOT NULL,
-    phone TEXT,
-    company_size TEXT NOT NULL,
-    server_count TEXT,
-    use_case TEXT,
-    status TEXT NOT NULL DEFAULT 'new',
-    notes TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER
-  );
-  CREATE INDEX IF NOT EXISTS idx_enterprise_leads_status ON enterprise_leads(status);
-  CREATE INDEX IF NOT EXISTS idx_enterprise_leads_created ON enterprise_leads(created_at);
-`);
-
-// Lightweight migrations for existing DBs (CREATE TABLE IF NOT EXISTS doesn't alter).
-
-try {
-  const sessionColumns = sqlite
-    .prepare(`PRAGMA table_info(sessions)`)
-    .all() as Array<{ name: string }>;
-  const hasUserUsername = sessionColumns.some((c) => c.name === "user_username");
-  const hasUserEmail = sessionColumns.some((c) => c.name === "user_email");
-  if (!hasUserUsername) {
-    sqlite.prepare(`ALTER TABLE sessions ADD COLUMN user_username TEXT`).run();
-  }
-  if (!hasUserEmail) {
-    sqlite.prepare(`ALTER TABLE sessions ADD COLUMN user_email TEXT`).run();
-  }
-} catch {
-  // Ignore migration errors; queries will surface issues.
-}
-
-// Migration: Add policy_data column to ssh_policies for storing committed policy bytes
-try {
-  const policyColumns = sqlite
-    .prepare(`PRAGMA table_info(ssh_policies)`)
-    .all() as Array<{ name: string }>;
-  const hasPolicyData = policyColumns.some((c) => c.name === "policy_data");
-  if (!hasPolicyData) {
-    sqlite.prepare(`ALTER TABLE ssh_policies ADD COLUMN policy_data TEXT`).run();
-  }
-} catch {
-  // Ignore migration errors; queries will surface issues.
-}
-
-// Migration: Add users_over_limit and servers_over_limit columns to subscriptions for SSH access control
-try {
-  const subColumns = sqlite
-    .prepare(`PRAGMA table_info(subscriptions)`)
-    .all() as Array<{ name: string }>;
-  const hasUsersOverLimit = subColumns.some((c) => c.name === "users_over_limit");
-  if (!hasUsersOverLimit) {
-    sqlite.prepare(`ALTER TABLE subscriptions ADD COLUMN users_over_limit INTEGER DEFAULT 0`).run();
-  }
-  const hasServersOverLimit = subColumns.some((c) => c.name === "servers_over_limit");
-  if (!hasServersOverLimit) {
-    sqlite.prepare(`ALTER TABLE subscriptions ADD COLUMN servers_over_limit INTEGER DEFAULT 0`).run();
-  }
-} catch {
-  // Ignore migration errors; queries will surface issues.
-}
-
-// Migration: Add recording columns to servers table
-try {
-  const serverColumns = sqlite
-    .prepare(`PRAGMA table_info(servers)`)
-    .all() as Array<{ name: string }>;
-  const hasRecordingEnabled = serverColumns.some((c) => c.name === "recording_enabled");
-  if (!hasRecordingEnabled) {
-    sqlite.prepare(`ALTER TABLE servers ADD COLUMN recording_enabled INTEGER NOT NULL DEFAULT 0`).run();
-  }
-  const hasRecordedUsers = serverColumns.some((c) => c.name === "recorded_users");
-  if (!hasRecordedUsers) {
-    sqlite.prepare(`ALTER TABLE servers ADD COLUMN recorded_users TEXT NOT NULL DEFAULT '[]'`).run();
-  }
-} catch {
-  // Ignore migration errors; queries will surface issues.
-}
-
-// Migration: Add recording_id column to sessions table
-try {
-  const sessionColumns = sqlite
-    .prepare(`PRAGMA table_info(sessions)`)
-    .all() as Array<{ name: string }>;
-  const hasRecordingId = sessionColumns.some((c) => c.name === "recording_id");
-  if (!hasRecordingId) {
-    sqlite.prepare(`ALTER TABLE sessions ADD COLUMN recording_id TEXT`).run();
-  }
-} catch {
-  // Ignore migration errors; queries will surface issues.
-}
-
-// Migration: Add contract_code column to pending_ssh_policies for storing custom contract source
-try {
-  const pendingPolicyColumns = sqlite
-    .prepare(`PRAGMA table_info(pending_ssh_policies)`)
-    .all() as Array<{ name: string }>;
-  const hasContractCode = pendingPolicyColumns.some((c) => c.name === "contract_code");
-  if (!hasContractCode) {
-    sqlite.prepare(`ALTER TABLE pending_ssh_policies ADD COLUMN contract_code TEXT`).run();
-  }
-} catch {
-  // Ignore migration errors; queries will surface issues.
-}
-
-// Migration: Add bridge_id column to servers table for multi-bridge support
-try {
-  const serverColumns = sqlite
-    .prepare(`PRAGMA table_info(servers)`)
-    .all() as Array<{ name: string }>;
-  const hasBridgeId = serverColumns.some((c) => c.name === "bridge_id");
-  if (!hasBridgeId) {
-    sqlite.prepare(`ALTER TABLE servers ADD COLUMN bridge_id TEXT`).run();
-  }
-} catch {
-  // Ignore migration errors; queries will surface issues.
-}
-
-// Migration: Add organization_id column to all tenant-scoped tables
-const orgMigrationTables = [
-  "servers", "sessions", "bridges", "recordings",
-  "file_operations", "subscriptions", "billing_history",
-  "pending_approvals", "ssh_policies", "pending_ssh_policies", "policy_templates",
-];
-for (const table of orgMigrationTables) {
+  // Seed: Create default organization if it doesn't exist
   try {
-    const cols = sqlite
-      .prepare(`PRAGMA table_info(${table})`)
-      .all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === "organization_id")) {
-      sqlite.prepare(`ALTER TABLE ${table} ADD COLUMN organization_id TEXT NOT NULL DEFAULT 'default'`).run();
-      sqlite.prepare(`CREATE INDEX IF NOT EXISTS idx_${table}_org ON ${table}(organization_id)`).run();
+    const [existingOrg] = await db.select({ id: organizations.id })
+      .from(organizations)
+      .where(eq(organizations.id, DEFAULT_ORG_ID))
+      .limit(1);
+
+    if (!existingOrg) {
+      await db.insert(organizations).values({
+        id: DEFAULT_ORG_ID,
+        name: DEFAULT_ORG_NAME,
+        slug: DEFAULT_ORG_SLUG,
+        createdAt: new Date(),
+      });
+      console.log(`[Storage] Created default organization: ${DEFAULT_ORG_NAME}`);
     }
-  } catch {
-    // Ignore migration errors; queries will surface issues.
-  }
-}
-
-// Seed: Create default organization if it doesn't exist
-try {
-  const existingOrg = sqlite.prepare(`SELECT id FROM organizations WHERE id = ?`).get(DEFAULT_ORG_ID);
-  if (!existingOrg) {
-    const now = Math.floor(Date.now() / 1000);
-    sqlite.prepare(`
-      INSERT INTO organizations (id, name, slug, created_at) VALUES (?, ?, ?, ?)
-    `).run(DEFAULT_ORG_ID, DEFAULT_ORG_NAME, DEFAULT_ORG_SLUG, now);
-    console.log(`[Storage] Created default organization: ${DEFAULT_ORG_NAME}`);
-  }
-} catch (err) {
-  console.error(`[Storage] Failed to seed default organization: ${err}`);
-}
-
-// Seed: Create default bridge from BRIDGE_URL env var if no bridges exist
-try {
-  const bridgeUrl = process.env.BRIDGE_URL;
-  if (bridgeUrl) {
-    const existingBridges = sqlite.prepare(`SELECT COUNT(*) as count FROM bridges`).get() as { count: number };
-    if (existingBridges.count === 0) {
-      const id = randomUUID();
-      const now = Math.floor(Date.now() / 1000);
-      sqlite.prepare(`
-        INSERT INTO bridges (id, name, url, description, enabled, is_default, created_at)
-        VALUES (?, ?, ?, ?, 1, 1, ?)
-      `).run(id, "Default Bridge", bridgeUrl, "Auto-created from BRIDGE_URL environment variable", now);
-      console.log(`[Storage] Created default bridge from BRIDGE_URL: ${bridgeUrl}`);
-    }
-  }
-} catch (err) {
-  console.error(`[Storage] Failed to seed default bridge: ${err}`);
-}
-
-export class SQLiteStorage implements IStorage {
-  async getUser(id: string): Promise<User | undefined> {
-    const result = db.select().from(users).where(eq(users.id, id)).get();
-    return result;
+  } catch (err) {
+    console.error(`[Storage] Failed to seed default organization: ${err}`);
   }
 
-  async getUserByUsername(username: string): Promise<User | undefined> {
-    const result = db.select().from(users).where(eq(users.username, username)).get();
-    return result;
-  }
-
-  async createUser(insertUser: InsertUser): Promise<User> {
-    const id = randomUUID();
-    const user: User = {
-      id,
-      username: insertUser.username,
-      email: insertUser.email,
-      role: insertUser.role ?? "user",
-      allowedServers: (insertUser.allowedServers ?? []) as string[],
-    };
-    db.insert(users).values(user).run();
-    return user;
-  }
-
-  async getUsers(): Promise<User[]> {
-    return db.select().from(users).all();
-  }
-
-  async updateUser(id: string, data: Partial<User>): Promise<User | undefined> {
-    const existing = await this.getUser(id);
-    if (!existing) return undefined;
-
-    const updated = { ...existing, ...data, id };
-    db.update(users).set(updated).where(eq(users.id, id)).run();
-    return updated;
-  }
-
-  async getServers(orgId: string): Promise<Server[]> {
-    return db.select().from(servers).where(eq(servers.organizationId, orgId)).all();
-  }
-
-  async getServer(id: string): Promise<Server | undefined> {
-    const result = db.select().from(servers).where(eq(servers.id, id)).get();
-    return result;
-  }
-
-  async getServersByIds(ids: string[]): Promise<Server[]> {
-    if (ids.length === 0) return [];
-    return db.select().from(servers).where(inArray(servers.id, ids)).all();
-  }
-
-  async createServer(orgId: string, insertServer: InsertServer): Promise<Server> {
-    const id = randomUUID();
-    const server: Server = {
-      id,
-      name: insertServer.name,
-      host: insertServer.host,
-      port: insertServer.port ?? 22,
-      environment: insertServer.environment ?? "production",
-      tags: (insertServer.tags ?? []) as string[],
-      enabled: insertServer.enabled ?? true,
-      sshUsers: (insertServer.sshUsers ?? []) as string[],
-      recordingEnabled: insertServer.recordingEnabled ?? false,
-      recordedUsers: (insertServer.recordedUsers ?? []) as string[],
-      bridgeId: insertServer.bridgeId ?? null,
-      organizationId: orgId,
-    };
-    db.insert(servers).values(server).run();
-    return server;
-  }
-
-  async updateServer(id: string, data: Partial<Server>): Promise<Server | undefined> {
-    const existing = await this.getServer(id);
-    if (!existing) return undefined;
-
-    const updated = { ...existing, ...data, id };
-    db.update(servers).set(updated).where(eq(servers.id, id)).run();
-    return updated;
-  }
-
-  async deleteServer(id: string): Promise<boolean> {
-    const result = db.delete(servers).where(eq(servers.id, id)).run();
-    return result.changes > 0;
-  }
-
-  async getSessions(orgId: string): Promise<Session[]> {
-    return db.select().from(sessions).where(eq(sessions.organizationId, orgId)).orderBy(desc(sessions.startedAt)).all();
-  }
-
-  async getSession(id: string): Promise<Session | undefined> {
-    const result = db.select().from(sessions).where(eq(sessions.id, id)).get();
-    return result;
-  }
-
-  async getSessionsByUserId(userId: string): Promise<Session[]> {
-    return db
-      .select()
-      .from(sessions)
-      .where(eq(sessions.userId, userId))
-      .orderBy(desc(sessions.startedAt))
-      .all();
-  }
-
-  async createSession(orgId: string, insertSession: InsertSession): Promise<Session> {
-    const id = randomUUID();
-    const session: Session = {
-      id,
-      userId: insertSession.userId,
-      userUsername: insertSession.userUsername ?? null,
-      userEmail: insertSession.userEmail ?? null,
-      serverId: insertSession.serverId,
-      sshUser: insertSession.sshUser,
-      status: insertSession.status ?? "active",
-      startedAt: new Date(),
-      endedAt: null,
-      recordingId: insertSession.recordingId ?? null,
-      organizationId: orgId,
-    };
-    db.insert(sessions).values(session).run();
-    return session;
-  }
-
-  async updateSession(id: string, data: Partial<Session>): Promise<Session | undefined> {
-    const existing = await this.getSession(id);
-    if (!existing) return undefined;
-
-    const updated = { ...existing, ...data, id };
-    db.update(sessions).set(updated).where(eq(sessions.id, id)).run();
-    return updated;
-  }
-
-  async endSession(id: string): Promise<boolean> {
-    const result = db
-      .update(sessions)
-      .set({ status: "completed", endedAt: new Date() })
-      .where(eq(sessions.id, id))
-      .run();
-    return result.changes > 0;
-  }
-
-  /**
-   * Clean up stale sessions that have been "active" for longer than the given
-   * threshold. This catches ghost sessions left behind when browsers crash or
-   * network drops prevent normal cleanup.
-   */
-  async cleanupStaleSessions(maxAgeMs: number = 24 * 60 * 60 * 1000): Promise<number> {
-    const cutoff = new Date(Date.now() - maxAgeMs);
-    const result = db
-      .update(sessions)
-      .set({ status: "completed", endedAt: new Date() })
-      .where(and(eq(sessions.status, "active"), lt(sessions.startedAt, cutoff)))
-      .run();
-    return result.changes;
-  }
-}
-
-// Approval types
-export type ApprovalType = 'user_create' | 'user_update' | 'user_delete' | 'role_assign' | 'role_remove';
-export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'committed' | 'cancelled';
-
-export interface PendingApproval {
-  id: string;
-  type: ApprovalType;
-  requestedBy: string;
-  targetUserId?: string;
-  targetUserEmail?: string;
-  data: string;
-  status: ApprovalStatus;
-  createdAt: number;
-  updatedAt?: number;
-  approvedBy?: string[];
-  deniedBy?: string[];
-}
-
-export interface ApprovalDecision {
-  id: number;
-  approvalId: string;
-  userVuid: string;
-  userEmail: string;
-  decision: number; // 0 = denied, 1 = approved
-  createdAt: number;
-}
-
-export interface AccessChangeLog {
-  id: number;
-  timestamp: number;
-  type: string;
-  approvalId: string;
-  userEmail: string;
-  targetUser?: string;
-  details?: string;
-}
-
-// Approval storage class
-export class ApprovalStorage {
-  // Get all pending approvals with their decisions
-  async getPendingApprovals(orgId: string): Promise<PendingApproval[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM pending_approvals WHERE status = 'pending' AND organization_id = ? ORDER BY created_at DESC
-    `).all(orgId) as any[];
-
-    return Promise.all(rows.map(async (row) => {
-      const approvers = sqlite.prepare(`
-        SELECT user_vuid FROM approval_decisions WHERE approval_id = ? AND decision = 1
-      `).all(row.id) as { user_vuid: string }[];
-
-      const deniers = sqlite.prepare(`
-        SELECT user_vuid FROM approval_decisions WHERE approval_id = ? AND decision = 0
-      `).all(row.id) as { user_vuid: string }[];
-
-      return {
-        id: row.id,
-        type: row.type as ApprovalType,
-        requestedBy: row.requested_by,
-        targetUserId: row.target_user_id,
-        targetUserEmail: row.target_user_email,
-        data: row.data,
-        status: row.status as ApprovalStatus,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        approvedBy: approvers.map(a => a.user_vuid),
-        deniedBy: deniers.map(d => d.user_vuid),
-      };
-    }));
-  }
-
-  // Create a new approval request
-  async createApproval(
-    orgId: string,
-    type: ApprovalType,
-    requestedBy: string,
-    data: any,
-    targetUserId?: string,
-    targetUserEmail?: string
-  ): Promise<string> {
-    const id = randomUUID();
-    sqlite.prepare(`
-      INSERT INTO pending_approvals (id, type, requested_by, target_user_id, target_user_email, data, status, organization_id)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
-    `).run(id, type, requestedBy, targetUserId, targetUserEmail, JSON.stringify(data), orgId);
-
-    // Log the creation
-    await this.addAccessChangeLog('created', id, requestedBy, targetUserEmail, JSON.stringify(data));
-
-    return id;
-  }
-
-  // Add a decision (approval or denial) to an approval request
-  async addDecision(
-    approvalId: string,
-    userVuid: string,
-    userEmail: string,
-    approved: boolean
-  ): Promise<boolean> {
-    try {
-      sqlite.prepare(`
-        INSERT INTO approval_decisions (approval_id, user_vuid, user_email, decision)
-        VALUES (?, ?, ?, ?)
-      `).run(approvalId, userVuid, userEmail, approved ? 1 : 0);
-
-      // Log the decision
-      await this.addAccessChangeLog(
-        approved ? 'approved' : 'denied',
-        approvalId,
-        userEmail,
-        undefined,
-        undefined
-      );
-
-      return true;
-    } catch (error) {
-      // Unique constraint violation means user already voted
-      console.error('Error adding decision:', error);
-      return false;
-    }
-  }
-
-  // Remove a decision (for changing vote)
-  async removeDecision(approvalId: string, userVuid: string): Promise<boolean> {
-    const result = sqlite.prepare(`
-      DELETE FROM approval_decisions WHERE approval_id = ? AND user_vuid = ?
-    `).run(approvalId, userVuid);
-    return result.changes > 0;
-  }
-
-  // Commit an approval (mark as committed)
-  async commitApproval(id: string, userEmail: string): Promise<boolean> {
-    const result = sqlite.prepare(`
-      UPDATE pending_approvals SET status = 'committed', updated_at = strftime('%s', 'now')
-      WHERE id = ? AND status = 'pending'
-    `).run(id);
-
-    if (result.changes > 0) {
-      await this.addAccessChangeLog('committed', id, userEmail);
-    }
-
-    return result.changes > 0;
-  }
-
-  // Cancel an approval request
-  async cancelApproval(id: string, userEmail: string): Promise<boolean> {
-    const result = sqlite.prepare(`
-      UPDATE pending_approvals SET status = 'cancelled', updated_at = strftime('%s', 'now')
-      WHERE id = ? AND status = 'pending'
-    `).run(id);
-
-    if (result.changes > 0) {
-      await this.addAccessChangeLog('cancelled', id, userEmail);
-    }
-
-    return result.changes > 0;
-  }
-
-  // Delete an approval request
-  async deleteApproval(id: string, userEmail: string): Promise<boolean> {
-    // First get the approval to log target user
-    const approval = sqlite.prepare(`
-      SELECT target_user_email FROM pending_approvals WHERE id = ?
-    `).get(id) as { target_user_email?: string } | undefined;
-
-    const result = sqlite.prepare(`
-      DELETE FROM pending_approvals WHERE id = ?
-    `).run(id);
-
-    if (result.changes > 0) {
-      await this.addAccessChangeLog('deleted', id, userEmail, approval?.target_user_email);
-    }
-
-    return result.changes > 0;
-  }
-
-  // Get approval by ID
-  async getApproval(id: string): Promise<PendingApproval | undefined> {
-    const row = sqlite.prepare(`
-      SELECT * FROM pending_approvals WHERE id = ?
-    `).get(id) as any | undefined;
-
-    if (!row) return undefined;
-
-    const approvers = sqlite.prepare(`
-      SELECT user_vuid FROM approval_decisions WHERE approval_id = ? AND decision = 1
-    `).all(id) as { user_vuid: string }[];
-
-    const deniers = sqlite.prepare(`
-      SELECT user_vuid FROM approval_decisions WHERE approval_id = ? AND decision = 0
-    `).all(id) as { user_vuid: string }[];
-
-    return {
-      id: row.id,
-      type: row.type as ApprovalType,
-      requestedBy: row.requested_by,
-      targetUserId: row.target_user_id,
-      targetUserEmail: row.target_user_email,
-      data: row.data,
-      status: row.status as ApprovalStatus,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      approvedBy: approvers.map(a => a.user_vuid),
-      deniedBy: deniers.map(d => d.user_vuid),
-    };
-  }
-
-  // Add access change log entry
-  async addAccessChangeLog(
-    type: string,
-    approvalId: string,
-    userEmail: string,
-    targetUser?: string,
-    details?: string
-  ): Promise<void> {
-    sqlite.prepare(`
-      INSERT INTO access_change_logs (type, approval_id, user_email, target_user, details)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(type, approvalId, userEmail, targetUser, details);
-  }
-
-  // Get access change logs
-  async getAccessChangeLogs(limit: number = 100, offset: number = 0): Promise<AccessChangeLog[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM access_change_logs ORDER BY timestamp DESC LIMIT ? OFFSET ?
-    `).all(limit, offset) as any[];
-
-    return rows.map(row => ({
-      id: row.id,
-      timestamp: row.timestamp,
-      type: row.type,
-      approvalId: row.approval_id,
-      userEmail: row.user_email,
-      targetUser: row.target_user,
-      details: row.details,
-    }));
-  }
-}
-
-// SSH Policy types
-export interface SshPolicy {
-  roleId: string;
-  contractType: string;
-  approvalType: "implicit" | "explicit";
-  executionType: "public" | "private";
-  threshold: number;
-  policyData?: string; // Base64 encoded committed policy bytes
-  createdAt: number;
-  updatedAt?: number;
-}
-
-export interface InsertSshPolicy {
-  roleId: string;
-  contractType: string;
-  approvalType: "implicit" | "explicit";
-  executionType: "public" | "private";
-  threshold: number;
-  policyData?: string; // Base64 encoded committed policy bytes
-}
-
-// SSH Policy storage class
-export class PolicyStorage {
-  // Create or update a policy for a role
-  async upsertPolicy(policy: InsertSshPolicy): Promise<SshPolicy> {
-    const existing = await this.getPolicy(policy.roleId);
-
-    if (existing) {
-      sqlite.prepare(`
-        UPDATE ssh_policies
-        SET contract_type = ?, approval_type = ?, execution_type = ?, threshold = ?, policy_data = ?, updated_at = strftime('%s', 'now')
-        WHERE role_id = ?
-      `).run(policy.contractType, policy.approvalType, policy.executionType, policy.threshold, policy.policyData || null, policy.roleId);
-
-      return {
-        ...policy,
-        createdAt: existing.createdAt,
-        updatedAt: Math.floor(Date.now() / 1000),
-      };
-    } else {
-      sqlite.prepare(`
-        INSERT INTO ssh_policies (role_id, contract_type, approval_type, execution_type, threshold, policy_data)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(policy.roleId, policy.contractType, policy.approvalType, policy.executionType, policy.threshold, policy.policyData || null);
-
-      return {
-        ...policy,
-        createdAt: Math.floor(Date.now() / 1000),
-      };
-    }
-  }
-
-  // Get policy by role ID
-  async getPolicy(roleId: string): Promise<SshPolicy | undefined> {
-    const row = sqlite.prepare(`
-      SELECT * FROM ssh_policies WHERE role_id = ?
-    `).get(roleId) as any | undefined;
-
-    if (!row) return undefined;
-
-    return {
-      roleId: row.role_id,
-      contractType: row.contract_type,
-      approvalType: row.approval_type as "implicit" | "explicit",
-      executionType: row.execution_type as "public" | "private",
-      threshold: row.threshold,
-      policyData: row.policy_data || undefined,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
-  }
-
-  // Get all policies
-  async getAllPolicies(orgId: string): Promise<SshPolicy[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM ssh_policies WHERE organization_id = ? ORDER BY created_at DESC
-    `).all(orgId) as any[];
-
-    return rows.map(row => ({
-      roleId: row.role_id,
-      contractType: row.contract_type,
-      approvalType: row.approval_type as "implicit" | "explicit",
-      executionType: row.execution_type as "public" | "private",
-      threshold: row.threshold,
-      policyData: row.policy_data || undefined,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
-  }
-
-  // Delete policy by role ID
-  async deletePolicy(roleId: string): Promise<boolean> {
-    const result = sqlite.prepare(`
-      DELETE FROM ssh_policies WHERE role_id = ?
-    `).run(roleId);
-    return result.changes > 0;
-  }
-}
-
-// Pending SSH Policy types
-export interface PendingSshPolicy {
-  id: string;
-  roleId: string;
-  requestedBy: string;
-  requestedByEmail?: string;
-  policyRequestData: string;
-  contractCode?: string;
-  status: "pending" | "approved" | "committed" | "cancelled";
-  threshold: number;
-  createdAt: number;
-  updatedAt?: number;
-  approvalCount?: number;
-  rejectionCount?: number;
-  approvedBy?: string[];
-  deniedBy?: string[];
-  commitReady?: boolean;
-}
-
-export interface InsertPendingSshPolicy {
-  id: string;
-  roleId: string;
-  requestedBy: string;
-  requestedByEmail?: string;
-  policyRequestData: string;
-  contractCode?: string;
-  threshold?: number;
-}
-
-export interface SshPolicyDecision {
-  policyRequestId: string;
-  userVuid: string;
-  userEmail: string;
-  decision: 0 | 1; // 0 = reject, 1 = approve
-  createdAt: number;
-}
-
-// Pending SSH Policy storage class
-export class PendingPolicyStorage {
-  // Create a new pending policy request
-  async createPendingPolicy(policy: InsertPendingSshPolicy): Promise<PendingSshPolicy> {
-    sqlite.prepare(`
-      INSERT INTO pending_ssh_policies (id, role_id, requested_by, requested_by_email, policy_request_data, contract_code, threshold)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(policy.id, policy.roleId, policy.requestedBy, policy.requestedByEmail || null, policy.policyRequestData, policy.contractCode || null, policy.threshold || 1);
-
-    // Log the creation with approval_count=0 at time of creation
-    const threshold = policy.threshold || 1;
-    sqlite.prepare(`
-      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, details, status, approval_count, threshold)
-      VALUES ('created', ?, ?, ?, ?, 'pending', 0, ?)
-    `).run(policy.id, policy.requestedByEmail || policy.requestedBy, policy.roleId, JSON.stringify({ threshold }), threshold);
-
-    return {
-      ...policy,
-      status: "pending",
-      threshold: policy.threshold || 1,
-      createdAt: Math.floor(Date.now() / 1000),
-    };
-  }
-
-  // Get pending policy by ID
-  async getPendingPolicy(id: string): Promise<PendingSshPolicy | undefined> {
-    const row = sqlite.prepare(`
-      SELECT p.*,
-        (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approval_count,
-        (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 0) as rejection_count
-      FROM pending_ssh_policies p WHERE p.id = ?
-    `).get(id) as any | undefined;
-
-    if (!row) return undefined;
-
-    return {
-      id: row.id,
-      roleId: row.role_id,
-      requestedBy: row.requested_by,
-      requestedByEmail: row.requested_by_email,
-      policyRequestData: row.policy_request_data,
-      contractCode: row.contract_code,
-      status: row.status as "pending" | "approved" | "committed" | "cancelled",
-      threshold: row.threshold,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      approvalCount: row.approval_count,
-      rejectionCount: row.rejection_count,
-    };
-  }
-
-  // Get all pending policies (not yet committed or cancelled)
-  // For commit-ready policies, adds the admin policy to the request (required for Ork commit)
-  async getAllPendingPolicies(orgId: string): Promise<PendingSshPolicy[]> {
-    const rows = sqlite.prepare(`
-      SELECT p.*,
-        (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approval_count,
-        (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 0) as rejection_count,
-        (SELECT GROUP_CONCAT(user_vuid) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approved_by,
-        (SELECT GROUP_CONCAT(user_vuid) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 0) as denied_by
-      FROM pending_ssh_policies p
-      WHERE p.status IN ('pending', 'approved') AND p.organization_id = ?
-      ORDER BY p.created_at DESC
-    `).all(orgId) as any[];
-
-    // Fetch admin policy from TideCloak (needed to authorize commits)
-    let adminPolicyBytes: Uint8Array | null = null;
-    try {
-      const adminPolicyBase64 = await getAdminPolicy();
-      adminPolicyBytes = base64ToBytes(adminPolicyBase64);
-    } catch (error) {
-      console.error("Failed to fetch admin policy:", error);
-      // Continue without admin policy - commits will fail but approvals still work
-    }
-
-    const policies = await Promise.all(rows.map(async row => {
-      const isCommitReady = (row.approval_count || 0) >= row.threshold;
-      let policyRequestData = row.policy_request_data;
-
-      // If commit-ready and we have admin policy, add it to the request
-      if (isCommitReady && adminPolicyBytes) {
-        try {
-          const request = PolicySignRequest.decode(base64ToBytes(policyRequestData));
-          // Add the admin policy to authorize the commit
-          request.addPolicy(adminPolicyBytes);
-          const updatedData = bytesToBase64(request.encode());
-
-          // Update the request in the database with admin policy attached
-          sqlite.prepare(`
-            UPDATE pending_ssh_policies SET policy_request_data = ? WHERE id = ?
-          `).run(updatedData, row.id);
-
-          policyRequestData = updatedData;
-        } catch (error) {
-          console.error(`Failed to add admin policy to request ${row.id}:`, error);
-        }
+  // Seed: Create default bridge from BRIDGE_URL env var if no bridges exist
+  try {
+    const bridgeUrl = process.env.BRIDGE_URL;
+    if (bridgeUrl) {
+      const { rows } = await pool.query(`SELECT COUNT(*) as count FROM bridges`);
+      if (parseInt(rows[0].count) === 0) {
+        const id = randomUUID();
+        await db.insert(bridges).values({
+          id,
+          name: "Default Bridge",
+          url: bridgeUrl,
+          description: "Auto-created from BRIDGE_URL environment variable",
+          enabled: true,
+          isDefault: true,
+          createdAt: new Date(),
+          organizationId: DEFAULT_ORG_ID,
+        });
+        console.log(`[Storage] Created default bridge from BRIDGE_URL: ${bridgeUrl}`);
       }
-
-      return {
-        id: row.id,
-        roleId: row.role_id,
-        requestedBy: row.requested_by,
-        requestedByEmail: row.requested_by_email,
-        policyRequestData,
-        contractCode: row.contract_code,
-        status: row.status as "pending" | "approved" | "committed" | "cancelled",
-        threshold: row.threshold,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        approvalCount: row.approval_count || 0,
-        rejectionCount: row.rejection_count || 0,
-        approvedBy: row.approved_by ? row.approved_by.split(',') : [],
-        deniedBy: row.denied_by ? row.denied_by.split(',') : [],
-        commitReady: isCommitReady,
-      };
-    }));
-
-    return policies;
-  }
-
-  // Add approval/rejection decision
-  async addDecision(decision: Omit<SshPolicyDecision, "createdAt">): Promise<void> {
-    // Insert or update decision
-    sqlite.prepare(`
-      INSERT INTO ssh_policy_decisions (policy_request_id, user_vuid, user_email, decision)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(policy_request_id, user_vuid) DO UPDATE SET decision = excluded.decision, created_at = strftime('%s', 'now')
-    `).run(decision.policyRequestId, decision.userVuid, decision.userEmail, decision.decision);
-
-    // Refetch to get updated counts after this decision
-    const policy = await this.getPendingPolicy(decision.policyRequestId);
-    const logType = decision.decision === 1 ? "approved" : "denied";
-    const approvalCount = policy?.approvalCount || 0;
-    const threshold = policy?.threshold || 1;
-
-    // Calculate what status will be after this action
-    let statusAfterAction = "pending";
-    if (decision.decision === 1 && approvalCount >= threshold) {
-      statusAfterAction = "approved";
-      await this.updateStatus(decision.policyRequestId, "approved");
     }
-
-    // Log the decision with status and counts at time of action
-    sqlite.prepare(`
-      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(logType, decision.policyRequestId, decision.userEmail, policy?.roleId || null, statusAfterAction, approvalCount, threshold);
+  } catch (err) {
+    console.error(`[Storage] Failed to seed default bridge: ${err}`);
   }
 
-  // Update policy status
-  async updateStatus(id: string, status: "pending" | "approved" | "committed" | "cancelled"): Promise<void> {
-    sqlite.prepare(`
-      UPDATE pending_ssh_policies SET status = ?, updated_at = strftime('%s', 'now') WHERE id = ?
-    `).run(status, id);
-  }
-
-  // Get decisions for a policy
-  async getDecisions(policyRequestId: string): Promise<SshPolicyDecision[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM ssh_policy_decisions WHERE policy_request_id = ? ORDER BY created_at DESC
-    `).all(policyRequestId) as any[];
-
-    return rows.map(row => ({
-      policyRequestId: row.policy_request_id,
-      userVuid: row.user_vuid,
-      userEmail: row.user_email,
-      decision: row.decision as 0 | 1,
-      createdAt: row.created_at,
-    }));
-  }
-
-  // Check if user has already voted
-  async hasUserVoted(policyRequestId: string, userVuid: string): Promise<boolean> {
-    const row = sqlite.prepare(`
-      SELECT 1 FROM ssh_policy_decisions WHERE policy_request_id = ? AND user_vuid = ?
-    `).get(policyRequestId, userVuid);
-    return !!row;
-  }
-
-  // Get user's decision (returns 1 for approval, 0 for rejection, null if no decision)
-  async getUserDecision(policyRequestId: string, userVuid: string): Promise<number | null> {
-    const row = sqlite.prepare(`
-      SELECT decision FROM ssh_policy_decisions WHERE policy_request_id = ? AND user_vuid = ?
-    `).get(policyRequestId, userVuid) as { decision: number } | undefined;
-    return row ? row.decision : null;
-  }
-
-  // Update the policy request data (used to store signed/approved request)
-  async updatePolicyRequest(id: string, policyRequestData: string): Promise<void> {
-    sqlite.prepare(`
-      UPDATE pending_ssh_policies SET policy_request_data = ? WHERE id = ?
-    `).run(policyRequestData, id);
-  }
-
-  // Revoke a user's decision (remove their vote) - matches ideed-swarm's RemovePolicyApproval
-  async revokeDecision(policyRequestId: string, userVuid: string): Promise<boolean> {
-    const result = sqlite.prepare(`
-      DELETE FROM ssh_policy_decisions WHERE policy_request_id = ? AND user_vuid = ?
-    `).run(policyRequestId, userVuid);
-    return result.changes > 0;
-  }
-
-  // Commit a policy (after approval threshold is met)
-  async commitPolicy(id: string, userEmail: string): Promise<void> {
-    const policy = await this.getPendingPolicy(id);
-    if (!policy) throw new Error("Policy not found");
-    if (policy.status !== "approved") throw new Error("Policy not approved yet");
-
-    await this.updateStatus(id, "committed");
-
-    // Log the commit with status and counts at time of action
-    sqlite.prepare(`
-      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold)
-      VALUES ('committed', ?, ?, ?, 'committed', ?, ?)
-    `).run(id, userEmail, policy.roleId, policy.approvalCount || 0, policy.threshold);
-  }
-
-  // Cancel a pending policy
-  async cancelPolicy(id: string, userEmail: string): Promise<void> {
-    const policy = await this.getPendingPolicy(id);
-    if (!policy) throw new Error("Policy not found");
-
-    await this.updateStatus(id, "cancelled");
-
-    // Log the cancellation with status and counts at time of action
-    sqlite.prepare(`
-      INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold)
-      VALUES ('cancelled', ?, ?, ?, 'cancelled', ?, ?)
-    `).run(id, userEmail, policy.roleId, policy.approvalCount || 0, policy.threshold);
-  }
-
-  // Get policy logs (full audit trail showing all actions)
-  async getLogs(limit: number = 100, offset: number = 0): Promise<any[]> {
-    const rows = sqlite.prepare(`
-      SELECT
-        l.*,
-        p.created_at as policy_created_at,
-        p.requested_by_email as policy_requested_by
-      FROM ssh_policy_logs l
-      LEFT JOIN pending_ssh_policies p ON l.policy_request_id = p.id
-      ORDER BY l.timestamp DESC
-      LIMIT ? OFFSET ?
-    `).all(limit, offset) as any[];
-
-    return rows.map(row => ({
-      id: row.id,
-      timestamp: row.timestamp,
-      type: row.type,
-      policyRequestId: row.policy_request_id,
-      userEmail: row.user_email,
-      roleId: row.role_id,
-      details: row.details,
-      policyStatus: row.status,
-      policyThreshold: row.threshold,
-      policyCreatedAt: row.policy_created_at,
-      policyRequestedBy: row.policy_requested_by,
-      approvalCount: row.approval_count || 0,
-    }));
-  }
+  // Seed or update default SSH template
+  await seedDefaultTemplate();
 }
 
-// Policy Template storage class
-export class TemplateStorage {
-  // Create a new template
-  async createTemplate(orgId: string, template: InsertPolicyTemplate): Promise<PolicyTemplate> {
-    const id = randomUUID();
-    const now = Math.floor(Date.now() / 1000);
-
-    sqlite.prepare(`
-      INSERT INTO policy_templates (id, name, description, cs_code, parameters, created_by, created_at, organization_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, template.name, template.description, template.csCode, JSON.stringify(template.parameters), template.createdBy, now, orgId);
-
-    return {
-      id,
-      name: template.name,
-      description: template.description,
-      csCode: template.csCode,
-      parameters: template.parameters,
-      createdBy: template.createdBy,
-      createdAt: now,
-    };
-  }
-
-  // Get template by ID
-  async getTemplate(id: string): Promise<PolicyTemplate | undefined> {
-    const row = sqlite.prepare(`
-      SELECT * FROM policy_templates WHERE id = ?
-    `).get(id) as any | undefined;
-
-    if (!row) return undefined;
-
-    return {
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      csCode: row.cs_code,
-      parameters: JSON.parse(row.parameters || '[]') as TemplateParameter[],
-      createdBy: row.created_by,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
-  }
-
-  // Get template by name
-  async getTemplateByName(name: string): Promise<PolicyTemplate | undefined> {
-    const row = sqlite.prepare(`
-      SELECT * FROM policy_templates WHERE name = ?
-    `).get(name) as any | undefined;
-
-    if (!row) return undefined;
-
-    return {
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      csCode: row.cs_code,
-      parameters: JSON.parse(row.parameters || '[]') as TemplateParameter[],
-      createdBy: row.created_by,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
-  }
-
-  // Get all templates
-  async getAllTemplates(orgId: string): Promise<PolicyTemplate[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM policy_templates WHERE organization_id = ? ORDER BY created_at DESC
-    `).all(orgId) as any[];
-
-    return rows.map(row => ({
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      csCode: row.cs_code,
-      parameters: JSON.parse(row.parameters || '[]') as TemplateParameter[],
-      createdBy: row.created_by,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
-  }
-
-  // Update a template
-  async updateTemplate(id: string, data: Partial<InsertPolicyTemplate>): Promise<PolicyTemplate | undefined> {
-    const existing = await this.getTemplate(id);
-    if (!existing) return undefined;
-
-    const updates: string[] = [];
-    const values: any[] = [];
-
-    if (data.name !== undefined) {
-      updates.push('name = ?');
-      values.push(data.name);
-    }
-    if (data.description !== undefined) {
-      updates.push('description = ?');
-      values.push(data.description);
-    }
-    if (data.csCode !== undefined) {
-      updates.push('cs_code = ?');
-      values.push(data.csCode);
-    }
-    if (data.parameters !== undefined) {
-      updates.push('parameters = ?');
-      values.push(JSON.stringify(data.parameters));
-    }
-
-    if (updates.length > 0) {
-      updates.push('updated_at = ?');
-      values.push(Math.floor(Date.now() / 1000));
-      values.push(id);
-
-      sqlite.prepare(`
-        UPDATE policy_templates SET ${updates.join(', ')} WHERE id = ?
-      `).run(...values);
-    }
-
-    return this.getTemplate(id);
-  }
-
-  // Delete a template
-  async deleteTemplate(id: string): Promise<boolean> {
-    const result = sqlite.prepare(`
-      DELETE FROM policy_templates WHERE id = ?
-    `).run(id);
-    return result.changes > 0;
+export async function closeDatabase() {
+  if (pool) {
+    await pool.end();
   }
 }
 
@@ -1499,7 +213,7 @@ public class Contract : IAccessPolicy
 
         if (parsed.PublicKeyAlgorithm != "ssh-ed25519")
             return PolicyDecision.Deny("Only ssh-ed25519 allowed");
-        
+
         if(parsed.Username != userRole) {
             return PolicyDecision.Deny("Not allowed to log in as " + parsed.Username);
         }
@@ -1759,173 +473,1070 @@ public class Contract : IAccessPolicy
   createdBy: "system",
 };
 
+async function seedDefaultTemplate() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, cs_code FROM policy_templates WHERE name = $1 AND created_by = 'system'`,
+      [DEFAULT_SSH_TEMPLATE.name]
+    );
 
-// Seed or update default template
-try {
-  const existingTemplate = sqlite.prepare(`SELECT id, cs_code FROM policy_templates WHERE name = ? AND created_by = 'system'`).get(DEFAULT_SSH_TEMPLATE.name) as { id: string; cs_code: string } | undefined;
-
-  if (!existingTemplate) {
-    // Create new default template
-    const id = randomUUID();
-    const now = Math.floor(Date.now() / 1000);
-    sqlite.prepare(`
-      INSERT INTO policy_templates (id, name, description, cs_code, parameters, created_by, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, DEFAULT_SSH_TEMPLATE.name, DEFAULT_SSH_TEMPLATE.description, DEFAULT_SSH_TEMPLATE.csCode, JSON.stringify(DEFAULT_SSH_TEMPLATE.parameters), DEFAULT_SSH_TEMPLATE.createdBy, now);
-  } else if (existingTemplate.cs_code !== DEFAULT_SSH_TEMPLATE.csCode) {
-    // Update existing system template if code has changed (e.g., role check was added)
-    const now = Math.floor(Date.now() / 1000);
-    sqlite.prepare(`
-      UPDATE policy_templates SET cs_code = ?, description = ?, parameters = ?, updated_at = ? WHERE id = ?
-    `).run(DEFAULT_SSH_TEMPLATE.csCode, DEFAULT_SSH_TEMPLATE.description, JSON.stringify(DEFAULT_SSH_TEMPLATE.parameters), now, existingTemplate.id);
+    if (rows.length === 0) {
+      const id = randomUUID();
+      await db.insert(policyTemplates).values({
+        id,
+        name: DEFAULT_SSH_TEMPLATE.name,
+        description: DEFAULT_SSH_TEMPLATE.description,
+        csCode: DEFAULT_SSH_TEMPLATE.csCode,
+        parameters: DEFAULT_SSH_TEMPLATE.parameters,
+        createdBy: DEFAULT_SSH_TEMPLATE.createdBy,
+        createdAt: new Date(),
+        organizationId: DEFAULT_ORG_ID,
+      });
+    } else if (rows[0].cs_code !== DEFAULT_SSH_TEMPLATE.csCode) {
+      await pool.query(
+        `UPDATE policy_templates SET cs_code = $1, description = $2, parameters = $3, updated_at = NOW() WHERE id = $4`,
+        [DEFAULT_SSH_TEMPLATE.csCode, DEFAULT_SSH_TEMPLATE.description, JSON.stringify(DEFAULT_SSH_TEMPLATE.parameters), rows[0].id]
+      );
+    }
+  } catch {
+    // Ignore seeding errors
   }
-} catch {
-  // Ignore seeding errors
+}
+
+export class SQLiteStorage implements IStorage {
+  async getUser(id: string): Promise<User | undefined> {
+    const [result] = await db.select().from(users).where(eq(users.id, id)).limit(1);
+    return result;
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const [result] = await db.select().from(users).where(eq(users.username, username)).limit(1);
+    return result;
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const id = randomUUID();
+    const user: User = {
+      id,
+      username: insertUser.username,
+      email: insertUser.email,
+      role: insertUser.role ?? "user",
+      allowedServers: (insertUser.allowedServers ?? []) as string[],
+    };
+    await db.insert(users).values(user);
+    return user;
+  }
+
+  async getUsers(): Promise<User[]> {
+    return await db.select().from(users);
+  }
+
+  async updateUser(id: string, data: Partial<User>): Promise<User | undefined> {
+    const existing = await this.getUser(id);
+    if (!existing) return undefined;
+
+    const updated = { ...existing, ...data, id };
+    await db.update(users).set(updated).where(eq(users.id, id));
+    return updated;
+  }
+
+  async getServers(orgId: string): Promise<Server[]> {
+    return await db.select().from(servers).where(eq(servers.organizationId, orgId));
+  }
+
+  async getServer(id: string): Promise<Server | undefined> {
+    const [result] = await db.select().from(servers).where(eq(servers.id, id)).limit(1);
+    return result;
+  }
+
+  async getServersByIds(ids: string[]): Promise<Server[]> {
+    if (ids.length === 0) return [];
+    return await db.select().from(servers).where(inArray(servers.id, ids));
+  }
+
+  async createServer(orgId: string, insertServer: InsertServer): Promise<Server> {
+    const id = randomUUID();
+    const server: Server = {
+      id,
+      name: insertServer.name,
+      host: insertServer.host,
+      port: insertServer.port ?? 22,
+      environment: insertServer.environment ?? "production",
+      tags: (insertServer.tags ?? []) as string[],
+      enabled: insertServer.enabled ?? true,
+      sshUsers: (insertServer.sshUsers ?? []) as string[],
+      recordingEnabled: insertServer.recordingEnabled ?? false,
+      recordedUsers: (insertServer.recordedUsers ?? []) as string[],
+      bridgeId: insertServer.bridgeId ?? null,
+      organizationId: orgId,
+    };
+    await db.insert(servers).values(server);
+    return server;
+  }
+
+  async updateServer(id: string, data: Partial<Server>): Promise<Server | undefined> {
+    const existing = await this.getServer(id);
+    if (!existing) return undefined;
+
+    const updated = { ...existing, ...data, id };
+    await db.update(servers).set(updated).where(eq(servers.id, id));
+    return updated;
+  }
+
+  async deleteServer(id: string): Promise<boolean> {
+    const result = await db.delete(servers).where(eq(servers.id, id)).returning({ id: servers.id });
+    return result.length > 0;
+  }
+
+  async getSessions(orgId: string): Promise<Session[]> {
+    return await db.select().from(sessions).where(eq(sessions.organizationId, orgId)).orderBy(desc(sessions.startedAt));
+  }
+
+  async getSession(id: string): Promise<Session | undefined> {
+    const [result] = await db.select().from(sessions).where(eq(sessions.id, id)).limit(1);
+    return result;
+  }
+
+  async getSessionsByUserId(userId: string): Promise<Session[]> {
+    return await db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.userId, userId))
+      .orderBy(desc(sessions.startedAt));
+  }
+
+  async createSession(orgId: string, insertSession: InsertSession): Promise<Session> {
+    const id = randomUUID();
+    const session: Session = {
+      id,
+      userId: insertSession.userId,
+      userUsername: insertSession.userUsername ?? null,
+      userEmail: insertSession.userEmail ?? null,
+      serverId: insertSession.serverId,
+      sshUser: insertSession.sshUser,
+      status: insertSession.status ?? "active",
+      startedAt: new Date(),
+      endedAt: null,
+      recordingId: insertSession.recordingId ?? null,
+      organizationId: orgId,
+    };
+    await db.insert(sessions).values(session);
+    return session;
+  }
+
+  async updateSession(id: string, data: Partial<Session>): Promise<Session | undefined> {
+    const existing = await this.getSession(id);
+    if (!existing) return undefined;
+
+    const updated = { ...existing, ...data, id };
+    await db.update(sessions).set(updated).where(eq(sessions.id, id));
+    return updated;
+  }
+
+  async endSession(id: string): Promise<boolean> {
+    const result = await db
+      .update(sessions)
+      .set({ status: "completed", endedAt: new Date() })
+      .where(eq(sessions.id, id))
+      .returning({ id: sessions.id });
+    return result.length > 0;
+  }
+
+  async cleanupStaleSessions(maxAgeMs: number = 24 * 60 * 60 * 1000): Promise<number> {
+    const cutoff = new Date(Date.now() - maxAgeMs);
+    const result = await db
+      .update(sessions)
+      .set({ status: "completed", endedAt: new Date() })
+      .where(and(eq(sessions.status, "active"), lt(sessions.startedAt, cutoff)))
+      .returning({ id: sessions.id });
+    return result.length;
+  }
+}
+
+// Approval types
+export type ApprovalType = 'user_create' | 'user_update' | 'user_delete' | 'role_assign' | 'role_remove';
+export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'committed' | 'cancelled';
+
+export interface PendingApproval {
+  id: string;
+  type: ApprovalType;
+  requestedBy: string;
+  targetUserId?: string;
+  targetUserEmail?: string;
+  data: string;
+  status: ApprovalStatus;
+  createdAt: number;
+  updatedAt?: number;
+  approvedBy?: string[];
+  deniedBy?: string[];
+}
+
+export interface ApprovalDecision {
+  id: number;
+  approvalId: string;
+  userVuid: string;
+  userEmail: string;
+  decision: number;
+  createdAt: number;
+}
+
+export interface AccessChangeLog {
+  id: number;
+  timestamp: number;
+  type: string;
+  approvalId: string;
+  userEmail: string;
+  targetUser?: string;
+  details?: string;
+}
+
+// Approval storage class
+export class ApprovalStorage {
+  async getPendingApprovals(orgId: string): Promise<PendingApproval[]> {
+    const { rows } = await pool.query(
+      `SELECT * FROM pending_approvals WHERE status = 'pending' AND organization_id = $1 ORDER BY created_at DESC`,
+      [orgId]
+    );
+
+    return Promise.all(rows.map(async (row: any) => {
+      const approversResult = await pool.query(
+        `SELECT user_vuid FROM approval_decisions WHERE approval_id = $1 AND decision = 1`,
+        [row.id]
+      );
+      const deniersResult = await pool.query(
+        `SELECT user_vuid FROM approval_decisions WHERE approval_id = $1 AND decision = 0`,
+        [row.id]
+      );
+
+      return {
+        id: row.id,
+        type: row.type as ApprovalType,
+        requestedBy: row.requested_by,
+        targetUserId: row.target_user_id,
+        targetUserEmail: row.target_user_email,
+        data: row.data,
+        status: row.status as ApprovalStatus,
+        createdAt: Math.floor(new Date(row.created_at).getTime() / 1000),
+        updatedAt: row.updated_at ? Math.floor(new Date(row.updated_at).getTime() / 1000) : undefined,
+        approvedBy: approversResult.rows.map((a: any) => a.user_vuid),
+        deniedBy: deniersResult.rows.map((d: any) => d.user_vuid),
+      };
+    }));
+  }
+
+  async createApproval(
+    orgId: string,
+    type: ApprovalType,
+    requestedBy: string,
+    data: any,
+    targetUserId?: string,
+    targetUserEmail?: string
+  ): Promise<string> {
+    const id = randomUUID();
+    await pool.query(
+      `INSERT INTO pending_approvals (id, type, requested_by, target_user_id, target_user_email, data, status, organization_id)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)`,
+      [id, type, requestedBy, targetUserId, targetUserEmail, JSON.stringify(data), orgId]
+    );
+
+    await this.addAccessChangeLog('created', id, requestedBy, targetUserEmail, JSON.stringify(data));
+    return id;
+  }
+
+  async addDecision(
+    approvalId: string,
+    userVuid: string,
+    userEmail: string,
+    approved: boolean
+  ): Promise<boolean> {
+    try {
+      await pool.query(
+        `INSERT INTO approval_decisions (approval_id, user_vuid, user_email, decision)
+         VALUES ($1, $2, $3, $4)`,
+        [approvalId, userVuid, userEmail, approved ? 1 : 0]
+      );
+
+      await this.addAccessChangeLog(
+        approved ? 'approved' : 'denied',
+        approvalId,
+        userEmail,
+        undefined,
+        undefined
+      );
+
+      return true;
+    } catch (error) {
+      console.error('Error adding decision:', error);
+      return false;
+    }
+  }
+
+  async removeDecision(approvalId: string, userVuid: string): Promise<boolean> {
+    const result = await pool.query(
+      `DELETE FROM approval_decisions WHERE approval_id = $1 AND user_vuid = $2`,
+      [approvalId, userVuid]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async commitApproval(id: string, userEmail: string): Promise<boolean> {
+    const result = await pool.query(
+      `UPDATE pending_approvals SET status = 'committed', updated_at = NOW()
+       WHERE id = $1 AND status = 'pending'`,
+      [id]
+    );
+
+    if ((result.rowCount ?? 0) > 0) {
+      await this.addAccessChangeLog('committed', id, userEmail);
+    }
+
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async cancelApproval(id: string, userEmail: string): Promise<boolean> {
+    const result = await pool.query(
+      `UPDATE pending_approvals SET status = 'cancelled', updated_at = NOW()
+       WHERE id = $1 AND status = 'pending'`,
+      [id]
+    );
+
+    if ((result.rowCount ?? 0) > 0) {
+      await this.addAccessChangeLog('cancelled', id, userEmail);
+    }
+
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async deleteApproval(id: string, userEmail: string): Promise<boolean> {
+    const approvalResult = await pool.query(
+      `SELECT target_user_email FROM pending_approvals WHERE id = $1`,
+      [id]
+    );
+    const approval = approvalResult.rows[0];
+
+    const result = await pool.query(
+      `DELETE FROM pending_approvals WHERE id = $1`,
+      [id]
+    );
+
+    if ((result.rowCount ?? 0) > 0) {
+      await this.addAccessChangeLog('deleted', id, userEmail, approval?.target_user_email);
+    }
+
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async getApproval(id: string): Promise<PendingApproval | undefined> {
+    const { rows } = await pool.query(
+      `SELECT * FROM pending_approvals WHERE id = $1`,
+      [id]
+    );
+
+    if (rows.length === 0) return undefined;
+    const row = rows[0];
+
+    const approversResult = await pool.query(
+      `SELECT user_vuid FROM approval_decisions WHERE approval_id = $1 AND decision = 1`,
+      [id]
+    );
+    const deniersResult = await pool.query(
+      `SELECT user_vuid FROM approval_decisions WHERE approval_id = $1 AND decision = 0`,
+      [id]
+    );
+
+    return {
+      id: row.id,
+      type: row.type as ApprovalType,
+      requestedBy: row.requested_by,
+      targetUserId: row.target_user_id,
+      targetUserEmail: row.target_user_email,
+      data: row.data,
+      status: row.status as ApprovalStatus,
+      createdAt: Math.floor(new Date(row.created_at).getTime() / 1000),
+      updatedAt: row.updated_at ? Math.floor(new Date(row.updated_at).getTime() / 1000) : undefined,
+      approvedBy: approversResult.rows.map((a: any) => a.user_vuid),
+      deniedBy: deniersResult.rows.map((d: any) => d.user_vuid),
+    };
+  }
+
+  async addAccessChangeLog(
+    type: string,
+    approvalId: string,
+    userEmail: string,
+    targetUser?: string,
+    details?: string
+  ): Promise<void> {
+    await pool.query(
+      `INSERT INTO access_change_logs (type, approval_id, user_email, target_user, details)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [type, approvalId, userEmail, targetUser, details]
+    );
+  }
+
+  async getAccessChangeLogs(limit: number = 100, offset: number = 0): Promise<AccessChangeLog[]> {
+    const { rows } = await pool.query(
+      `SELECT * FROM access_change_logs ORDER BY timestamp DESC LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    return rows.map((row: any) => ({
+      id: row.id,
+      timestamp: Math.floor(new Date(row.timestamp).getTime() / 1000),
+      type: row.type,
+      approvalId: row.approval_id,
+      userEmail: row.user_email,
+      targetUser: row.target_user,
+      details: row.details,
+    }));
+  }
+}
+
+// SSH Policy types
+export interface SshPolicy {
+  roleId: string;
+  contractType: string;
+  approvalType: "implicit" | "explicit";
+  executionType: "public" | "private";
+  threshold: number;
+  policyData?: string;
+  createdAt: number;
+  updatedAt?: number;
+}
+
+export interface InsertSshPolicy {
+  roleId: string;
+  contractType: string;
+  approvalType: "implicit" | "explicit";
+  executionType: "public" | "private";
+  threshold: number;
+  policyData?: string;
+}
+
+// SSH Policy storage class
+export class PolicyStorage {
+  async upsertPolicy(policy: InsertSshPolicy): Promise<SshPolicy> {
+    const existing = await this.getPolicy(policy.roleId);
+
+    if (existing) {
+      await pool.query(
+        `UPDATE ssh_policies
+         SET contract_type = $1, approval_type = $2, execution_type = $3, threshold = $4, policy_data = $5, updated_at = NOW()
+         WHERE role_id = $6`,
+        [policy.contractType, policy.approvalType, policy.executionType, policy.threshold, policy.policyData || null, policy.roleId]
+      );
+
+      return {
+        ...policy,
+        createdAt: existing.createdAt,
+        updatedAt: Math.floor(Date.now() / 1000),
+      };
+    } else {
+      await pool.query(
+        `INSERT INTO ssh_policies (role_id, contract_type, approval_type, execution_type, threshold, policy_data)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [policy.roleId, policy.contractType, policy.approvalType, policy.executionType, policy.threshold, policy.policyData || null]
+      );
+
+      return {
+        ...policy,
+        createdAt: Math.floor(Date.now() / 1000),
+      };
+    }
+  }
+
+  async getPolicy(roleId: string): Promise<SshPolicy | undefined> {
+    const { rows } = await pool.query(
+      `SELECT * FROM ssh_policies WHERE role_id = $1`,
+      [roleId]
+    );
+
+    if (rows.length === 0) return undefined;
+    const row = rows[0];
+
+    return {
+      roleId: row.role_id,
+      contractType: row.contract_type,
+      approvalType: row.approval_type as "implicit" | "explicit",
+      executionType: row.execution_type as "public" | "private",
+      threshold: row.threshold,
+      policyData: row.policy_data || undefined,
+      createdAt: Math.floor(new Date(row.created_at).getTime() / 1000),
+      updatedAt: row.updated_at ? Math.floor(new Date(row.updated_at).getTime() / 1000) : undefined,
+    };
+  }
+
+  async getAllPolicies(orgId: string): Promise<SshPolicy[]> {
+    const { rows } = await pool.query(
+      `SELECT * FROM ssh_policies WHERE organization_id = $1 ORDER BY created_at DESC`,
+      [orgId]
+    );
+
+    return rows.map((row: any) => ({
+      roleId: row.role_id,
+      contractType: row.contract_type,
+      approvalType: row.approval_type as "implicit" | "explicit",
+      executionType: row.execution_type as "public" | "private",
+      threshold: row.threshold,
+      policyData: row.policy_data || undefined,
+      createdAt: Math.floor(new Date(row.created_at).getTime() / 1000),
+      updatedAt: row.updated_at ? Math.floor(new Date(row.updated_at).getTime() / 1000) : undefined,
+    }));
+  }
+
+  async deletePolicy(roleId: string): Promise<boolean> {
+    const result = await pool.query(
+      `DELETE FROM ssh_policies WHERE role_id = $1`,
+      [roleId]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+}
+
+// Pending SSH Policy types
+export interface PendingSshPolicy {
+  id: string;
+  roleId: string;
+  requestedBy: string;
+  requestedByEmail?: string;
+  policyRequestData: string;
+  contractCode?: string;
+  status: "pending" | "approved" | "committed" | "cancelled";
+  threshold: number;
+  createdAt: number;
+  updatedAt?: number;
+  approvalCount?: number;
+  rejectionCount?: number;
+  approvedBy?: string[];
+  deniedBy?: string[];
+  commitReady?: boolean;
+}
+
+export interface InsertPendingSshPolicy {
+  id: string;
+  roleId: string;
+  requestedBy: string;
+  requestedByEmail?: string;
+  policyRequestData: string;
+  contractCode?: string;
+  threshold?: number;
+}
+
+export interface SshPolicyDecision {
+  policyRequestId: string;
+  userVuid: string;
+  userEmail: string;
+  decision: 0 | 1;
+  createdAt: number;
+}
+
+// Pending SSH Policy storage class
+export class PendingPolicyStorage {
+  async createPendingPolicy(policy: InsertPendingSshPolicy): Promise<PendingSshPolicy> {
+    await pool.query(
+      `INSERT INTO pending_ssh_policies (id, role_id, requested_by, requested_by_email, policy_request_data, contract_code, threshold)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [policy.id, policy.roleId, policy.requestedBy, policy.requestedByEmail || null, policy.policyRequestData, policy.contractCode || null, policy.threshold || 1]
+    );
+
+    const threshold = policy.threshold || 1;
+    await pool.query(
+      `INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, details, status, approval_count, threshold)
+       VALUES ('created', $1, $2, $3, $4, 'pending', 0, $5)`,
+      [policy.id, policy.requestedByEmail || policy.requestedBy, policy.roleId, JSON.stringify({ threshold }), threshold]
+    );
+
+    return {
+      ...policy,
+      status: "pending",
+      threshold: policy.threshold || 1,
+      createdAt: Math.floor(Date.now() / 1000),
+    };
+  }
+
+  async getPendingPolicy(id: string): Promise<PendingSshPolicy | undefined> {
+    const { rows } = await pool.query(
+      `SELECT p.*,
+        (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approval_count,
+        (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 0) as rejection_count
+       FROM pending_ssh_policies p WHERE p.id = $1`,
+      [id]
+    );
+
+    if (rows.length === 0) return undefined;
+    const row = rows[0];
+
+    return {
+      id: row.id,
+      roleId: row.role_id,
+      requestedBy: row.requested_by,
+      requestedByEmail: row.requested_by_email,
+      policyRequestData: row.policy_request_data,
+      contractCode: row.contract_code,
+      status: row.status as "pending" | "approved" | "committed" | "cancelled",
+      threshold: row.threshold,
+      createdAt: Math.floor(new Date(row.created_at).getTime() / 1000),
+      updatedAt: row.updated_at ? Math.floor(new Date(row.updated_at).getTime() / 1000) : undefined,
+      approvalCount: parseInt(row.approval_count),
+      rejectionCount: parseInt(row.rejection_count),
+    };
+  }
+
+  async getAllPendingPolicies(orgId: string): Promise<PendingSshPolicy[]> {
+    const { rows } = await pool.query(
+      `SELECT p.*,
+        (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approval_count,
+        (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 0) as rejection_count,
+        (SELECT STRING_AGG(user_vuid, ',') FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approved_by,
+        (SELECT STRING_AGG(user_vuid, ',') FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 0) as denied_by
+       FROM pending_ssh_policies p
+       WHERE p.status IN ('pending', 'approved') AND p.organization_id = $1
+       ORDER BY p.created_at DESC`,
+      [orgId]
+    );
+
+    let adminPolicyBytes: Uint8Array | null = null;
+    try {
+      const adminPolicyBase64 = await getAdminPolicy();
+      adminPolicyBytes = base64ToBytes(adminPolicyBase64);
+    } catch (error) {
+      console.error("Failed to fetch admin policy:", error);
+    }
+
+    const policies = await Promise.all(rows.map(async (row: any) => {
+      const approvalCount = parseInt(row.approval_count) || 0;
+      const isCommitReady = approvalCount >= row.threshold;
+      let policyRequestData = row.policy_request_data;
+
+      if (isCommitReady && adminPolicyBytes) {
+        try {
+          const request = PolicySignRequest.decode(base64ToBytes(policyRequestData));
+          request.addPolicy(adminPolicyBytes);
+          const updatedData = bytesToBase64(request.encode());
+
+          await pool.query(
+            `UPDATE pending_ssh_policies SET policy_request_data = $1 WHERE id = $2`,
+            [updatedData, row.id]
+          );
+
+          policyRequestData = updatedData;
+        } catch (error) {
+          console.error(`Failed to add admin policy to request ${row.id}:`, error);
+        }
+      }
+
+      return {
+        id: row.id,
+        roleId: row.role_id,
+        requestedBy: row.requested_by,
+        requestedByEmail: row.requested_by_email,
+        policyRequestData,
+        contractCode: row.contract_code,
+        status: row.status as "pending" | "approved" | "committed" | "cancelled",
+        threshold: row.threshold,
+        createdAt: Math.floor(new Date(row.created_at).getTime() / 1000),
+        updatedAt: row.updated_at ? Math.floor(new Date(row.updated_at).getTime() / 1000) : undefined,
+        approvalCount,
+        rejectionCount: parseInt(row.rejection_count) || 0,
+        approvedBy: row.approved_by ? row.approved_by.split(',') : [],
+        deniedBy: row.denied_by ? row.denied_by.split(',') : [],
+        commitReady: isCommitReady,
+      };
+    }));
+
+    return policies;
+  }
+
+  async addDecision(decision: Omit<SshPolicyDecision, "createdAt">): Promise<void> {
+    await pool.query(
+      `INSERT INTO ssh_policy_decisions (policy_request_id, user_vuid, user_email, decision)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT(policy_request_id, user_vuid) DO UPDATE SET decision = EXCLUDED.decision, created_at = NOW()`,
+      [decision.policyRequestId, decision.userVuid, decision.userEmail, decision.decision]
+    );
+
+    const policy = await this.getPendingPolicy(decision.policyRequestId);
+    const logType = decision.decision === 1 ? "approved" : "denied";
+    const approvalCount = policy?.approvalCount || 0;
+    const threshold = policy?.threshold || 1;
+
+    let statusAfterAction = "pending";
+    if (decision.decision === 1 && approvalCount >= threshold) {
+      statusAfterAction = "approved";
+      await this.updateStatus(decision.policyRequestId, "approved");
+    }
+
+    await pool.query(
+      `INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [logType, decision.policyRequestId, decision.userEmail, policy?.roleId || null, statusAfterAction, approvalCount, threshold]
+    );
+  }
+
+  async updateStatus(id: string, status: "pending" | "approved" | "committed" | "cancelled"): Promise<void> {
+    await pool.query(
+      `UPDATE pending_ssh_policies SET status = $1, updated_at = NOW() WHERE id = $2`,
+      [status, id]
+    );
+  }
+
+  async getDecisions(policyRequestId: string): Promise<SshPolicyDecision[]> {
+    const { rows } = await pool.query(
+      `SELECT * FROM ssh_policy_decisions WHERE policy_request_id = $1 ORDER BY created_at DESC`,
+      [policyRequestId]
+    );
+
+    return rows.map((row: any) => ({
+      policyRequestId: row.policy_request_id,
+      userVuid: row.user_vuid,
+      userEmail: row.user_email,
+      decision: row.decision as 0 | 1,
+      createdAt: Math.floor(new Date(row.created_at).getTime() / 1000),
+    }));
+  }
+
+  async hasUserVoted(policyRequestId: string, userVuid: string): Promise<boolean> {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM ssh_policy_decisions WHERE policy_request_id = $1 AND user_vuid = $2`,
+      [policyRequestId, userVuid]
+    );
+    return rows.length > 0;
+  }
+
+  async getUserDecision(policyRequestId: string, userVuid: string): Promise<number | null> {
+    const { rows } = await pool.query(
+      `SELECT decision FROM ssh_policy_decisions WHERE policy_request_id = $1 AND user_vuid = $2`,
+      [policyRequestId, userVuid]
+    );
+    return rows.length > 0 ? rows[0].decision : null;
+  }
+
+  async updatePolicyRequest(id: string, policyRequestData: string): Promise<void> {
+    await pool.query(
+      `UPDATE pending_ssh_policies SET policy_request_data = $1 WHERE id = $2`,
+      [policyRequestData, id]
+    );
+  }
+
+  async revokeDecision(policyRequestId: string, userVuid: string): Promise<boolean> {
+    const result = await pool.query(
+      `DELETE FROM ssh_policy_decisions WHERE policy_request_id = $1 AND user_vuid = $2`,
+      [policyRequestId, userVuid]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async commitPolicy(id: string, userEmail: string): Promise<void> {
+    const policy = await this.getPendingPolicy(id);
+    if (!policy) throw new Error("Policy not found");
+    if (policy.status !== "approved") throw new Error("Policy not approved yet");
+
+    await this.updateStatus(id, "committed");
+
+    await pool.query(
+      `INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold)
+       VALUES ('committed', $1, $2, $3, 'committed', $4, $5)`,
+      [id, userEmail, policy.roleId, policy.approvalCount || 0, policy.threshold]
+    );
+  }
+
+  async cancelPolicy(id: string, userEmail: string): Promise<void> {
+    const policy = await this.getPendingPolicy(id);
+    if (!policy) throw new Error("Policy not found");
+
+    await this.updateStatus(id, "cancelled");
+
+    await pool.query(
+      `INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold)
+       VALUES ('cancelled', $1, $2, $3, 'cancelled', $4, $5)`,
+      [id, userEmail, policy.roleId, policy.approvalCount || 0, policy.threshold]
+    );
+  }
+
+  async getLogs(limit: number = 100, offset: number = 0): Promise<any[]> {
+    const { rows } = await pool.query(
+      `SELECT
+        l.*,
+        p.created_at as policy_created_at,
+        p.requested_by_email as policy_requested_by
+       FROM ssh_policy_logs l
+       LEFT JOIN pending_ssh_policies p ON l.policy_request_id = p.id
+       ORDER BY l.timestamp DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    return rows.map((row: any) => ({
+      id: row.id,
+      timestamp: Math.floor(new Date(row.timestamp).getTime() / 1000),
+      type: row.type,
+      policyRequestId: row.policy_request_id,
+      userEmail: row.user_email,
+      roleId: row.role_id,
+      details: row.details,
+      policyStatus: row.status,
+      policyThreshold: row.threshold,
+      policyCreatedAt: row.policy_created_at ? Math.floor(new Date(row.policy_created_at).getTime() / 1000) : undefined,
+      policyRequestedBy: row.policy_requested_by,
+      approvalCount: row.approval_count || 0,
+    }));
+  }
+}
+
+// Policy Template storage class
+export class TemplateStorage {
+  async createTemplate(orgId: string, template: InsertPolicyTemplate): Promise<PolicyTemplate> {
+    const id = randomUUID();
+    const now = new Date();
+
+    await db.insert(policyTemplates).values({
+      id,
+      name: template.name,
+      description: template.description,
+      csCode: template.csCode,
+      parameters: template.parameters,
+      createdBy: template.createdBy,
+      createdAt: now,
+      organizationId: orgId,
+    });
+
+    return {
+      id,
+      name: template.name,
+      description: template.description,
+      csCode: template.csCode,
+      parameters: template.parameters,
+      createdBy: template.createdBy,
+      createdAt: now,
+    };
+  }
+
+  async getTemplate(id: string): Promise<PolicyTemplate | undefined> {
+    const { rows } = await pool.query(
+      `SELECT * FROM policy_templates WHERE id = $1`,
+      [id]
+    );
+
+    if (rows.length === 0) return undefined;
+    const row = rows[0];
+
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      csCode: row.cs_code,
+      parameters: (typeof row.parameters === 'string' ? JSON.parse(row.parameters) : row.parameters) as TemplateParameter[],
+      createdBy: row.created_by,
+      createdAt: new Date(row.created_at),
+      updatedAt: row.updated_at ? new Date(row.updated_at) : undefined,
+    };
+  }
+
+  async getTemplateByName(name: string): Promise<PolicyTemplate | undefined> {
+    const { rows } = await pool.query(
+      `SELECT * FROM policy_templates WHERE name = $1`,
+      [name]
+    );
+
+    if (rows.length === 0) return undefined;
+    const row = rows[0];
+
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      csCode: row.cs_code,
+      parameters: (typeof row.parameters === 'string' ? JSON.parse(row.parameters) : row.parameters) as TemplateParameter[],
+      createdBy: row.created_by,
+      createdAt: new Date(row.created_at),
+      updatedAt: row.updated_at ? new Date(row.updated_at) : undefined,
+    };
+  }
+
+  async getAllTemplates(orgId: string): Promise<PolicyTemplate[]> {
+    const { rows } = await pool.query(
+      `SELECT * FROM policy_templates WHERE organization_id = $1 ORDER BY created_at DESC`,
+      [orgId]
+    );
+
+    return rows.map((row: any) => ({
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      csCode: row.cs_code,
+      parameters: (typeof row.parameters === 'string' ? JSON.parse(row.parameters) : row.parameters) as TemplateParameter[],
+      createdBy: row.created_by,
+      createdAt: new Date(row.created_at),
+      updatedAt: row.updated_at ? new Date(row.updated_at) : undefined,
+    }));
+  }
+
+  async updateTemplate(id: string, data: Partial<InsertPolicyTemplate>): Promise<PolicyTemplate | undefined> {
+    const existing = await this.getTemplate(id);
+    if (!existing) return undefined;
+
+    const updates: string[] = [];
+    const values: any[] = [];
+    let paramIndex = 1;
+
+    if (data.name !== undefined) {
+      updates.push(`name = $${paramIndex++}`);
+      values.push(data.name);
+    }
+    if (data.description !== undefined) {
+      updates.push(`description = $${paramIndex++}`);
+      values.push(data.description);
+    }
+    if (data.csCode !== undefined) {
+      updates.push(`cs_code = $${paramIndex++}`);
+      values.push(data.csCode);
+    }
+    if (data.parameters !== undefined) {
+      updates.push(`parameters = $${paramIndex++}`);
+      values.push(JSON.stringify(data.parameters));
+    }
+
+    if (updates.length > 0) {
+      updates.push(`updated_at = NOW()`);
+      values.push(id);
+
+      await pool.query(
+        `UPDATE policy_templates SET ${updates.join(', ')} WHERE id = $${paramIndex}`,
+        values
+      );
+    }
+
+    return this.getTemplate(id);
+  }
+
+  async deleteTemplate(id: string): Promise<boolean> {
+    const result = await pool.query(
+      `DELETE FROM policy_templates WHERE id = $1`,
+      [id]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
 }
 
 // Subscription storage class for license management
 export class SubscriptionStorage {
-  // Get the current subscription for an organization
   async getSubscription(orgId: string): Promise<Subscription | null> {
-    const row = sqlite.prepare(`
-      SELECT * FROM subscriptions WHERE organization_id = ? ORDER BY created_at DESC LIMIT 1
-    `).get(orgId) as any | undefined;
+    const [row] = await db.select().from(subscriptions)
+      .where(eq(subscriptions.organizationId, orgId))
+      .orderBy(desc(subscriptions.createdAt))
+      .limit(1);
 
     if (!row) return null;
-
-    return {
-      id: row.id,
-      tier: row.tier as SubscriptionTier,
-      stripeCustomerId: row.stripe_customer_id,
-      stripeSubscriptionId: row.stripe_subscription_id,
-      stripePriceId: row.stripe_price_id,
-      status: row.status,
-      currentPeriodEnd: row.current_period_end,
-      cancelAtPeriodEnd: !!row.cancel_at_period_end,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      organizationId: row.organization_id || DEFAULT_ORG_ID,
-    };
+    return row;
   }
 
-  // Create or update the subscription
   async upsertSubscription(orgId: string, data: Partial<InsertSubscription> & { tier?: SubscriptionTier }): Promise<Subscription> {
     const existing = await this.getSubscription(orgId);
-    const now = Math.floor(Date.now() / 1000);
+    const now = new Date();
 
     if (existing) {
-      // Update existing subscription
       const updates: string[] = [];
       const values: any[] = [];
+      let paramIndex = 1;
 
       if (data.tier !== undefined) {
-        updates.push('tier = ?');
+        updates.push(`tier = $${paramIndex++}`);
         values.push(data.tier);
       }
       if (data.stripeCustomerId !== undefined) {
-        updates.push('stripe_customer_id = ?');
+        updates.push(`stripe_customer_id = $${paramIndex++}`);
         values.push(data.stripeCustomerId);
       }
       if (data.stripeSubscriptionId !== undefined) {
-        updates.push('stripe_subscription_id = ?');
+        updates.push(`stripe_subscription_id = $${paramIndex++}`);
         values.push(data.stripeSubscriptionId);
       }
       if (data.stripePriceId !== undefined) {
-        updates.push('stripe_price_id = ?');
+        updates.push(`stripe_price_id = $${paramIndex++}`);
         values.push(data.stripePriceId);
       }
       if (data.status !== undefined) {
-        updates.push('status = ?');
+        updates.push(`status = $${paramIndex++}`);
         values.push(data.status);
       }
       if (data.currentPeriodEnd !== undefined) {
-        updates.push('current_period_end = ?');
+        updates.push(`current_period_end = $${paramIndex++}`);
         values.push(data.currentPeriodEnd);
       }
       if (data.cancelAtPeriodEnd !== undefined) {
-        updates.push('cancel_at_period_end = ?');
-        values.push(data.cancelAtPeriodEnd ? 1 : 0);
+        updates.push(`cancel_at_period_end = $${paramIndex++}`);
+        values.push(data.cancelAtPeriodEnd);
       }
 
       if (updates.length > 0) {
-        updates.push('updated_at = ?');
-        values.push(now);
+        updates.push(`updated_at = NOW()`);
         values.push(existing.id);
 
-        sqlite.prepare(`
-          UPDATE subscriptions SET ${updates.join(', ')} WHERE id = ?
-        `).run(...values);
+        await pool.query(
+          `UPDATE subscriptions SET ${updates.join(', ')} WHERE id = $${paramIndex}`,
+          values
+        );
       }
 
       return (await this.getSubscription(orgId))!;
     } else {
-      // Create new subscription
       const id = randomUUID();
-      sqlite.prepare(`
-        INSERT INTO subscriptions (id, tier, stripe_customer_id, stripe_subscription_id, stripe_price_id, status, current_period_end, cancel_at_period_end, created_at, organization_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
+      await db.insert(subscriptions).values({
         id,
-        data.tier || 'free',
-        data.stripeCustomerId || null,
-        data.stripeSubscriptionId || null,
-        data.stripePriceId || null,
-        data.status || 'active',
-        data.currentPeriodEnd || null,
-        data.cancelAtPeriodEnd ? 1 : 0,
-        now,
-        orgId
-      );
+        tier: data.tier || 'free',
+        stripeCustomerId: data.stripeCustomerId || null,
+        stripeSubscriptionId: data.stripeSubscriptionId || null,
+        stripePriceId: data.stripePriceId || null,
+        status: data.status || 'active',
+        currentPeriodEnd: data.currentPeriodEnd || null,
+        cancelAtPeriodEnd: data.cancelAtPeriodEnd || false,
+        createdAt: now,
+        organizationId: orgId,
+      });
 
       return (await this.getSubscription(orgId))!;
     }
   }
 
-  // Get current usage counts
   async getUsageCounts(orgId: string): Promise<{ users: number; servers: number }> {
-    // Count servers from local database
-    const serverCount = sqlite.prepare(`
-      SELECT COUNT(*) as count FROM servers WHERE organization_id = ?
-    `).get(orgId) as { count: number };
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) as count FROM servers WHERE organization_id = $1`,
+      [orgId]
+    );
 
-    // Note: Users are counted from TideCloak, not local DB
-    // This method returns server count; user count comes from TideCloak API
     return {
-      users: 0, // Will be filled from TideCloak
-      servers: serverCount.count,
+      users: 0,
+      servers: parseInt(rows[0].count),
     };
   }
 
-  // Get server count only (for limit checks)
   async getServerCount(orgId: string): Promise<number> {
-    const result = sqlite.prepare(`
-      SELECT COUNT(*) as count FROM servers WHERE organization_id = ?
-    `).get(orgId) as { count: number };
-    return result.count;
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) as count FROM servers WHERE organization_id = $1`,
+      [orgId]
+    );
+    return parseInt(rows[0].count);
   }
 
-  // Get enabled server count
   async getEnabledServerCount(orgId: string): Promise<number> {
-    const result = sqlite.prepare(`
-      SELECT COUNT(*) as count FROM servers WHERE enabled = 1 AND organization_id = ?
-    `).get(orgId) as { count: number };
-    return result.count;
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) as count FROM servers WHERE enabled = true AND organization_id = $1`,
+      [orgId]
+    );
+    return parseInt(rows[0].count);
   }
 
-  // Get server counts (total and enabled)
   async getServerCounts(orgId: string): Promise<{ total: number; enabled: number }> {
-    const result = sqlite.prepare(`
-      SELECT
+    const { rows } = await pool.query(
+      `SELECT
         COUNT(*) as total,
-        SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled
-      FROM servers WHERE organization_id = ?
-    `).get(orgId) as { total: number; enabled: number };
-    return { total: result.total, enabled: result.enabled || 0 };
+        SUM(CASE WHEN enabled = true THEN 1 ELSE 0 END) as enabled
+       FROM servers WHERE organization_id = $1`,
+      [orgId]
+    );
+    return { total: parseInt(rows[0].total), enabled: parseInt(rows[0].enabled) || 0 };
   }
 
-  // Check if can add a resource (user or server)
   async checkCanAdd(orgId: string, resource: 'user' | 'server', currentCount: number): Promise<LimitCheck> {
-    // If Stripe is not configured, allow unlimited resources
     if (!isStripeConfigured()) {
       return {
         allowed: true,
@@ -1941,7 +1552,6 @@ export class SubscriptionStorage {
     const tierConfig = subscriptionTiers[tier];
     const limit = resource === 'user' ? tierConfig.maxUsers : tierConfig.maxServers;
 
-    // -1 means unlimited
     const allowed = limit === -1 || currentCount < limit;
 
     return {
@@ -1953,14 +1563,12 @@ export class SubscriptionStorage {
     };
   }
 
-  // Get full license info
   async getLicenseInfo(
     orgId: string,
     userCounts: { total: number; enabled: number }
   ): Promise<LicenseInfo> {
     const serverCounts = await this.getServerCounts(orgId);
 
-    // If Stripe is not configured, return unlimited license info
     if (!isStripeConfigured()) {
       return {
         subscription: null,
@@ -1997,7 +1605,6 @@ export class SubscriptionStorage {
     const userLimit = tierConfig.maxUsers === -1 ? Infinity : tierConfig.maxUsers;
     const serverLimit = tierConfig.maxServers === -1 ? Infinity : tierConfig.maxServers;
 
-    // Calculate over-limit status
     const userOverBy = userLimit === Infinity ? 0 : Math.max(0, userCounts.enabled - userLimit);
     const serverOverBy = serverLimit === Infinity ? 0 : Math.max(0, serverCounts.enabled - serverLimit);
 
@@ -2029,19 +1636,17 @@ export class SubscriptionStorage {
     };
   }
 
-  // Update the cached over-limit status for SSH access control
   async updateOverLimitStatus(orgId: string, usersOverLimit: boolean, serversOverLimit: boolean): Promise<void> {
     const subscription = await this.getSubscription(orgId);
     if (!subscription) return;
 
-    sqlite.prepare(`
-      UPDATE subscriptions SET users_over_limit = ?, servers_over_limit = ? WHERE id = ?
-    `).run(usersOverLimit ? 1 : 0, serversOverLimit ? 1 : 0, subscription.id);
+    await pool.query(
+      `UPDATE subscriptions SET users_over_limit = $1, servers_over_limit = $2 WHERE id = $3`,
+      [usersOverLimit, serversOverLimit, subscription.id]
+    );
   }
 
-  // Check if SSH access is blocked due to being over limit
   async isSshBlocked(orgId: string): Promise<{ blocked: boolean; reason?: string }> {
-    // If Stripe is not configured, never block SSH access
     if (!isStripeConfigured()) {
       return { blocked: false };
     }
@@ -2051,21 +1656,19 @@ export class SubscriptionStorage {
       return { blocked: false };
     }
 
-    // Get the tier limits
     const tier: SubscriptionTier = (subscription.tier as SubscriptionTier) || 'free';
     const tierConfig = subscriptionTiers[tier];
     const serverLimit = tierConfig.maxServers;
 
-    // Real-time check for servers (we have this data locally)
     const serverCounts = await this.getServerCounts(orgId);
     const serversOverLimit = serverLimit !== -1 && serverCounts.enabled > serverLimit;
 
-    // Check the cached users_over_limit status (users require TideCloak API)
-    const row = sqlite.prepare(`
-      SELECT users_over_limit FROM subscriptions WHERE id = ?
-    `).get(subscription.id) as { users_over_limit: number } | undefined;
+    const { rows } = await pool.query(
+      `SELECT users_over_limit FROM subscriptions WHERE id = $1`,
+      [subscription.id]
+    );
 
-    const usersOverLimit = row?.users_over_limit === 1;
+    const usersOverLimit = rows[0]?.users_over_limit === true;
 
     if (usersOverLimit && serversOverLimit) {
       return {
@@ -2091,7 +1694,6 @@ export class SubscriptionStorage {
     return { blocked: false };
   }
 
-  // Add a billing history record
   async addBillingRecord(orgId: string, data: {
     stripeInvoiceId?: string;
     amount: number;
@@ -2104,42 +1706,25 @@ export class SubscriptionStorage {
     if (!subscription) return;
 
     const id = randomUUID();
-    const now = Math.floor(Date.now() / 1000);
-
-    sqlite.prepare(`
-      INSERT INTO billing_history (id, subscription_id, stripe_invoice_id, amount, currency, status, invoice_pdf, description, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    await db.insert(billingHistory).values({
       id,
-      subscription.id,
-      data.stripeInvoiceId || null,
-      data.amount,
-      data.currency || 'usd',
-      data.status,
-      data.invoicePdf || null,
-      data.description || null,
-      now
-    );
+      subscriptionId: subscription.id,
+      stripeInvoiceId: data.stripeInvoiceId || null,
+      amount: data.amount,
+      currency: data.currency || 'usd',
+      status: data.status,
+      invoicePdf: data.invoicePdf || null,
+      description: data.description || null,
+      createdAt: new Date(),
+      organizationId: orgId,
+    });
   }
 
-  // Get billing history
   async getBillingHistory(orgId: string, limit: number = 50): Promise<BillingHistory[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM billing_history WHERE organization_id = ? ORDER BY created_at DESC LIMIT ?
-    `).all(orgId, limit) as any[];
-
-    return rows.map(row => ({
-      id: row.id,
-      subscriptionId: row.subscription_id,
-      stripeInvoiceId: row.stripe_invoice_id,
-      amount: row.amount,
-      currency: row.currency,
-      status: row.status,
-      invoicePdf: row.invoice_pdf,
-      description: row.description,
-      createdAt: row.created_at,
-      organizationId: row.organization_id || DEFAULT_ORG_ID,
-    }));
+    return await db.select().from(billingHistory)
+      .where(eq(billingHistory.organizationId, orgId))
+      .orderBy(desc(billingHistory.createdAt))
+      .limit(limit);
   }
 }
 
@@ -2175,25 +1760,14 @@ export interface InsertRecording {
 
 // Recording storage class for session recordings
 export class RecordingStorage {
-  // Create a new recording
   async createRecording(data: InsertRecording): Promise<Recording> {
     const id = randomUUID();
-    const now = Math.floor(Date.now() / 1000);
+    const now = new Date();
 
-    sqlite.prepare(`
-      INSERT INTO recordings (id, session_id, server_id, server_name, user_id, user_email, ssh_user, started_at, terminal_width, terminal_height)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      data.sessionId,
-      data.serverId,
-      data.serverName,
-      data.userId,
-      data.userEmail,
-      data.sshUser,
-      now,
-      data.terminalWidth || 80,
-      data.terminalHeight || 24
+    await pool.query(
+      `INSERT INTO recordings (id, session_id, server_id, server_name, user_id, user_email, ssh_user, started_at, terminal_width, terminal_height)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [id, data.sessionId, data.serverId, data.serverName, data.userId, data.userEmail, data.sshUser, now, data.terminalWidth || 80, data.terminalHeight || 24]
     );
 
     return {
@@ -2204,7 +1778,7 @@ export class RecordingStorage {
       userId: data.userId,
       userEmail: data.userEmail,
       sshUser: data.sshUser,
-      startedAt: new Date(now * 1000),
+      startedAt: now,
       endedAt: null,
       duration: null,
       terminalWidth: data.terminalWidth || 80,
@@ -2215,129 +1789,116 @@ export class RecordingStorage {
     };
   }
 
-  // Append data to a recording (asciicast v2 format - JSON lines)
   async appendData(id: string, eventData: string): Promise<void> {
-    sqlite.prepare(`
-      UPDATE recordings SET data = data || ?, file_size = file_size + ? WHERE id = ?
-    `).run(eventData, Buffer.byteLength(eventData, 'utf8'), id);
+    await pool.query(
+      `UPDATE recordings SET data = data || $1, file_size = file_size + $2 WHERE id = $3`,
+      [eventData, Buffer.byteLength(eventData, 'utf8'), id]
+    );
   }
 
-  // Append text content for searchability
   async appendTextContent(id: string, text: string): Promise<void> {
-    sqlite.prepare(`
-      UPDATE recordings SET text_content = text_content || ? WHERE id = ?
-    `).run(text, id);
+    await pool.query(
+      `UPDATE recordings SET text_content = text_content || $1 WHERE id = $2`,
+      [text, id]
+    );
   }
 
-  // Finalize a recording (set end time and calculate duration)
   async finalizeRecording(id: string): Promise<void> {
-    const now = Math.floor(Date.now() / 1000);
+    const now = new Date();
 
-    // Get start time to calculate duration
-    const row = sqlite.prepare(`
-      SELECT started_at FROM recordings WHERE id = ?
-    `).get(id) as { started_at: number } | undefined;
+    const { rows } = await pool.query(
+      `SELECT started_at FROM recordings WHERE id = $1`,
+      [id]
+    );
 
-    if (row) {
-      const duration = now - row.started_at;
-      sqlite.prepare(`
-        UPDATE recordings SET ended_at = ?, duration = ? WHERE id = ?
-      `).run(now, duration, id);
+    if (rows.length > 0) {
+      const startedAt = new Date(rows[0].started_at);
+      const duration = Math.floor((now.getTime() - startedAt.getTime()) / 1000);
+      await pool.query(
+        `UPDATE recordings SET ended_at = $1, duration = $2 WHERE id = $3`,
+        [now, duration, id]
+      );
     }
   }
 
-  // Get recording by ID
   async getRecording(id: string): Promise<Recording | undefined> {
-    const row = sqlite.prepare(`
-      SELECT * FROM recordings WHERE id = ?
-    `).get(id) as any | undefined;
+    const { rows } = await pool.query(
+      `SELECT * FROM recordings WHERE id = $1`,
+      [id]
+    );
 
-    if (!row) return undefined;
-
-    return this.mapRow(row);
+    if (rows.length === 0) return undefined;
+    return this.mapRow(rows[0]);
   }
 
-  // Get recording by session ID
   async getRecordingBySessionId(sessionId: string): Promise<Recording | undefined> {
-    const row = sqlite.prepare(`
-      SELECT * FROM recordings WHERE session_id = ?
-    `).get(sessionId) as any | undefined;
+    const { rows } = await pool.query(
+      `SELECT * FROM recordings WHERE session_id = $1`,
+      [sessionId]
+    );
 
-    if (!row) return undefined;
-
-    return this.mapRow(row);
+    if (rows.length === 0) return undefined;
+    return this.mapRow(rows[0]);
   }
 
-  // Get all recordings (paginated)
   async getRecordings(orgId: string, limit: number = 50, offset: number = 0): Promise<Recording[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM recordings WHERE organization_id = ? ORDER BY started_at DESC LIMIT ? OFFSET ?
-    `).all(orgId, limit, offset) as any[];
-
-    return rows.map(row => this.mapRow(row));
+    const { rows } = await pool.query(
+      `SELECT * FROM recordings WHERE organization_id = $1 ORDER BY started_at DESC LIMIT $2 OFFSET $3`,
+      [orgId, limit, offset]
+    );
+    return rows.map((row: any) => this.mapRow(row));
   }
 
-  // Get recordings by server ID
   async getRecordingsByServer(serverId: string, limit: number = 50): Promise<Recording[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM recordings WHERE server_id = ? ORDER BY started_at DESC LIMIT ?
-    `).all(serverId, limit) as any[];
-
-    return rows.map(row => this.mapRow(row));
+    const { rows } = await pool.query(
+      `SELECT * FROM recordings WHERE server_id = $1 ORDER BY started_at DESC LIMIT $2`,
+      [serverId, limit]
+    );
+    return rows.map((row: any) => this.mapRow(row));
   }
 
-  // Get recordings by user ID
   async getRecordingsByUser(userId: string, limit: number = 50): Promise<Recording[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM recordings WHERE user_id = ? ORDER BY started_at DESC LIMIT ?
-    `).all(userId, limit) as any[];
-
-    return rows.map(row => this.mapRow(row));
+    const { rows } = await pool.query(
+      `SELECT * FROM recordings WHERE user_id = $1 ORDER BY started_at DESC LIMIT $2`,
+      [userId, limit]
+    );
+    return rows.map((row: any) => this.mapRow(row));
   }
 
-  // Search recordings by text content
   async searchRecordings(orgId: string, query: string, limit: number = 50): Promise<Recording[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM recordings WHERE organization_id = ? AND text_content LIKE ? ORDER BY started_at DESC LIMIT ?
-    `).all(orgId, `%${query}%`, limit) as any[];
-
-    return rows.map(row => this.mapRow(row));
+    const { rows } = await pool.query(
+      `SELECT * FROM recordings WHERE organization_id = $1 AND text_content LIKE $2 ORDER BY started_at DESC LIMIT $3`,
+      [orgId, `%${query}%`, limit]
+    );
+    return rows.map((row: any) => this.mapRow(row));
   }
 
-  // Get recording count
   async getRecordingCount(): Promise<number> {
-    const row = sqlite.prepare(`
-      SELECT COUNT(*) as count FROM recordings
-    `).get() as { count: number };
-    return row.count;
+    const { rows } = await pool.query(`SELECT COUNT(*) as count FROM recordings`);
+    return parseInt(rows[0].count);
   }
 
-  // Get total storage used by recordings
   async getTotalStorageBytes(): Promise<number> {
-    const row = sqlite.prepare(`
-      SELECT SUM(file_size) as total FROM recordings
-    `).get() as { total: number | null };
-    return row.total || 0;
+    const { rows } = await pool.query(`SELECT SUM(file_size) as total FROM recordings`);
+    return parseInt(rows[0].total) || 0;
   }
 
-  // Delete a recording
   async deleteRecording(id: string): Promise<boolean> {
-    const result = sqlite.prepare(`
-      DELETE FROM recordings WHERE id = ?
-    `).run(id);
-    return result.changes > 0;
+    const result = await pool.query(
+      `DELETE FROM recordings WHERE id = $1`,
+      [id]
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
-  // Delete recordings older than a certain date
   async deleteRecordingsOlderThan(date: Date): Promise<number> {
-    const timestamp = Math.floor(date.getTime() / 1000);
-    const result = sqlite.prepare(`
-      DELETE FROM recordings WHERE started_at < ?
-    `).run(timestamp);
-    return result.changes;
+    const result = await pool.query(
+      `DELETE FROM recordings WHERE started_at < $1`,
+      [date]
+    );
+    return result.rowCount ?? 0;
   }
 
-  // Map database row to Recording type
   private mapRow(row: any): Recording {
     return {
       id: row.id,
@@ -2347,8 +1908,8 @@ export class RecordingStorage {
       userId: row.user_id,
       userEmail: row.user_email,
       sshUser: row.ssh_user,
-      startedAt: new Date(row.started_at * 1000),
-      endedAt: row.ended_at ? new Date(row.ended_at * 1000) : null,
+      startedAt: new Date(row.started_at),
+      endedAt: row.ended_at ? new Date(row.ended_at) : null,
       duration: row.duration,
       terminalWidth: row.terminal_width,
       terminalHeight: row.terminal_height,
@@ -2376,31 +1937,27 @@ export interface InsertFileOperation {
 }
 
 export class FileOperationStorage {
-  // Log a file operation
   async logOperation(orgId: string, data: InsertFileOperation): Promise<FileOperation> {
     const id = randomUUID();
-    const now = Math.floor(Date.now() / 1000);
+    const now = new Date();
 
-    sqlite.prepare(`
-      INSERT INTO file_operations (id, session_id, server_id, user_id, user_email, ssh_user, operation, path, target_path, file_size, mode, status, error_message, timestamp, organization_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    await db.insert(fileOperations).values({
       id,
-      data.sessionId,
-      data.serverId,
-      data.userId,
-      data.userEmail || null,
-      data.sshUser,
-      data.operation,
-      data.path,
-      data.targetPath || null,
-      data.fileSize || null,
-      data.mode,
-      data.status,
-      data.errorMessage || null,
-      now,
-      orgId
-    );
+      sessionId: data.sessionId,
+      serverId: data.serverId,
+      userId: data.userId,
+      userEmail: data.userEmail || null,
+      sshUser: data.sshUser,
+      operation: data.operation,
+      path: data.path,
+      targetPath: data.targetPath || null,
+      fileSize: data.fileSize || null,
+      mode: data.mode,
+      status: data.status,
+      errorMessage: data.errorMessage || null,
+      timestamp: now,
+      organizationId: orgId,
+    });
 
     return {
       id,
@@ -2416,111 +1973,72 @@ export class FileOperationStorage {
       mode: data.mode,
       status: data.status,
       errorMessage: data.errorMessage || null,
-      timestamp: new Date(now * 1000),
+      timestamp: now,
       organizationId: orgId,
     };
   }
 
-  // Get file operations by session ID
   async getOperationsBySession(sessionId: string): Promise<FileOperation[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM file_operations WHERE session_id = ? ORDER BY timestamp DESC
-    `).all(sessionId) as any[];
-
-    return rows.map(row => this.mapRow(row));
+    return await db.select().from(fileOperations)
+      .where(eq(fileOperations.sessionId, sessionId))
+      .orderBy(desc(fileOperations.timestamp));
   }
 
-  // Get file operations by server ID
   async getOperationsByServer(serverId: string, limit: number = 100): Promise<FileOperation[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM file_operations WHERE server_id = ? ORDER BY timestamp DESC LIMIT ?
-    `).all(serverId, limit) as any[];
-
-    return rows.map(row => this.mapRow(row));
+    return await db.select().from(fileOperations)
+      .where(eq(fileOperations.serverId, serverId))
+      .orderBy(desc(fileOperations.timestamp))
+      .limit(limit);
   }
 
-  // Get file operations by user ID
   async getOperationsByUser(userId: string, limit: number = 100): Promise<FileOperation[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM file_operations WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?
-    `).all(userId, limit) as any[];
-
-    return rows.map(row => this.mapRow(row));
+    return await db.select().from(fileOperations)
+      .where(eq(fileOperations.userId, userId))
+      .orderBy(desc(fileOperations.timestamp))
+      .limit(limit);
   }
 
-  // Get all file operations (paginated)
   async getOperations(orgId: string, limit: number = 100, offset: number = 0): Promise<FileOperation[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM file_operations WHERE organization_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?
-    `).all(orgId, limit, offset) as any[];
-
-    return rows.map(row => this.mapRow(row));
+    return await db.select().from(fileOperations)
+      .where(eq(fileOperations.organizationId, orgId))
+      .orderBy(desc(fileOperations.timestamp))
+      .limit(limit)
+      .offset(offset);
   }
 
-  // Get operation count
   async getOperationCount(): Promise<number> {
-    const row = sqlite.prepare(`
-      SELECT COUNT(*) as count FROM file_operations
-    `).get() as { count: number };
-    return row.count;
+    const { rows } = await pool.query(`SELECT COUNT(*) as count FROM file_operations`);
+    return parseInt(rows[0].count);
   }
 
-  // Delete operations older than a certain date
   async deleteOperationsOlderThan(date: Date): Promise<number> {
-    const timestamp = Math.floor(date.getTime() / 1000);
-    const result = sqlite.prepare(`
-      DELETE FROM file_operations WHERE timestamp < ?
-    `).run(timestamp);
-    return result.changes;
-  }
-
-  // Map database row to FileOperation type
-  private mapRow(row: any): FileOperation {
-    return {
-      id: row.id,
-      sessionId: row.session_id,
-      serverId: row.server_id,
-      userId: row.user_id,
-      userEmail: row.user_email,
-      sshUser: row.ssh_user,
-      operation: row.operation as FileOperationType,
-      path: row.path,
-      targetPath: row.target_path,
-      fileSize: row.file_size,
-      mode: row.mode as FileOperationMode,
-      status: row.status as FileOperationStatus,
-      errorMessage: row.error_message,
-      timestamp: new Date(row.timestamp * 1000),
-      organizationId: row.organization_id || DEFAULT_ORG_ID,
-    };
+    const result = await db.delete(fileOperations)
+      .where(lt(fileOperations.timestamp, date))
+      .returning({ id: fileOperations.id });
+    return result.length;
   }
 }
 
 // Bridge storage class for SSH bridge/relay endpoints
 export class BridgeStorage {
-  // Create a new bridge
   async createBridge(orgId: string, data: InsertBridge): Promise<Bridge> {
     const id = randomUUID();
-    const now = Math.floor(Date.now() / 1000);
+    const now = new Date();
 
-    // If this bridge is being set as default, unset any existing default within the org
     if (data.isDefault) {
-      sqlite.prepare(`UPDATE bridges SET is_default = 0 WHERE organization_id = ?`).run(orgId);
+      await pool.query(`UPDATE bridges SET is_default = false WHERE organization_id = $1`, [orgId]);
     }
 
-    sqlite.prepare(`
-      INSERT INTO bridges (id, name, url, description, enabled, is_default, created_at, organization_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    await db.insert(bridges).values({
       id,
-      data.name,
-      data.url,
-      data.description || null,
-      data.enabled !== false ? 1 : 0,
-      data.isDefault ? 1 : 0,
-      now,
-      orgId
-    );
+      name: data.name,
+      url: data.url,
+      description: data.description || null,
+      enabled: data.enabled !== false,
+      isDefault: data.isDefault || false,
+      createdAt: now,
+      organizationId: orgId,
+    });
 
     return {
       id,
@@ -2529,125 +2047,93 @@ export class BridgeStorage {
       description: data.description || null,
       enabled: data.enabled !== false,
       isDefault: data.isDefault || false,
-      createdAt: new Date(now * 1000),
+      createdAt: now,
       organizationId: orgId,
     };
   }
 
-  // Get bridge by ID
   async getBridge(id: string): Promise<Bridge | undefined> {
-    const row = sqlite.prepare(`
-      SELECT * FROM bridges WHERE id = ?
-    `).get(id) as any | undefined;
-
-    if (!row) return undefined;
-
-    return this.mapRow(row);
+    const [result] = await db.select().from(bridges).where(eq(bridges.id, id)).limit(1);
+    return result;
   }
 
-  // Get the default bridge (optionally filtered by organization)
   async getDefaultBridge(orgId?: string): Promise<Bridge | undefined> {
-    let row;
     if (orgId) {
-      row = sqlite.prepare(`
-        SELECT * FROM bridges WHERE is_default = 1 AND enabled = 1 AND organization_id = ? LIMIT 1
-      `).get(orgId) as any | undefined;
+      const [result] = await db.select().from(bridges)
+        .where(and(eq(bridges.isDefault, true), eq(bridges.enabled, true), eq(bridges.organizationId, orgId)))
+        .limit(1);
+      return result;
     } else {
-      // Fallback to global default bridge (for backwards compatibility)
-      row = sqlite.prepare(`
-        SELECT * FROM bridges WHERE is_default = 1 AND enabled = 1 LIMIT 1
-      `).get() as any | undefined;
+      const [result] = await db.select().from(bridges)
+        .where(and(eq(bridges.isDefault, true), eq(bridges.enabled, true)))
+        .limit(1);
+      return result;
     }
-
-    if (!row) return undefined;
-
-    return this.mapRow(row);
   }
 
-  // Get all bridges
   async getBridges(orgId: string): Promise<Bridge[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM bridges WHERE organization_id = ? ORDER BY is_default DESC, name ASC
-    `).all(orgId) as any[];
-
-    return rows.map(row => this.mapRow(row));
+    return await db.select().from(bridges)
+      .where(eq(bridges.organizationId, orgId))
+      .orderBy(desc(bridges.isDefault));
   }
 
-  // Get enabled bridges
   async getEnabledBridges(orgId: string): Promise<Bridge[]> {
-    const rows = sqlite.prepare(`
-      SELECT * FROM bridges WHERE enabled = 1 AND organization_id = ? ORDER BY is_default DESC, name ASC
-    `).all(orgId) as any[];
-
-    return rows.map(row => this.mapRow(row));
+    return await db.select().from(bridges)
+      .where(and(eq(bridges.enabled, true), eq(bridges.organizationId, orgId)))
+      .orderBy(desc(bridges.isDefault));
   }
 
-  // Update a bridge
   async updateBridge(id: string, data: Partial<InsertBridge>): Promise<Bridge | undefined> {
     const existing = await this.getBridge(id);
     if (!existing) return undefined;
 
     const updates: string[] = [];
     const values: any[] = [];
+    let paramIndex = 1;
 
     if (data.name !== undefined) {
-      updates.push('name = ?');
+      updates.push(`name = $${paramIndex++}`);
       values.push(data.name);
     }
     if (data.url !== undefined) {
-      updates.push('url = ?');
+      updates.push(`url = $${paramIndex++}`);
       values.push(data.url);
     }
     if (data.description !== undefined) {
-      updates.push('description = ?');
+      updates.push(`description = $${paramIndex++}`);
       values.push(data.description || null);
     }
     if (data.enabled !== undefined) {
-      updates.push('enabled = ?');
-      values.push(data.enabled ? 1 : 0);
+      updates.push(`enabled = $${paramIndex++}`);
+      values.push(data.enabled);
     }
     if (data.isDefault !== undefined) {
-      // If setting as default, unset any existing default first
       if (data.isDefault) {
-        sqlite.prepare(`UPDATE bridges SET is_default = 0`).run();
+        await pool.query(`UPDATE bridges SET is_default = false`);
       }
-      updates.push('is_default = ?');
-      values.push(data.isDefault ? 1 : 0);
+      updates.push(`is_default = $${paramIndex++}`);
+      values.push(data.isDefault);
     }
 
     if (updates.length > 0) {
       values.push(id);
-      sqlite.prepare(`
-        UPDATE bridges SET ${updates.join(', ')} WHERE id = ?
-      `).run(...values);
+      await pool.query(
+        `UPDATE bridges SET ${updates.join(', ')} WHERE id = $${paramIndex}`,
+        values
+      );
     }
 
     return this.getBridge(id);
   }
 
-  // Delete a bridge
   async deleteBridge(id: string): Promise<boolean> {
-    // First, remove this bridge from any servers using it
-    sqlite.prepare(`UPDATE servers SET bridge_id = NULL WHERE bridge_id = ?`).run(id);
+    await pool.query(`UPDATE servers SET bridge_id = NULL WHERE bridge_id = $1`, [id]);
 
-    const result = sqlite.prepare(`
-      DELETE FROM bridges WHERE id = ?
-    `).run(id);
-    return result.changes > 0;
-  }
-
-  // Map database row to Bridge type
-  private mapRow(row: any): Bridge {
-    return {
-      id: row.id,
-      name: row.name,
-      url: row.url,
-      description: row.description,
-      enabled: !!row.enabled,
-      isDefault: !!row.is_default,
-      createdAt: new Date(row.created_at * 1000),
-      organizationId: row.organization_id || DEFAULT_ORG_ID,
-    };
+    const result = await pool.query(
+      `DELETE FROM bridges WHERE id = $1`,
+      [id]
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 }
 
@@ -2657,79 +2143,78 @@ export class OrganizationStorage {
     const id = randomUUID();
     const now = new Date();
     const org: Organization = { id, name, slug, createdAt: now, updatedAt: null };
-    db.insert(organizations).values(org).run();
+    await db.insert(organizations).values(org);
     return org;
   }
 
   async getOrganization(id: string): Promise<Organization | undefined> {
-    return db.select().from(organizations).where(eq(organizations.id, id)).get();
+    const [result] = await db.select().from(organizations).where(eq(organizations.id, id)).limit(1);
+    return result;
   }
 
   async getOrganizationBySlug(slug: string): Promise<Organization | undefined> {
-    return db.select().from(organizations).where(eq(organizations.slug, slug)).get();
+    const [result] = await db.select().from(organizations).where(eq(organizations.slug, slug)).limit(1);
+    return result;
   }
 
   async listOrganizations(): Promise<Organization[]> {
-    return db.select().from(organizations).all();
+    return await db.select().from(organizations);
   }
 
   async updateOrganization(id: string, data: Partial<Pick<Organization, "name" | "slug">>): Promise<Organization | undefined> {
     const existing = await this.getOrganization(id);
     if (!existing) return undefined;
     const updated = { ...existing, ...data, updatedAt: new Date() };
-    db.update(organizations).set(updated).where(eq(organizations.id, id)).run();
+    await db.update(organizations).set(updated).where(eq(organizations.id, id));
     return updated;
   }
 
   async deleteOrganization(id: string): Promise<boolean> {
-    const result = db.delete(organizations).where(eq(organizations.id, id)).run();
-    return result.changes > 0;
+    const result = await db.delete(organizations).where(eq(organizations.id, id)).returning({ id: organizations.id });
+    return result.length > 0;
   }
 
   async addUserToOrg(orgId: string, userId: string, role: OrgRole = "user"): Promise<OrganizationUser> {
     const id = randomUUID();
     const now = new Date();
     const membership: OrganizationUser = { id, organizationId: orgId, userId, role, joinedAt: now };
-    db.insert(organizationUsers).values(membership).run();
+    await db.insert(organizationUsers).values(membership);
     return membership;
   }
 
   async removeUserFromOrg(orgId: string, userId: string): Promise<boolean> {
-    const result = db
+    const result = await db
       .delete(organizationUsers)
       .where(and(eq(organizationUsers.organizationId, orgId), eq(organizationUsers.userId, userId)))
-      .run();
-    return result.changes > 0;
+      .returning({ id: organizationUsers.id });
+    return result.length > 0;
   }
 
   async getOrgUsers(orgId: string): Promise<OrganizationUser[]> {
-    return db
+    return await db
       .select()
       .from(organizationUsers)
-      .where(eq(organizationUsers.organizationId, orgId))
-      .all();
+      .where(eq(organizationUsers.organizationId, orgId));
   }
 
   async getUserOrgs(userId: string): Promise<OrganizationUser[]> {
-    return db
+    return await db
       .select()
       .from(organizationUsers)
-      .where(eq(organizationUsers.userId, userId))
-      .all();
+      .where(eq(organizationUsers.userId, userId));
   }
 
   async updateUserOrgRole(orgId: string, userId: string, role: OrgRole): Promise<OrganizationUser | undefined> {
-    const existing = db
+    const [existing] = await db
       .select()
       .from(organizationUsers)
       .where(and(eq(organizationUsers.organizationId, orgId), eq(organizationUsers.userId, userId)))
-      .get();
+      .limit(1);
     if (!existing) return undefined;
     const updated = { ...existing, role };
-    db.update(organizationUsers)
+    await db.update(organizationUsers)
       .set({ role })
-      .where(and(eq(organizationUsers.organizationId, orgId), eq(organizationUsers.userId, userId)))
-      .run();
+      .where(and(eq(organizationUsers.organizationId, orgId), eq(organizationUsers.userId, userId)));
     return updated;
   }
 }
@@ -2754,32 +2239,33 @@ export class EnterpriseLeadStorage {
       createdAt: now,
       updatedAt: null,
     };
-    db.insert(enterpriseLeads).values(lead).run();
+    await db.insert(enterpriseLeads).values(lead);
     return lead;
   }
 
   async getLead(id: string): Promise<EnterpriseLead | undefined> {
-    return db.select().from(enterpriseLeads).where(eq(enterpriseLeads.id, id)).get();
+    const [result] = await db.select().from(enterpriseLeads).where(eq(enterpriseLeads.id, id)).limit(1);
+    return result;
   }
 
   async listLeads(status?: string): Promise<EnterpriseLead[]> {
     if (status) {
-      return db.select().from(enterpriseLeads).where(eq(enterpriseLeads.status, status)).orderBy(desc(enterpriseLeads.createdAt)).all();
+      return await db.select().from(enterpriseLeads).where(eq(enterpriseLeads.status, status)).orderBy(desc(enterpriseLeads.createdAt));
     }
-    return db.select().from(enterpriseLeads).orderBy(desc(enterpriseLeads.createdAt)).all();
+    return await db.select().from(enterpriseLeads).orderBy(desc(enterpriseLeads.createdAt));
   }
 
   async updateLead(id: string, data: Partial<Pick<EnterpriseLead, "status" | "notes">>): Promise<EnterpriseLead | undefined> {
     const existing = await this.getLead(id);
     if (!existing) return undefined;
     const updated = { ...existing, ...data, updatedAt: new Date() };
-    db.update(enterpriseLeads).set(updated).where(eq(enterpriseLeads.id, id)).run();
+    await db.update(enterpriseLeads).set(updated).where(eq(enterpriseLeads.id, id));
     return updated;
   }
 
   async deleteLead(id: string): Promise<boolean> {
-    const result = db.delete(enterpriseLeads).where(eq(enterpriseLeads.id, id)).run();
-    return result.changes > 0;
+    const result = await db.delete(enterpriseLeads).where(eq(enterpriseLeads.id, id)).returning({ id: enterpriseLeads.id });
+    return result.length > 0;
   }
 }
 

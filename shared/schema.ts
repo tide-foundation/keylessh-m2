@@ -1,63 +1,65 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { pgTable, text, integer, boolean, timestamp, jsonb, serial, unique } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
 // Organizations table
-export const organizations = sqliteTable("organizations", {
+export const organizations = pgTable("organizations", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   slug: text("slug").notNull().unique(),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }),
 });
 
 // Organization membership (user ↔ org with role)
-export const organizationUsers = sqliteTable("organization_users", {
+export const organizationUsers = pgTable("organization_users", {
   id: text("id").primaryKey(),
   organizationId: text("organization_id").notNull(),
   userId: text("user_id").notNull(),
   role: text("role").notNull().default("user"), // "global-admin" | "org-admin" | "user"
-  joinedAt: integer("joined_at", { mode: "timestamp" }).notNull(),
-});
+  joinedAt: timestamp("joined_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  unique("uq_org_user").on(table.organizationId, table.userId),
+]);
 
-export const users = sqliteTable("users", {
+export const users = pgTable("users", {
   id: text("id").primaryKey(),
   username: text("username").notNull().unique(),
   email: text("email").notNull(),
   role: text("role").notNull().default("user"),
-  allowedServers: text("allowed_servers", { mode: "json" }).$type<string[]>().notNull().default([]),
+  allowedServers: jsonb("allowed_servers").$type<string[]>().notNull().default([]),
 });
 
 // SSH bridges - WebSocket-to-TCP relay endpoints
-export const bridges = sqliteTable("bridges", {
+export const bridges = pgTable("bridges", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   url: text("url").notNull(), // WebSocket URL, e.g., wss://bridge.example.com/ws/tcp
   description: text("description"),
-  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
-  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  isDefault: boolean("is_default").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   organizationId: text("organization_id").notNull().default("default"),
 });
 
-export const servers = sqliteTable("servers", {
+export const servers = pgTable("servers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   host: text("host").notNull(),
   port: integer("port").notNull().default(22),
   environment: text("environment").notNull().default("production"),
-  tags: text("tags", { mode: "json" }).$type<string[]>().notNull().default([]),
-  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
-  sshUsers: text("ssh_users", { mode: "json" }).$type<string[]>().notNull().default([]),
+  tags: jsonb("tags").$type<string[]>().notNull().default([]),
+  enabled: boolean("enabled").notNull().default(true),
+  sshUsers: jsonb("ssh_users").$type<string[]>().notNull().default([]),
   // Session recording settings
-  recordingEnabled: integer("recording_enabled", { mode: "boolean" }).notNull().default(false),
-  recordedUsers: text("recorded_users", { mode: "json" }).$type<string[]>().notNull().default([]), // Empty = all users when enabled
+  recordingEnabled: boolean("recording_enabled").notNull().default(false),
+  recordedUsers: jsonb("recorded_users").$type<string[]>().notNull().default([]), // Empty = all users when enabled
   // Bridge association - null means use default/embedded bridge
   bridgeId: text("bridge_id"),
   organizationId: text("organization_id").notNull().default("default"),
 });
 
-export const sessions = sqliteTable("sessions", {
+export const sessions = pgTable("sessions", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),
   userUsername: text("user_username"),
@@ -65,14 +67,14 @@ export const sessions = sqliteTable("sessions", {
   serverId: text("server_id").notNull(),
   sshUser: text("ssh_user").notNull(),
   status: text("status").notNull().default("active"),
-  startedAt: integer("started_at", { mode: "timestamp" }).notNull(),
-  endedAt: integer("ended_at", { mode: "timestamp" }),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  endedAt: timestamp("ended_at", { withTimezone: true }),
   recordingId: text("recording_id"), // Link to recording if session was recorded
   organizationId: text("organization_id").notNull().default("default"),
 });
 
 // File operations log - tracks SFTP/SCP file transfers
-export const fileOperations = sqliteTable("file_operations", {
+export const fileOperations = pgTable("file_operations", {
   id: text("id").primaryKey(),
   sessionId: text("session_id").notNull(),
   serverId: text("server_id").notNull(),
@@ -86,12 +88,12 @@ export const fileOperations = sqliteTable("file_operations", {
   mode: text("mode").notNull(), // "sftp" | "scp"
   status: text("status").notNull(), // "success" | "error"
   errorMessage: text("error_message"),
-  timestamp: integer("timestamp", { mode: "timestamp" }).notNull(),
+  timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
   organizationId: text("organization_id").notNull().default("default"),
 });
 
 // Session recordings table - stores terminal I/O for playback
-export const recordings = sqliteTable("recordings", {
+export const recordings = pgTable("recordings", {
   id: text("id").primaryKey(),
   sessionId: text("session_id").notNull(),
   serverId: text("server_id").notNull(),
@@ -99,8 +101,8 @@ export const recordings = sqliteTable("recordings", {
   userId: text("user_id").notNull(),
   userEmail: text("user_email").notNull(),
   sshUser: text("ssh_user").notNull(),
-  startedAt: integer("started_at", { mode: "timestamp" }).notNull(),
-  endedAt: integer("ended_at", { mode: "timestamp" }),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  endedAt: timestamp("ended_at", { withTimezone: true }),
   duration: integer("duration"), // Duration in seconds
   terminalWidth: integer("terminal_width").notNull().default(80),
   terminalHeight: integer("terminal_height").notNull().default(24),
@@ -123,7 +125,7 @@ export type SubscriptionTier = keyof typeof subscriptionTiers;
 export type SubscriptionStatus = 'active' | 'canceled' | 'past_due' | 'trialing';
 
 // Organization subscription table
-export const subscriptions = sqliteTable("subscriptions", {
+export const subscriptions = pgTable("subscriptions", {
   id: text("id").primaryKey(),
   tier: text("tier").notNull().default("free"),
   stripeCustomerId: text("stripe_customer_id"),
@@ -131,14 +133,14 @@ export const subscriptions = sqliteTable("subscriptions", {
   stripePriceId: text("stripe_price_id"),
   status: text("status").notNull().default("active"),
   currentPeriodEnd: integer("current_period_end"),
-  cancelAtPeriodEnd: integer("cancel_at_period_end", { mode: "boolean" }).default(false),
-  createdAt: integer("created_at").notNull(),
-  updatedAt: integer("updated_at"),
+  cancelAtPeriodEnd: boolean("cancel_at_period_end").default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }),
   organizationId: text("organization_id").notNull().default("default"),
 });
 
 // Billing history table
-export const billingHistory = sqliteTable("billing_history", {
+export const billingHistory = pgTable("billing_history", {
   id: text("id").primaryKey(),
   subscriptionId: text("subscription_id").notNull(),
   stripeInvoiceId: text("stripe_invoice_id"),
@@ -147,12 +149,12 @@ export const billingHistory = sqliteTable("billing_history", {
   status: text("status").notNull(), // paid, open, void
   invoicePdf: text("invoice_pdf"),
   description: text("description"),
-  createdAt: integer("created_at").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   organizationId: text("organization_id").notNull().default("default"),
 });
 
 // Enterprise leads - contact form submissions for enterprise inquiries
-export const enterpriseLeads = sqliteTable("enterprise_leads", {
+export const enterpriseLeads = pgTable("enterprise_leads", {
   id: text("id").primaryKey(),
   companyName: text("company_name").notNull(),
   contactEmail: text("contact_email").notNull(),
@@ -164,9 +166,121 @@ export const enterpriseLeads = sqliteTable("enterprise_leads", {
   useCase: text("use_case"),
   status: text("status").notNull().default("new"), // "new", "contacted", "qualified", "converted", "closed"
   notes: text("notes"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }),
 });
+
+// ============================================
+// Approval & Policy tables (previously raw SQL)
+// ============================================
+
+// Pending approvals for user/role changes
+export const pendingApprovals = pgTable("pending_approvals", {
+  id: text("id").primaryKey(),
+  type: text("type").notNull(), // 'user_create', 'user_update', 'user_delete', 'role_assign', 'role_remove'
+  requestedBy: text("requested_by").notNull(),
+  targetUserId: text("target_user_id"),
+  targetUserEmail: text("target_user_email"),
+  data: text("data").notNull(),
+  status: text("status").notNull().default("pending"), // 'pending', 'approved', 'denied', 'committed', 'cancelled'
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }),
+  organizationId: text("organization_id").notNull().default("default"),
+});
+
+// Approval decisions (votes)
+export const approvalDecisions = pgTable("approval_decisions", {
+  id: serial("id").primaryKey(),
+  approvalId: text("approval_id").notNull(),
+  userVuid: text("user_vuid").notNull(),
+  userEmail: text("user_email").notNull(),
+  decision: integer("decision").notNull(), // 0 = deny, 1 = approve
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  unique("uq_approval_decision").on(table.approvalId, table.userVuid),
+]);
+
+// Access change audit logs
+export const accessChangeLogs = pgTable("access_change_logs", {
+  id: serial("id").primaryKey(),
+  timestamp: timestamp("timestamp", { withTimezone: true }).notNull().defaultNow(),
+  type: text("type").notNull(), // 'created', 'approved', 'denied', 'deleted', 'committed', 'cancelled'
+  approvalId: text("approval_id").notNull(),
+  userEmail: text("user_email").notNull(),
+  targetUser: text("target_user"),
+  details: text("details"),
+});
+
+// SSH signing policies for roles (committed policies)
+export const sshPolicies = pgTable("ssh_policies", {
+  roleId: text("role_id").primaryKey(),
+  contractType: text("contract_type").notNull(),
+  approvalType: text("approval_type").notNull(), // 'implicit', 'explicit'
+  executionType: text("execution_type").notNull(), // 'public', 'private'
+  threshold: integer("threshold").notNull().default(1),
+  policyData: text("policy_data"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }),
+  organizationId: text("organization_id").notNull().default("default"),
+});
+
+// Pending SSH policy requests (awaiting approval)
+export const pendingSshPolicies = pgTable("pending_ssh_policies", {
+  id: text("id").primaryKey(),
+  roleId: text("role_id").notNull(),
+  requestedBy: text("requested_by").notNull(),
+  requestedByEmail: text("requested_by_email"),
+  policyRequestData: text("policy_request_data").notNull(),
+  contractCode: text("contract_code"),
+  status: text("status").notNull().default("pending"), // 'pending', 'approved', 'committed', 'cancelled'
+  threshold: integer("threshold").notNull().default(1),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }),
+  organizationId: text("organization_id").notNull().default("default"),
+});
+
+// SSH policy approval decisions
+export const sshPolicyDecisions = pgTable("ssh_policy_decisions", {
+  id: serial("id").primaryKey(),
+  policyRequestId: text("policy_request_id").notNull(),
+  userVuid: text("user_vuid").notNull(),
+  userEmail: text("user_email").notNull(),
+  decision: integer("decision").notNull(), // 0 = deny, 1 = approve
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  unique("uq_policy_decision").on(table.policyRequestId, table.userVuid),
+]);
+
+// SSH policy change logs
+export const sshPolicyLogs = pgTable("ssh_policy_logs", {
+  id: serial("id").primaryKey(),
+  timestamp: timestamp("timestamp", { withTimezone: true }).notNull().defaultNow(),
+  type: text("type").notNull(), // 'created', 'approved', 'denied', 'committed', 'cancelled'
+  policyRequestId: text("policy_request_id").notNull(),
+  userEmail: text("user_email").notNull(),
+  roleId: text("role_id"),
+  details: text("details"),
+  status: text("status").notNull().default("pending"), // 'pending', 'approved', 'committed', 'cancelled'
+  approvalCount: integer("approval_count").notNull().default(0),
+  threshold: integer("threshold").notNull().default(1),
+});
+
+// Policy templates for reusable Forseti contracts
+export const policyTemplates = pgTable("policy_templates", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull().unique(),
+  description: text("description").notNull(),
+  csCode: text("cs_code").notNull(),
+  parameters: jsonb("parameters").$type<TemplateParameter[]>().notNull().default([]),
+  createdBy: text("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }),
+  organizationId: text("organization_id").notNull().default("default"),
+});
+
+// ============================================
+// Insert schemas and type exports
+// ============================================
 
 export const insertUserSchema = createInsertSchema(users).omit({ id: true });
 export const insertServerSchema = createInsertSchema(servers).omit({ id: true });
@@ -323,8 +437,8 @@ export interface PolicyTemplate {
   csCode: string;
   parameters: TemplateParameter[];
   createdBy: string;
-  createdAt: number;
-  updatedAt?: number;
+  createdAt: Date;
+  updatedAt?: Date;
 }
 
 export interface InsertPolicyTemplate {
