@@ -136,7 +136,6 @@ docker run -d \
   --realm=keylessh \
   --min-port=49152 \
   --max-port=65535 \
-  --auth-secret-algorithm=sha256 \
   --fingerprint \
   --no-multicast-peers \
   --no-cli \

@@ -66,7 +66,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
       const turnHost = options.turnServer.replace(/^turn:/, "");
       const expiry = Math.floor(Date.now() / 1000) + 3600;
       const user = `${expiry}`;
-      const pass = createHmac("sha256", options.turnSecret)
+      const pass = createHmac("sha1", options.turnSecret)
         .update(user)
         .digest("base64");
       iceServers.push(`turn:${user}:${pass}@${turnHost}`);
@@ -180,13 +180,15 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
       || ct.includes("text/plain") && res.headers["transfer-encoding"] === "chunked";
   }
 
-  // 200KB threshold — stay well under the ~256KB SCTP limit
+  // Responses smaller than this are sent as a single DC message;
+  // larger responses are streamed progressively.
   const MAX_SINGLE_MSG = 200_000;
-  const BODY_CHUNK_SIZE = 150_000;
 
   /**
    * Handle an HTTP request received over DataChannel.
-   * Supports both buffered (small responses) and streaming (SSE, NDJSON) modes.
+   * Small responses are buffered and sent as a single message.
+   * Large responses (video, downloads) and streaming content (SSE, NDJSON)
+   * are forwarded progressively as data arrives from the backend.
    */
   function handleDataChannelRequest(
     dc: DataChannel,
@@ -201,13 +203,13 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     // Validate HTTP method
     if (!ALLOWED_METHODS.has(method.toUpperCase())) {
       if (dc.isOpen()) {
-        dc.sendMessage(JSON.stringify({
+        dc.sendMessageBinary(Buffer.from(JSON.stringify({
           type: "http_response",
           id: requestId,
           statusCode: 405,
           headers: { "content-type": "application/json" },
           body: Buffer.from(JSON.stringify({ error: "Method not allowed" })).toString("base64"),
-        }));
+        })));
       }
       return;
     }
@@ -237,73 +239,101 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
           }
         }
 
-        if (isStreamingResponse(res)) {
-          // Streaming mode: forward chunks as they arrive (SSE, NDJSON, etc.)
-          console.log(`[WebRTC] Streaming DC response: ${res.statusCode} for ${url}`);
+        // Determine response mode:
+        // - Small responses (< MAX_SINGLE_MSG): buffer and send as single message
+        // - Large or streaming: progressive streaming over DataChannel
+        const contentLength = parseInt(res.headers["content-length"] || "0", 10);
+        const useStreaming = isStreamingResponse(res) || contentLength > MAX_SINGLE_MSG / 2;
+
+        if (useStreaming) {
+          // Stream response progressively — works for SSE, video, large files
+          console.log(`[WebRTC] Streaming DC response: ${res.statusCode} for ${url} (${contentLength || "unknown"} bytes)`);
           if (!dc.isOpen()) return;
-          dc.sendMessage(JSON.stringify({
+
+          // Queue-based sending with flow control.
+          // All messages sent as binary to avoid SCTP PPID confusion.
+          const DC_MAX_BUFFER = 65_536;
+          const queue: { binary: Buffer }[] = [];
+          let scheduled = false;
+
+          const flush = (): void => {
+            scheduled = false;
+            while (queue.length > 0) {
+              if (!dc.isOpen()) { req.destroy(); return; }
+              if (dc.bufferedAmount() > DC_MAX_BUFFER) {
+                res.pause();
+                scheduled = true;
+                setTimeout(flush, 5);
+                return;
+              }
+              try {
+                const sent = dc.sendMessageBinary(queue[0].binary);
+                if (!sent) {
+                  res.pause();
+                  scheduled = true;
+                  setTimeout(flush, 10);
+                  return;
+                }
+              } catch {
+                req.destroy();
+                return;
+              }
+              queue.shift();
+            }
+            res.resume();
+          }
+
+          // All streaming messages are sent as binary to avoid SCTP PPID
+          // confusion when interleaving text (PPID 51) and binary (PPID 53).
+          // Control messages are JSON in a Buffer; chunk data uses requestId prefix.
+          // The browser detects JSON by checking if the first byte is '{'.
+          let chunksSent = 0;
+
+          // Start message — JSON as binary
+          queue.push({ binary: Buffer.from(JSON.stringify({
             type: "http_response_start",
             id: requestId,
             statusCode: res.statusCode || 200,
             headers: responseHeaders,
             streaming: true,
-          }));
+          })) });
+          flush();
 
           res.on("data", (chunk: Buffer) => {
             if (!dc.isOpen()) { req.destroy(); return; }
-            dc.sendMessage(JSON.stringify({
-              type: "http_response_chunk",
-              id: requestId,
-              data: chunk.toString("base64"),
-            }));
+            // Binary chunk: 36-byte requestId prefix + raw bytes (no base64)
+            const idBuf = Buffer.from(requestId, "ascii");
+            queue.push({ binary: Buffer.concat([idBuf, chunk]) });
+            chunksSent++;
+            if (!scheduled) flush();
           });
 
           res.on("end", () => {
-            if (dc.isOpen()) {
-              dc.sendMessage(JSON.stringify({ type: "http_response_end", id: requestId }));
-            }
+            console.log(`[WebRTC] Streaming complete for ${url}: ${chunksSent} chunks sent`);
+            // End message — JSON as binary
+            queue.push({ binary: Buffer.from(JSON.stringify({ type: "http_response_end", id: requestId })) });
+            if (!scheduled) flush();
+          });
+
+          res.on("error", (err) => {
+            console.error(`[WebRTC] Streaming response error for ${url}: ${err.message}`);
+            queue.push({ binary: Buffer.from(JSON.stringify({ type: "http_response_end", id: requestId })) });
+            if (!scheduled) flush();
           });
         } else {
-          // Buffered mode: collect full response, then send (chunked if large)
+          // Small response: buffer and send as single message (binary to avoid PPID confusion)
           const chunks: Buffer[] = [];
           res.on("data", (chunk: Buffer) => chunks.push(chunk));
           res.on("end", () => {
-            const responseBody = Buffer.concat(chunks).toString("base64");
             if (!dc.isOpen()) return;
-
-            const response = JSON.stringify({
+            const responseBody = Buffer.concat(chunks).toString("base64");
+            dc.sendMessageBinary(Buffer.from(JSON.stringify({
               type: "http_response",
               id: requestId,
               statusCode: res.statusCode || 500,
               headers: responseHeaders,
               body: responseBody,
-            });
-
-            if (response.length <= MAX_SINGLE_MSG) {
-              dc.sendMessage(response);
-            } else {
-              // Chunk the body across multiple messages for large responses
-              const totalChunks = Math.ceil(responseBody.length / BODY_CHUNK_SIZE);
-              console.log(`[WebRTC] Chunking ${method} ${url}: ${responseBody.length} bytes b64 → ${totalChunks} chunks`);
-
-              dc.sendMessage(JSON.stringify({
-                type: "http_response_start",
-                id: requestId,
-                statusCode: res.statusCode || 500,
-                headers: responseHeaders,
-                totalChunks,
-              }));
-
-              for (let i = 0; i < totalChunks; i++) {
-                if (!dc.isOpen()) break;
-                dc.sendMessage(JSON.stringify({
-                  type: "http_response_chunk",
-                  id: requestId,
-                  index: i,
-                  data: responseBody.slice(i * BODY_CHUNK_SIZE, (i + 1) * BODY_CHUNK_SIZE),
-                }));
-              }
-            }
+            })));
           });
         }
       }
@@ -312,26 +342,26 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
     req.setTimeout(30000, () => {
       req.destroy();
       if (dc.isOpen()) {
-        dc.sendMessage(JSON.stringify({
+        dc.sendMessageBinary(Buffer.from(JSON.stringify({
           type: "http_response",
           id: requestId,
           statusCode: 504,
           headers: { "content-type": "application/json" },
           body: Buffer.from(JSON.stringify({ error: "Gateway timeout" })).toString("base64"),
-        }));
+        })));
       }
     });
 
     req.on("error", (err) => {
       console.error(`[WebRTC] Local request failed: ${err.message}`);
       if (dc.isOpen()) {
-        dc.sendMessage(JSON.stringify({
+        dc.sendMessageBinary(Buffer.from(JSON.stringify({
           type: "http_response",
           id: requestId,
           statusCode: 502,
           headers: { "content-type": "application/json" },
           body: Buffer.from(JSON.stringify({ error: "Gateway internal error" })).toString("base64"),
-        }));
+        })));
       }
     });
 
@@ -351,7 +381,7 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
   ): void {
     if (wsConnections.size >= MAX_WS_PER_DC) {
       if (dc.isOpen()) {
-        dc.sendMessage(JSON.stringify({ type: "ws_error", id: msg.id, message: "Too many WebSocket connections" }));
+        dc.sendMessageBinary(Buffer.from(JSON.stringify({ type: "ws_error", id: msg.id, message: "Too many WebSocket connections" })));
       }
       return;
     }
@@ -368,31 +398,31 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
     ws.on("open", () => {
       if (dc.isOpen()) {
-        dc.sendMessage(JSON.stringify({ type: "ws_opened", id: msg.id, protocol: ws.protocol || "" }));
+        dc.sendMessageBinary(Buffer.from(JSON.stringify({ type: "ws_opened", id: msg.id, protocol: ws.protocol || "" })));
       }
     });
 
     ws.on("message", (data: Buffer, isBinary: boolean) => {
       if (!dc.isOpen()) { ws.close(); return; }
-      dc.sendMessage(JSON.stringify({
+      dc.sendMessageBinary(Buffer.from(JSON.stringify({
         type: "ws_message",
         id: msg.id,
         data: isBinary ? data.toString("base64") : data.toString("utf-8"),
         binary: isBinary,
-      }));
+      })));
     });
 
     ws.on("close", (code: number, reason: Buffer) => {
       wsConnections.delete(msg.id);
       if (dc.isOpen()) {
-        dc.sendMessage(JSON.stringify({ type: "ws_close", id: msg.id, code, reason: reason.toString() }));
+        dc.sendMessageBinary(Buffer.from(JSON.stringify({ type: "ws_close", id: msg.id, code, reason: reason.toString() })));
       }
     });
 
     ws.on("error", (err: Error) => {
       wsConnections.delete(msg.id);
       if (dc.isOpen()) {
-        dc.sendMessage(JSON.stringify({ type: "ws_error", id: msg.id, message: err.message }));
+        dc.sendMessageBinary(Buffer.from(JSON.stringify({ type: "ws_error", id: msg.id, message: err.message })));
       }
     });
 
