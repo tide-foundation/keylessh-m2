@@ -93,9 +93,12 @@ export async function initDatabase() {
 
   pool = new pg.Pool({
     connectionString,
-    max: 20,
+    max: 10,
+    min: 2,
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000,
+    connectionTimeoutMillis: 30000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10000,
     ssl: connectionString.includes('azure') ? { rejectUnauthorized: false } : undefined,
   });
 
@@ -104,6 +107,14 @@ export async function initDatabase() {
   });
 
   db = drizzle(pool);
+
+  // Pre-warm pool connections to avoid timeout bursts on first requests
+  try {
+    await pool.query("SELECT 1");
+    console.log("[Storage] PostgreSQL connection verified");
+  } catch (err) {
+    console.error("[Storage] Failed to verify PostgreSQL connection:", err);
+  }
 
   // Seed: Create default organization if it doesn't exist
   try {
