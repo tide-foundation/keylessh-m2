@@ -60,6 +60,11 @@ keylessh/
 - Deployment: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - Developer guide: [docs/DEVELOPERS.md](docs/DEVELOPERS.md)
 
+### Component docs
+
+- **Punc'd Bridge** — NAT-traversing HTTP reverse proxy that lets you expose local web apps through a public signal server without port forwarding. Starts with HTTP relay over WebSocket, then upgrades to peer-to-peer WebRTC DataChannels. See [bridges/punchd-bridge/docs/ARCHITECTURE.md](bridges/punchd-bridge/docs/ARCHITECTURE.md) for the full connection lifecycle, PlantUML diagrams, and multi-backend routing.
+- **Signal Server** — Public signaling hub that brokers WebSocket connections between gateways and clients. Handles gateway registration, ICE candidate exchange, HTTP request relay, and TURN credential provisioning. Deployed alongside a coturn sidecar for STUN/TURN. See [signal-server/deploy.sh](signal-server/deploy.sh) for the automated VM deployment script.
+
 ## Quickstart (Local Dev)
 
 ### 1. Clone and start TideCloak
