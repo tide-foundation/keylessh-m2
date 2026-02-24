@@ -204,8 +204,10 @@
   function startWebRTC() {
     if (!pairedGatewayId) return;
 
-    // Clean up any previous peer before starting fresh
+    // Save gateway ID before cleanup (cleanupPeer resets pairedGatewayId)
+    const targetGateway = pairedGatewayId;
     cleanupPeer();
+    pairedGatewayId = targetGateway;
 
     console.log("[WebRTC] Starting WebRTC handshake with gateway:", pairedGatewayId);
 
