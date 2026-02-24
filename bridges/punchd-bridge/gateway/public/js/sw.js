@@ -101,7 +101,9 @@ self.addEventListener("fetch", function (event) {
   // Without DC, let the browser handle the request natively —
   // this preserves proper cookie handling (HttpOnly), caching,
   // and avoids stale data when navigating back.
-  if (!event.clientId || !dcClients.has(event.clientId)) return;
+  if (!event.clientId || !dcClients.has(event.clientId)) {
+    return;
+  }
 
   event.respondWith(rewriteAndHandle(event));
 });
@@ -231,9 +233,19 @@ async function handleViaDataChannel(clientId, request) {
           return;
         }
 
-        var bodyBytes = Uint8Array.from(atob(e.data.body || ""), function (c) {
-          return c.charCodeAt(0);
-        });
+        var bodyBytes;
+        if (e.data.binaryBody instanceof ArrayBuffer) {
+          bodyBytes = new Uint8Array(e.data.binaryBody);
+        } else {
+          bodyBytes = Uint8Array.from(atob(e.data.body || ""), function (c) {
+            return c.charCodeAt(0);
+          });
+        }
+
+        console.log("[SW] DC response:", e.data.statusCode,
+          "body:", bodyBytes.length, "bytes",
+          "content-range:", responseHeaders.get("content-range"),
+          "via:", e.data.binaryBody ? "ArrayBuffer" : "base64");
 
         resolve(
           new Response(bodyBytes, {

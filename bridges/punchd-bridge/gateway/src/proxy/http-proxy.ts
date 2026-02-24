@@ -639,23 +639,55 @@ export function createProxy(options: ProxyOptions): {
       // can include it in WebRTC DataChannel requests (SW can't read cookies)
       if (path === "/auth/session-token") {
         const cookies = parseCookies(req.headers.cookie);
-        const accessToken = cookies["gateway_access"];
+        let accessToken = cookies["gateway_access"];
         if (!accessToken) {
           res.writeHead(401, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "No session" }));
           return;
         }
-        const payload = await options.auth.verifyToken(accessToken);
+        let payload = await options.auth.verifyToken(accessToken);
+
+        // If access token expired, try refreshing with refresh token
+        const setCookies: string[] = [];
+        if (!payload && cookies["gateway_refresh"]) {
+          try {
+            const tokens = await refreshAccessToken(
+              serverEndpoints,
+              clientId,
+              cookies["gateway_refresh"]
+            );
+            payload = await options.auth.verifyToken(tokens.access_token);
+            if (payload) {
+              accessToken = tokens.access_token;
+              setCookies.push(
+                buildCookieHeader("gateway_access", tokens.access_token, tokens.expires_in)
+              );
+              if (tokens.refresh_token) {
+                setCookies.push(
+                  buildCookieHeader("gateway_refresh", tokens.refresh_token, tokens.refresh_expires_in || 1800, "Strict")
+                );
+              }
+            }
+          } catch (err) {
+            console.log("[Gateway] Session token refresh failed:", err);
+          }
+        }
+
         if (!payload) {
           res.writeHead(401, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Invalid session" }));
           return;
         }
-        res.writeHead(200, {
+
+        const headers: Record<string, string | string[]> = {
           "Content-Type": "application/json",
           "Cache-Control": "no-store",
           "Pragma": "no-cache",
-        });
+        };
+        if (setCookies.length > 0) {
+          headers["Set-Cookie"] = setCookies;
+        }
+        res.writeHead(200, headers);
         res.end(JSON.stringify({ token: accessToken }));
         return;
       }
@@ -923,6 +955,12 @@ export function createProxy(options: ProxyOptions): {
 
       // ── Proxy to backend ─────────────────────────────────
 
+      // DEBUG: trace DC auth flow
+      if (req.headers["x-dc-request"]) {
+        const cookies = parseCookies(req.headers.cookie);
+        console.log(`[Gateway] DC auth: url=${req.url} hasToken=${!!cookies["gateway_access"]} tokenLen=${(cookies["gateway_access"] || "").length} payload=${!!payload} sub=${payload?.sub || "none"} backend=${activeBackend || "default"} target=${resolveBackend(req, activeBackend).href}`);
+      }
+
       // Validate HTTP method
       if (!ALLOWED_METHODS.has((req.method || "").toUpperCase())) {
         res.writeHead(405, { "Content-Type": "application/json" });
@@ -973,6 +1011,11 @@ export function createProxy(options: ProxyOptions): {
         },
         (proxyRes) => {
           const headers = { ...proxyRes.headers };
+
+          // DEBUG: trace backend response for DC requests
+          if (isDcRequest) {
+            console.log(`[Gateway] DC backend response: url=${req.url} status=${proxyRes.statusCode} content-type=${headers["content-type"]} content-length=${headers["content-length"]} content-range=${headers["content-range"]}`);
+          }
 
           // Backend cookie jar: store Set-Cookie values server-side so that
           // DataChannel requests (where the browser can't set cookies) still

@@ -220,6 +220,9 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
 
     // Mark as DataChannel request so the HTTP proxy can use the backend cookie jar
     (headers as Record<string, string>)["x-dc-request"] = "1";
+    // Don't forward accept-encoding — we send raw bytes over DC, compression
+    // breaks Content-Range offsets and confuses browser media pipelines.
+    delete (headers as Record<string, unknown>)["accept-encoding"];
 
     const makeReq = options.useTls ? httpsRequest : httpRequest;
     const req = makeReq(
@@ -232,9 +235,14 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         rejectUnauthorized: false,
       },
       (res) => {
+        // Collect response headers, stripping hop-by-hop headers that are
+        // meaningless for SW-constructed Responses and can confuse Chrome
+        // (e.g. transfer-encoding: chunked would make Chrome try to
+        // chunk-decode an already-decoded body).
+        const HOP_BY_HOP = new Set(["transfer-encoding", "connection", "keep-alive", "te", "trailer", "upgrade"]);
         const responseHeaders: Record<string, string | string[]> = {};
         for (const [key, value] of Object.entries(res.headers)) {
-          if (value !== undefined) {
+          if (value !== undefined && !HOP_BY_HOP.has(key)) {
             responseHeaders[key] = value as string | string[];
           }
         }
@@ -243,11 +251,12 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
         // - Small responses (< MAX_SINGLE_MSG): buffer and send as single message
         // - Large or streaming: progressive streaming over DataChannel
         const contentLength = parseInt(res.headers["content-length"] || "0", 10);
-        const useStreaming = isStreamingResponse(res) || contentLength > MAX_SINGLE_MSG / 2;
+        const isLive = isStreamingResponse(res);
+        const useStreaming = isLive || contentLength > MAX_SINGLE_MSG / 2;
 
         if (useStreaming) {
           // Stream response progressively — works for SSE, video, large files
-          console.log(`[WebRTC] Streaming DC response: ${res.statusCode} for ${url} (${contentLength || "unknown"} bytes)`);
+          console.log(`[WebRTC] Streaming DC response: ${res.statusCode} for ${url} (${contentLength || "unknown"} bytes, live=${isLive})`);
           if (!dc.isOpen()) return;
 
           // Queue-based sending with flow control.
@@ -290,12 +299,15 @@ export function createPeerHandler(options: PeerHandlerOptions): PeerHandler {
           let chunksSent = 0;
 
           // Start message — JSON as binary
+          // live=true for SSE/NDJSON (client uses ReadableStream)
+          // live=false for large responses like video (client buffers then delivers complete)
           queue.push({ binary: Buffer.from(JSON.stringify({
             type: "http_response_start",
             id: requestId,
             statusCode: res.statusCode || 200,
             headers: responseHeaders,
             streaming: true,
+            live: isLive,
           })) });
           flush();
 
