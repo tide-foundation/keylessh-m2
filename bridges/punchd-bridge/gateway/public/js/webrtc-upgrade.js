@@ -25,6 +25,7 @@
   let pairedGatewayId = null;
   let config = null;
   let sessionToken = null;
+  let tokenRefreshTimer = null;
   let reconnectAttempts = 0;
   let reconnectTimer = null;
   let swRegistered = false;
@@ -66,6 +67,7 @@
       peerConnection = null;
     }
     pairedGatewayId = null;
+    if (tokenRefreshTimer) { clearInterval(tokenRefreshTimer); tokenRefreshTimer = null; }
     // Reject pending requests so they fall back to relay
     for (const [id, entry] of pendingRequests) {
       entry.resolve({ statusCode: 502, headers: {}, body: "" });
@@ -241,6 +243,11 @@
     dataChannel.onopen = async () => {
       console.log("[WebRTC] DataChannel OPEN — direct connection established!");
       reconnectAttempts = 0; // Reset backoff on success
+      // Refresh session token before DC requests start (token may have expired since page load)
+      await fetchSessionToken();
+      // Refresh token every 4 minutes to stay ahead of 5-minute expiry
+      if (tokenRefreshTimer) clearInterval(tokenRefreshTimer);
+      tokenRefreshTimer = setInterval(fetchSessionToken, 4 * 60 * 1000);
       installWebSocketShim();
       await registerServiceWorker();
       // Wait for SW to claim this page (clients.claim() may still be pending)
@@ -319,13 +326,10 @@
         }
       } else if (msg.type === "http_response_start" && msg.id) {
         if (msg.streaming) {
-          // Check if this is a truly live/infinite stream (SSE, NDJSON)
-          // or a finite chunked response (video, large files).
-          const ct = ((msg.headers || {})["content-type"] || "").toLowerCase();
-          const isLive = ct.includes("text/event-stream") || ct.includes("application/x-ndjson");
-
+          var isLive = !!msg.live;
           if (isLive) {
-            // Live stream — forward chunks to SW in real-time via ReadableStream
+            // Live stream (SSE, NDJSON) — resolve immediately with ReadableStream.
+            // Client consumes data progressively as it arrives.
             const pending = pendingRequests.get(msg.id);
             if (pending) {
               pendingRequests.delete(msg.id);
@@ -335,18 +339,17 @@
                 streaming: true,
               });
             }
-            chunkedResponses.set(msg.id, { streaming: true, live: true });
-          } else {
-            // Finite chunked response — buffer on page, send complete on end.
-            // This avoids the fragile ReadableStream/MessagePort chain.
-            chunkedResponses.set(msg.id, {
-              streaming: true,
-              live: false,
-              statusCode: msg.statusCode,
-              headers: msg.headers,
-              chunks: [],
-            });
           }
+          // live=true: forward chunks to SW via ReadableStream
+          // live=false: buffer chunks page-side, deliver complete Response on end
+          //   (Chrome's media pipeline doesn't handle ReadableStream 206 from SW)
+          chunkedResponses.set(msg.id, {
+            streaming: true,
+            live: isLive,
+            statusCode: msg.statusCode,
+            headers: msg.headers,
+            chunks: isLive ? undefined : [],
+          });
         } else {
           // Size-chunked reassembly (large buffered responses)
           chunkedResponses.set(msg.id, {
@@ -400,20 +403,14 @@
             merged.set(chunk, offset);
             offset += chunk.length;
           }
-          // Convert to base64 in chunks to avoid stack overflow with apply()
-          let binary = "";
-          for (let i = 0; i < merged.length; i += 32768) {
-            binary += String.fromCharCode.apply(null, Array.from(merged.subarray(i, i + 32768)));
-          }
-          const body = btoa(binary);
-          console.log(`[WebRTC] Buffered response complete: ${msg.id} (${totalLength} bytes, ${body.length} b64)`);
+          console.log(`[WebRTC] Buffered response complete: ${msg.id} (${totalLength} bytes)`);
           const pending = pendingRequests.get(msg.id);
           if (pending) {
             pendingRequests.delete(msg.id);
             pending.resolve({
               statusCode: entry.statusCode,
               headers: entry.headers,
-              body: body,
+              binaryBody: merged.buffer,
             });
           }
         } else {
@@ -610,6 +607,13 @@
             headers: msg.headers,
             streaming: true,
           });
+        } else if (msg.binaryBody) {
+          // Transfer raw ArrayBuffer — avoids base64 encode/decode overhead
+          responsePort.postMessage({
+            statusCode: msg.statusCode,
+            headers: msg.headers,
+            binaryBody: msg.binaryBody,
+          }, [msg.binaryBody]);
         } else {
           responsePort.postMessage({
             statusCode: msg.statusCode,
