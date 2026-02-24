@@ -539,7 +539,7 @@ export function createProxy(options: ProxyOptions): {
           // Generate ephemeral TURN credentials (valid for 1 hour)
           const expiry = Math.floor(Date.now() / 1000) + 3600;
           const turnUsername = `${expiry}`;
-          const turnPassword = createHmac("sha256", options.turnSecret)
+          const turnPassword = createHmac("sha1", options.turnSecret)
             .update(turnUsername)
             .digest("base64");
           webrtcConfig.turnServer = options.turnServer;

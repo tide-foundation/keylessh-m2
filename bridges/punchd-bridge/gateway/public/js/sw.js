@@ -22,7 +22,18 @@ self.addEventListener("install", function () {
 });
 
 self.addEventListener("activate", function (event) {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    self.clients.claim().then(function () {
+      // After claiming all clients, ask each if it has an active DataChannel.
+      // Clients with an active DC will respond with dc_ready, rebuilding
+      // dcClients after a SW update (skipWaiting clears the old SW's state).
+      return self.clients.matchAll({ type: "window" }).then(function (allClients) {
+        allClients.forEach(function (client) {
+          client.postMessage({ type: "dc_check" });
+        });
+      });
+    })
+  );
 });
 
 // Listen for DC ready/closed signals from pages
@@ -182,20 +193,28 @@ async function handleViaDataChannel(clientId, request) {
         }
 
         if (e.data.streaming) {
-          // Streaming response (SSE, NDJSON) — return a ReadableStream
-          // that receives chunks progressively from the page via the port
+          // Live streaming response (SSE, NDJSON) — return a ReadableStream
+          // so the browser can consume data progressively.
           var stream = new ReadableStream({
             start: function (controller) {
               mc.port1.onmessage = function (ev) {
                 if (ev.data.type === "chunk" && ev.data.data) {
-                  var raw = atob(ev.data.data);
-                  var bytes = new Uint8Array(raw.length);
-                  for (var i = 0; i < raw.length; i++) {
-                    bytes[i] = raw.charCodeAt(i);
+                  try {
+                    if (ev.data.data instanceof ArrayBuffer) {
+                      controller.enqueue(new Uint8Array(ev.data.data));
+                    } else {
+                      var raw = atob(ev.data.data);
+                      var bytes = new Uint8Array(raw.length);
+                      for (var i = 0; i < raw.length; i++) {
+                        bytes[i] = raw.charCodeAt(i);
+                      }
+                      controller.enqueue(bytes);
+                    }
+                  } catch (err) {
+                    // Stream may have been cancelled
                   }
-                  controller.enqueue(bytes);
                 } else if (ev.data.type === "end") {
-                  controller.close();
+                  try { controller.close(); } catch (err) {}
                 }
               };
             },
@@ -203,7 +222,6 @@ async function handleViaDataChannel(clientId, request) {
               mc.port1.onmessage = null;
             },
           });
-
           resolve(
             new Response(stream, {
               status: e.data.statusCode,

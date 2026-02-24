@@ -72,6 +72,11 @@
     }
     pendingRequests.clear();
     chunkedResponses.clear();
+    // End any in-flight streaming responses so SW promises don't hang
+    for (var [id, port] of streamingPorts) {
+      port.postMessage({ type: "end" });
+    }
+    streamingPorts.clear();
     // Close all DataChannel-tunneled WebSocket connections
     for (const [id, ws] of dcWebSockets) {
       ws._fireClose(1001, "DataChannel closed");
@@ -231,31 +236,96 @@
     dataChannel = peerConnection.createDataChannel("http-tunnel", {
       ordered: true,
     });
+    dataChannel.binaryType = "arraybuffer";
 
     dataChannel.onopen = async () => {
       console.log("[WebRTC] DataChannel OPEN — direct connection established!");
       reconnectAttempts = 0; // Reset backoff on success
       installWebSocketShim();
       await registerServiceWorker();
+      // Wait for SW to claim this page (clients.claim() may still be pending)
+      if (!navigator.serviceWorker.controller) {
+        await navigator.serviceWorker.ready;
+        if (!navigator.serviceWorker.controller) {
+          await new Promise(function (resolve) {
+            navigator.serviceWorker.addEventListener("controllerchange", resolve, { once: true });
+            setTimeout(resolve, 3000); // don't wait forever
+          });
+        }
+      }
       if (navigator.serviceWorker.controller) {
         navigator.serviceWorker.controller.postMessage({ type: "dc_ready" });
+        console.log("[WebRTC] Signaled dc_ready to Service Worker");
+      } else {
+        console.warn("[WebRTC] No SW controller — DC routing unavailable");
       }
     };
 
     dataChannel.onmessage = (event) => {
+      // Binary message — could be a streaming chunk OR a JSON control message
+      // sent as binary (to avoid SCTP PPID confusion when interleaving).
+      // JSON messages start with '{'; chunk data starts with a UUID (hex digit).
+      if (typeof event.data !== "string") {
+        const buf = new Uint8Array(event.data);
+        if (buf.length === 0) return;
+
+        // Check if this is a JSON control message sent as binary
+        // (0x7B = '{' — JSON objects always start with this)
+        if (buf[0] === 0x7B) {
+          try {
+            const msg = JSON.parse(new TextDecoder().decode(buf));
+            handleDcMessage(msg);
+          } catch {
+            console.error("[WebRTC] Failed to parse binary-JSON DC message");
+          }
+          return;
+        }
+
+        // Binary streaming chunk: 36-byte requestId prefix + raw bytes
+        if (buf.length < 36) return;
+        const requestId = new TextDecoder().decode(buf.subarray(0, 36));
+        const entry = chunkedResponses.get(requestId);
+        if (!entry || !entry.streaming) return;
+        if (entry.live) {
+          // Live stream (SSE/NDJSON) — forward chunk to SW immediately
+          const port = streamingPorts.get(requestId);
+          if (port) {
+            const chunkBytes = buf.slice(36).buffer;
+            port.postMessage({ type: "chunk", data: chunkBytes }, [chunkBytes]);
+          }
+        } else {
+          // Finite response (video, etc) — buffer chunk on page side
+          entry.chunks.push(buf.slice(36));
+        }
+        return;
+      }
+
+      // Text message = JSON control message
       try {
         const msg = JSON.parse(event.data);
+        handleDcMessage(msg);
+      } catch {
+        console.error("[WebRTC] Failed to parse DataChannel message");
+      }
+    };
 
-        if (msg.type === "http_response" && msg.id) {
-          // Single buffered response
-          const pending = pendingRequests.get(msg.id);
-          if (pending) {
-            pendingRequests.delete(msg.id);
-            pending.resolve(msg);
-          }
-        } else if (msg.type === "http_response_start" && msg.id) {
-          if (msg.streaming) {
-            // True streaming (SSE, NDJSON) — forward chunks progressively to SW
+    function handleDcMessage(msg) {
+      if (msg.type === "http_response" && msg.id) {
+        // Single buffered response
+        const pending = pendingRequests.get(msg.id);
+        if (pending) {
+          pendingRequests.delete(msg.id);
+          pending.resolve(msg);
+        }
+      } else if (msg.type === "http_response_start" && msg.id) {
+        if (msg.streaming) {
+          // Check if this is a truly live/infinite stream (SSE, NDJSON)
+          // or a finite chunked response (video, large files).
+          const ct = ((msg.headers || {})["content-type"] || "").toLowerCase();
+          const isLive = ct.includes("text/event-stream") || ct.includes("application/x-ndjson");
+
+          if (isLive) {
+            // Live stream — forward chunks to SW in real-time via ReadableStream
             const pending = pendingRequests.get(msg.id);
             if (pending) {
               pendingRequests.delete(msg.id);
@@ -265,69 +335,109 @@
                 streaming: true,
               });
             }
-            // Store stream entry so subsequent chunks/end get forwarded
-            chunkedResponses.set(msg.id, { streaming: true });
+            chunkedResponses.set(msg.id, { streaming: true, live: true });
           } else {
-            // Size-chunked reassembly (large buffered responses)
+            // Finite chunked response — buffer on page, send complete on end.
+            // This avoids the fragile ReadableStream/MessagePort chain.
             chunkedResponses.set(msg.id, {
+              streaming: true,
+              live: false,
               statusCode: msg.statusCode,
               headers: msg.headers,
-              totalChunks: msg.totalChunks,
-              received: 0,
-              chunks: new Array(msg.totalChunks),
+              chunks: [],
             });
           }
-        } else if (msg.type === "http_response_chunk" && msg.id) {
-          const entry = chunkedResponses.get(msg.id);
-          if (!entry) return;
+        } else {
+          // Size-chunked reassembly (large buffered responses)
+          chunkedResponses.set(msg.id, {
+            statusCode: msg.statusCode,
+            headers: msg.headers,
+            totalChunks: msg.totalChunks,
+            received: 0,
+            chunks: new Array(msg.totalChunks),
+          });
+        }
+      } else if (msg.type === "http_response_chunk" && msg.id) {
+        const entry = chunkedResponses.get(msg.id);
+        if (!entry) return;
 
-          if (entry.streaming) {
-            // Forward chunk to SW via the streaming port
-            const port = streamingPorts.get(msg.id);
-            if (port) {
-              port.postMessage({ type: "chunk", data: msg.data });
-            }
-          } else {
-            // Size-chunked reassembly
-            entry.chunks[msg.index] = msg.data;
-            entry.received++;
-            if (entry.received === entry.totalChunks) {
-              chunkedResponses.delete(msg.id);
-              const pending = pendingRequests.get(msg.id);
-              if (pending) {
-                pendingRequests.delete(msg.id);
-                pending.resolve({
-                  statusCode: entry.statusCode,
-                  headers: entry.headers,
-                  body: entry.chunks.join(""),
-                });
-              }
+        if (entry.streaming) {
+          // Forward chunk to SW via the streaming port
+          const port = streamingPorts.get(msg.id);
+          if (port) {
+            port.postMessage({ type: "chunk", data: msg.data });
+          }
+        } else {
+          // Size-chunked reassembly
+          entry.chunks[msg.index] = msg.data;
+          entry.received++;
+          console.log(`[WebRTC] Chunk ${entry.received}/${entry.totalChunks} received for ${msg.id}`);
+          if (entry.received === entry.totalChunks) {
+            console.log(`[WebRTC] All chunks received for ${msg.id}, reassembling`);
+            chunkedResponses.delete(msg.id);
+            const pending = pendingRequests.get(msg.id);
+            if (pending) {
+              pendingRequests.delete(msg.id);
+              pending.resolve({
+                statusCode: entry.statusCode,
+                headers: entry.headers,
+                body: entry.chunks.join(""),
+              });
             }
           }
-        } else if (msg.type === "http_response_end" && msg.id) {
-          chunkedResponses.delete(msg.id);
+        }
+      } else if (msg.type === "http_response_end" && msg.id) {
+        const entry = chunkedResponses.get(msg.id);
+        chunkedResponses.delete(msg.id);
+
+        if (entry && !entry.live && entry.chunks) {
+          // Buffered finite response — concatenate chunks and encode as base64.
+          // Uses the same proven path as small responses (body field).
+          const totalLength = entry.chunks.reduce((sum, c) => sum + c.length, 0);
+          const merged = new Uint8Array(totalLength);
+          let offset = 0;
+          for (const chunk of entry.chunks) {
+            merged.set(chunk, offset);
+            offset += chunk.length;
+          }
+          // Convert to base64 in chunks to avoid stack overflow with apply()
+          let binary = "";
+          for (let i = 0; i < merged.length; i += 32768) {
+            binary += String.fromCharCode.apply(null, Array.from(merged.subarray(i, i + 32768)));
+          }
+          const body = btoa(binary);
+          console.log(`[WebRTC] Buffered response complete: ${msg.id} (${totalLength} bytes, ${body.length} b64)`);
+          const pending = pendingRequests.get(msg.id);
+          if (pending) {
+            pendingRequests.delete(msg.id);
+            pending.resolve({
+              statusCode: entry.statusCode,
+              headers: entry.headers,
+              body: body,
+            });
+          }
+        } else {
+          // Live stream — close the ReadableStream
           const port = streamingPorts.get(msg.id);
           if (port) {
             port.postMessage({ type: "end" });
             streamingPorts.delete(msg.id);
           }
-        } else if (msg.type === "ws_opened" && msg.id) {
-          const ws = dcWebSockets.get(msg.id);
-          if (ws) ws._fireOpen(msg.protocol);
-        } else if (msg.type === "ws_message" && msg.id) {
-          const ws = dcWebSockets.get(msg.id);
-          if (ws) ws._fireMessage(msg.data, msg.binary);
-        } else if (msg.type === "ws_close" && msg.id) {
-          const ws = dcWebSockets.get(msg.id);
-          if (ws) ws._fireClose(msg.code, msg.reason);
-        } else if (msg.type === "ws_error" && msg.id) {
-          const ws = dcWebSockets.get(msg.id);
-          if (ws) ws._fireError(msg.message);
         }
-      } catch {
-        console.error("[WebRTC] Failed to parse DataChannel message");
+      } else if (msg.type === "ws_opened" && msg.id) {
+        const ws = dcWebSockets.get(msg.id);
+        if (ws) ws._fireOpen(msg.protocol);
+      } else if (msg.type === "ws_message" && msg.id) {
+        const ws = dcWebSockets.get(msg.id);
+        if (ws) ws._fireMessage(msg.data, msg.binary);
+      } else if (msg.type === "ws_close" && msg.id) {
+        const ws = dcWebSockets.get(msg.id);
+        if (ws) ws._fireClose(msg.code, msg.reason);
+      } else if (msg.type === "ws_error" && msg.id) {
+        const ws = dcWebSockets.get(msg.id);
+        if (ws) ws._fireError(msg.message);
       }
-    };
+    }
 
     dataChannel.onclose = () => {
       console.log("[WebRTC] DataChannel closed");
@@ -408,9 +518,25 @@
       console.log("[WebRTC] Service Worker registered");
       swRegistered = true;
 
+      // When a new SW takes control mid-session (e.g., after SW update),
+      // re-signal dc_ready so the new SW knows this client has an active DC.
+      navigator.serviceWorker.addEventListener("controllerchange", function () {
+        console.log("[WebRTC] New Service Worker took control");
+        if (dataChannel && dataChannel.readyState === "open" && navigator.serviceWorker.controller) {
+          navigator.serviceWorker.controller.postMessage({ type: "dc_ready" });
+          console.log("[WebRTC] Re-signaled dc_ready to new Service Worker");
+        }
+      });
+
       navigator.serviceWorker.addEventListener("message", (event) => {
         if (event.data?.type === "dc_fetch") {
           handleSwFetch(event.data, event.ports[0]);
+        } else if (event.data?.type === "dc_check") {
+          // New SW is asking if we have an active DC — re-signal readiness
+          if (dataChannel && dataChannel.readyState === "open" && navigator.serviceWorker.controller) {
+            navigator.serviceWorker.controller.postMessage({ type: "dc_ready" });
+            console.log("[WebRTC] Responded to dc_check with dc_ready");
+          }
         }
       });
       navigator.serviceWorker.startMessages();
@@ -477,7 +603,7 @@
       resolve: (msg) => {
         clearTimeout(timeout);
         if (msg.streaming) {
-          // Streaming response (SSE, NDJSON) — keep the port open for chunks
+          // Live streaming response (SSE, NDJSON) — keep the port open for chunks
           streamingPorts.set(requestId, responsePort);
           responsePort.postMessage({
             statusCode: msg.statusCode,
