@@ -19,6 +19,8 @@ export interface BackendEntry {
   url: string;
   /** Skip gateway JWT validation — backend handles its own auth */
   noAuth?: boolean;
+  /** Strip Authorization header before proxying to this backend */
+  stripAuth?: boolean;
 }
 
 export interface ServerConfig {
@@ -119,11 +121,23 @@ function parseBackends(): BackendEntry[] {
       if (eq < 0) return { name: "Default", url: entry.trim() };
       let rawUrl = entry.slice(eq + 1).trim();
       let noAuth = false;
-      if (rawUrl.endsWith(";noauth")) {
-        noAuth = true;
-        rawUrl = rawUrl.slice(0, -";noauth".length).trim();
+      let stripAuth = false;
+      // Parse suffix flags: ;noauth, ;stripauth (order-independent, repeatable)
+      let changed = true;
+      while (changed) {
+        changed = false;
+        const lower = rawUrl.toLowerCase();
+        if (lower.endsWith(";noauth")) {
+          noAuth = true;
+          rawUrl = rawUrl.slice(0, -";noauth".length).trim();
+          changed = true;
+        } else if (lower.endsWith(";stripauth")) {
+          stripAuth = true;
+          rawUrl = rawUrl.slice(0, -";stripauth".length).trim();
+          changed = true;
+        }
       }
-      return { name: entry.slice(0, eq).trim(), url: rawUrl, noAuth: noAuth || undefined };
+      return { name: entry.slice(0, eq).trim(), url: rawUrl, noAuth: noAuth || undefined, stripAuth: stripAuth || undefined };
     }).filter((b) => b.url);
   }
 

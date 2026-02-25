@@ -227,11 +227,17 @@ export function createProxy(options: ProxyOptions): {
 
   // No-auth backends: skip gateway JWT validation (backend handles its own auth)
   const noAuthBackends = new Set<string>();
+  // Strip-auth backends: remove Authorization header before proxying
+  const stripAuthBackends = new Set<string>();
   if (options.backends?.length) {
     for (const b of options.backends) {
       if (b.noAuth) {
         noAuthBackends.add(b.name);
         console.log(`[Proxy] Backend "${b.name}" — auth disabled (noauth)`);
+      }
+      if (b.stripAuth) {
+        stripAuthBackends.add(b.name);
+        console.log(`[Proxy] Backend "${b.name}" — auth header stripped (stripauth)`);
       }
     }
   }
@@ -1080,8 +1086,8 @@ export function createProxy(options: ProxyOptions): {
       const proxyHeaders = { ...req.headers };
       delete proxyHeaders.host;
 
-      // Remove cookie auth headers (don't leak to backend)
-      if (options.stripAuthHeader) {
+      // Remove auth header: globally (STRIP_AUTH_HEADER) or per-backend (;stripauth)
+      if (options.stripAuthHeader || stripAuthBackends.has(activeBackend || "")) {
         delete proxyHeaders.authorization;
       }
 
