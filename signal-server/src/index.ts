@@ -403,9 +403,9 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
       webrtcConfig.turnPassword = turnPassword;
     }
     // Include selected gateway ID from HttpOnly cookie so JS can target it
-    const selectedGateway = parseCookie(req.headers.cookie, "gateway_relay");
-    if (selectedGateway) {
-      webrtcConfig.targetGatewayId = selectedGateway;
+    const selectedGatewayRaw = parseCookie(req.headers.cookie, "gateway_relay");
+    if (selectedGatewayRaw) {
+      webrtcConfig.targetGatewayId = decodeURIComponent(selectedGatewayRaw);
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(webrtcConfig));
@@ -462,7 +462,7 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
         }
         res.writeHead(200, {
           "Content-Type": "application/json",
-          "Set-Cookie": `gateway_relay=${gatewayId}; Path=/; HttpOnly; SameSite=None; Secure`,
+          "Set-Cookie": `gateway_relay=${encodeURIComponent(gatewayId)}; Path=/; HttpOnly; SameSite=None; Secure`,
         });
         res.end(JSON.stringify({ success: true, gatewayId, backend: backend || null }));
       } catch {
@@ -487,7 +487,7 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
       return;
     }
     const cookies: string[] = [
-      `gateway_relay=${gatewayId}; Path=/; HttpOnly; SameSite=None; Secure`,
+      `gateway_relay=${encodeURIComponent(gatewayId)}; Path=/; HttpOnly; SameSite=None; Secure`,
     ];
     // If a valid KeyleSSH JWT is provided, set it as gateway_access cookie
     // so the gateway accepts the user without triggering its own login flow.
