@@ -37,6 +37,7 @@ The result: enterprise-grade SSH access control without any private keys to mana
 - **Admin UX**: servers, users, roles, policy templates, change requests (access, roles, policies), sessions, logs
 - **Optional external bastion** (`bridges/tcp-bridge`) for scalable WS↔TCP tunneling
 - **NAT-traversing HTTP gateway** (`bridges/punchd-bridge`) with WebRTC P2P upgrade
+- **Browser-based RDP** via IronRDP WASM + RDCleanPath protocol (through punchd-bridge)
 
 ## Project Structure
 
@@ -62,7 +63,7 @@ keylessh/
 
 ### Component docs
 
-- **Punc'd Bridge** — NAT-traversing HTTP reverse proxy that lets you expose local web apps through a public signal server without port forwarding. Starts with HTTP relay over WebSocket, then upgrades to peer-to-peer WebRTC DataChannels. See [bridges/punchd-bridge/docs/ARCHITECTURE.md](bridges/punchd-bridge/docs/ARCHITECTURE.md) for the full connection lifecycle, PlantUML diagrams, and multi-backend routing.
+- **Punch'd Bridge** — NAT-traversing HTTP reverse proxy that lets you expose local web apps and RDP desktops through a public signal server without port forwarding. Starts with HTTP relay over WebSocket, then upgrades to peer-to-peer WebRTC DataChannels. Supports browser-based RDP via IronRDP WASM and the RDCleanPath protocol. See [bridges/punchd-bridge/docs/ARCHITECTURE.md](bridges/punchd-bridge/docs/ARCHITECTURE.md) for the full connection lifecycle, PlantUML diagrams, multi-backend routing, and RDP architecture.
 - **Signal Server** — Public signaling hub that brokers WebSocket connections between gateways and clients. Handles gateway registration, ICE candidate exchange, HTTP request relay, and TURN credential provisioning. Deployed alongside a coturn sidecar for STUN/TURN. See [signal-server/deploy.sh](signal-server/deploy.sh) for the automated VM deployment script.
 
 ## Quickstart (Local Dev)
