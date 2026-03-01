@@ -42,7 +42,7 @@ import {
 export interface ProxyOptions {
   listenPort: number;
   backendUrl: string;
-  backends?: { name: string; url: string; noAuth?: boolean; stripAuth?: boolean }[];
+  backends?: { name: string; url: string; protocol?: string; noAuth?: boolean; stripAuth?: boolean }[];
   auth: TidecloakAuth;
   stripAuthHeader: boolean;
   tcConfig: TidecloakConfig;
@@ -229,10 +229,11 @@ export function createProxy(options: ProxyOptions): {
     rejectedRequests: 0,
   };
 
-  // Build backend lookup map (name → URL)
+  // Build backend lookup map (name → URL) — skip non-HTTP backends (e.g. rdp://)
   const backendMap = new Map<string, URL>();
   if (options.backends?.length) {
     for (const b of options.backends) {
+      if (b.protocol && b.protocol !== "http") continue;
       backendMap.set(b.name, new URL(b.url));
     }
   }
