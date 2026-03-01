@@ -1,6 +1,6 @@
-# Punc'd Architecture
+# Punch'd Architecture
 
-Punc'd's signal server and gateway work together to provide authenticated, NAT-traversing access to backend web applications. The signal server acts as a public signaling hub and HTTP relay; a coturn sidecar handles STUN/TURN protocol traffic. The gateway is a local proxy that registers with the signal server and serves traffic from remote clients — first via HTTP relay, then upgraded to peer-to-peer WebRTC DataChannels.
+Punch'd's signal server and gateway work together to provide authenticated, NAT-traversing access to backend web applications. The signal server acts as a public signaling hub and HTTP relay; a coturn sidecar handles STUN/TURN protocol traffic. The gateway is a local proxy that registers with the signal server and serves traffic from remote clients — first via HTTP relay, then upgraded to peer-to-peer WebRTC DataChannels.
 
 > PlantUML sources are in [docs/diagrams/](diagrams/) if you need to regenerate or edit the SVGs.
 
@@ -114,6 +114,138 @@ Browser reassembles all chunks, then resolves the pending fetch.
 End-to-end view: portal selection → authentication → HTTP relay → WebRTC upgrade → Service Worker takeover.
 
 ![Complete Lifecycle](diagrams/complete-lifecycle.svg)
+
+## RDP Remote Desktop (IronRDP WASM + RDCleanPath)
+
+The gateway supports browser-based RDP remote desktop sessions using [IronRDP](https://github.com/Devolutions/IronRDP) compiled to WebAssembly. RDP traffic flows through the same WebRTC DataChannel infrastructure as HTTP — no additional ports or servers required.
+
+![RDP via RDCleanPath](diagrams/rdp-rdcleanpath.svg)
+
+### Architecture
+
+```
+Browser (IronRDP WASM)
+  │
+  │  IronRDP creates a WebSocket to /ws/rdcleanpath
+  │  DCWebSocket shim intercepts (same-origin)
+  │
+  ├─ Control: ws_open, ws_close      → controlChannel (DataChannel)
+  ├─ Binary:  [0x02][UUID][payload]  → bulkChannel (DataChannel)
+  │
+  │  ── WebRTC (P2P or TURN relay) ──
+  │
+  ├─ Gateway peer-handler receives DataChannel messages
+  │  recognizes path "/ws/rdcleanpath"
+  │  routes to virtual RDCleanPath session (no real WebSocket)
+  │
+  ├─ RDCleanPath handler:
+  │   1. Parses RDCleanPath Request PDU (ASN.1 DER)
+  │   2. Validates JWT + enforces dest: role
+  │   3. TCP connects to RDP server
+  │   4. X.224 Connection Request/Confirm
+  │   5. TLS handshake (gateway terminates TLS)
+  │   6. Extracts server certificate chain
+  │   7. Sends RDCleanPath Response PDU
+  │   8. Enters relay mode: TLS socket ↔ DataChannel
+  │
+  └─ RDP Server (port 3389)
+```
+
+IronRDP WASM cannot make raw TCP/TLS connections from the browser. The **RDCleanPath protocol** solves this by having the gateway act as a TLS-terminating proxy: the gateway performs the TLS handshake with the RDP server and sends the server's certificate chain back to IronRDP, which uses it for NLA/CredSSP authentication. After the handshake, the gateway enters relay mode — forwarding encrypted RDP data bidirectionally between the browser (via DataChannel) and the RDP server (via TLS socket).
+
+### DCWebSocket Shim
+
+IronRDP WASM expects a standard `WebSocket` object. The `DCWebSocket` shim (in `rdp-client.js`) overrides `window.WebSocket` for same-origin connections and routes traffic through the existing DataChannel infrastructure:
+
+- `ws_open` / `ws_close` messages flow over the **control** DataChannel (JSON)
+- Binary data uses the **bulk** DataChannel with the binary WS fast-path (`0x02` magic byte + 36-byte UUID + payload)
+
+This means no real WebSocket server is needed — the peer-handler creates a virtual WebSocket session backed by the RDCleanPath handler.
+
+### RDCleanPath Protocol (ASN.1 DER)
+
+The wire format uses ASN.1 DER encoding with EXPLICIT context-specific tags. Version constant: `3390`.
+
+**Request PDU** (client → gateway):
+
+| Tag | Field | Type | Description |
+|-----|-------|------|-------------|
+| [0] | version | INTEGER | Protocol version (3390) |
+| [2] | destination | UTF8String | Backend name (e.g. "My PC") |
+| [3] | proxy_auth | UTF8String | JWT for authentication |
+| [5] | preconnection_blob | UTF8String | Optional PCB |
+| [6] | x224_connection_pdu | OCTET STRING | X.224 Connection Request bytes |
+
+**Response PDU** (gateway → client):
+
+| Tag | Field | Type | Description |
+|-----|-------|------|-------------|
+| [0] | version | INTEGER | Protocol version (3390) |
+| [6] | x224_connection_pdu | OCTET STRING | X.224 Connection Confirm bytes |
+| [7] | server_cert_chain | SEQUENCE OF OCTET STRING | DER X.509 certs (leaf first) |
+| [9] | server_addr | UTF8String | RDP server hostname |
+
+**Error PDU** (gateway → client):
+
+| Tag | Field | Type | Description |
+|-----|-------|------|-------------|
+| [0] | version | INTEGER | Protocol version (3390) |
+| [1] | error | SEQUENCE | Error details |
+| [1][0] | error_code | INTEGER | 1=general, 2=negotiation |
+| [1][1] | http_status | INTEGER | HTTP status (401, 403, 404, 500) |
+| [1][2] | wsa_error | INTEGER | Windows socket error (e.g. 10061=ECONNREFUSED) |
+| [1][3] | tls_alert | INTEGER | TLS alert code |
+
+### RDP Backend Configuration
+
+RDP backends use the `rdp://` protocol scheme in the `BACKENDS` environment variable:
+
+```bash
+BACKENDS="Web App=http://localhost:3000,My PC=rdp://localhost:3389"
+```
+
+The browser navigates to `/rdp?backend=My%20PC` to start an RDP session. The connect form prompts for Windows credentials (username + password), then IronRDP WASM handles the full RDP protocol including CredSSP/NLA authentication.
+
+### Security
+
+- JWT validated before any TCP connection (prevents SSRF/network scanning)
+- Backend name resolved from config only (no arbitrary host:port from client)
+- `dest:<gatewayId>:<backendName>` role enforcement (same as HTTP proxy)
+- RDCleanPath sessions count toward the per-DataChannel WebSocket limit
+- TLS to the RDP server uses `rejectUnauthorized: false` (RDP servers typically use self-signed certificates — IronRDP validates via CredSSP)
+
+### IronRDP WASM Build
+
+IronRDP WASM is built from the [IronRDP](https://github.com/Devolutions/IronRDP) repository:
+
+```bash
+# Prerequisites
+rustup target add wasm32-unknown-unknown
+cargo install wasm-pack
+
+# Build
+git clone https://github.com/Devolutions/IronRDP.git /tmp/ironrdp
+cd /tmp/ironrdp/crates/ironrdp-web
+RUSTFLAGS="-Ctarget-feature=+simd128,+bulk-memory --cfg getrandom_backend=\"wasm_js\"" \
+  wasm-pack build --target web
+
+# Deploy to gateway
+cp pkg/ironrdp_web_bg.wasm <gateway>/public/wasm/
+cp pkg/ironrdp_web.js <gateway>/public/wasm/
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/rdcleanpath/der-codec.ts` | Minimal ASN.1 DER encoder/decoder |
+| `src/rdcleanpath/rdcleanpath.ts` | RDCleanPath PDU parse/serialize |
+| `src/rdcleanpath/rdcleanpath-handler.ts` | Session state machine (AWAITING_REQUEST → CONNECTING → RELAY → CLOSED) |
+| `src/webrtc/peer-handler.ts` | Intercepts `/ws/rdcleanpath` WebSocket opens on DataChannel |
+| `public/js/rdp-client.js` | Browser-side: signaling, DCWebSocket shim, IronRDP WASM integration, canvas rendering |
+| `public/rdp.html` | RDP connect form + fullscreen canvas |
+| `public/wasm/ironrdp_web.js` | IronRDP WASM JavaScript bindings |
+| `public/wasm/ironrdp_web_bg.wasm` | IronRDP WASM binary |
 
 ## Authentication Flow
 

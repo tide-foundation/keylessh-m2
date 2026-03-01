@@ -1,12 +1,12 @@
-# Punc'd
+# Punch'd
 
-NAT-traversing authenticated reverse proxy gateway. Access private web applications from anywhere through hole-punched WebRTC DataChannels.
+NAT-traversing authenticated reverse proxy gateway. Access private web applications and remote desktops from anywhere through hole-punched WebRTC DataChannels.
 
 ## How it works
 
 ```
-Browser → Signal Server (relay) → Gateway → Backend App
-   │              ↕ coturn             │
+Browser → Signal Server (relay) → Gateway → Backend App (HTTP)
+   │              ↕ coturn             │  └→ RDP Server (RDCleanPath)
    └──── WebRTC DataChannel (P2P) ────┘
          (after hole punch)
 ```
@@ -85,7 +85,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#configuration-reference) for the
 |----------|-----------|-------------|
 | `SIGNAL_SERVER_URL` | Gateway | WebSocket URL of the signal server |
 | `BACKEND_URL` | Gateway | Backend to proxy to |
-| `BACKENDS` | Gateway | Multiple backends: `"App=http://host:3000,Auth=http://host:8080;noauth"` |
+| `BACKENDS` | Gateway | Multiple backends: `"App=http://host:3000,Desktop=rdp://host:3389"` |
 | `API_SECRET` | Both | Shared secret for gateway registration |
 | `TURN_SECRET` | Both + coturn | Shared secret for TURN credentials (HMAC-SHA256) |
 | `EXTERNAL_IP` | coturn | Public IP for TURN relay addresses |
@@ -93,6 +93,18 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#configuration-reference) for the
 | `TC_INTERNAL_URL` | Gateway | Internal TideCloak URL when `KC_HOSTNAME` is public |
 | `GATEWAY_DISPLAY_NAME` | Gateway | Name shown in the portal |
 | `GATEWAY_DESCRIPTION` | Gateway | Description shown in the portal |
+
+## RDP Remote Desktop
+
+The gateway supports browser-based RDP via [IronRDP](https://github.com/Devolutions/IronRDP) WASM. Add RDP backends with the `rdp://` protocol scheme:
+
+```bash
+BACKENDS="Web App=http://localhost:3000,My PC=rdp://localhost:3389"
+```
+
+Navigate to `/rdp?backend=My%20PC` in the browser, enter Windows credentials, and connect. RDP traffic flows through the same WebRTC DataChannel as HTTP — no additional ports needed. The gateway handles TLS termination with the RDP server via the RDCleanPath protocol.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#rdp-remote-desktop-ironrdp-wasm--rdcleanpath) for protocol details and the IronRDP WASM build instructions.
 
 ## Documentation
 
