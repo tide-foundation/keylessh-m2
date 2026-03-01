@@ -99,6 +99,9 @@ export const api = {
     list: () => apiRequest<ServerWithAccess[]>("/api/servers"),
     get: (id: string) => apiRequest<ServerWithAccess>(`/api/servers/${id}`),
   },
+  gatewayEndpoints: {
+    list: () => apiRequest<GatewayEndpoint[]>("/api/gateway-endpoints"),
+  },
   sessions: {
     list: () => apiRequest<ActiveSession[]>("/api/sessions"),
     create: (data: { serverId: string; sshUser: string }) =>
@@ -543,6 +546,19 @@ export interface OrgClientRole {
   description?: string;
   composite?: boolean;
   clientRole?: boolean;
+}
+
+// Gateway endpoint type (from signal servers)
+export interface GatewayEndpoint {
+  id: string;
+  displayName: string;
+  description: string;
+  backends: { name: string; protocol?: string; accessible: boolean }[];
+  online: boolean;
+  clientCount: number;
+  signalServerId: string;
+  signalServerName: string;
+  signalServerUrl: string;
 }
 
 // Re-export types for convenience

@@ -29,19 +29,42 @@ The result: enterprise-grade SSH access control without any private keys to mana
 
 ## Features
 
-- **Browser-side SSH** via `@microsoft/dev-tunnels-ssh` + `xterm.js`
+- **Browser-side SSH** via `@microsoft/dev-tunnels-ssh` + `xterm.js`, with no private keys anywhere
 - **SFTP file browser** - Browse, upload, download, rename, delete files via split-panel UI
 - **Quorum-based RBAC, zero-knowledge OIDC login** with TideCloak - no passwords, no keys
-- **Programmable policy encforcement** with Forseti contracts for SSH access
-- **Simple, static, trustless SSH account access** (e.g., only `ssh:root` role holders can SSH as root)
-- **Admin UX**: servers, users, roles, policy templates, change requests (access, roles, policies), sessions, logs
-- **Optional external bastion** (`tcp-bridge`) for scalable WS↔TCP tunneling
+- **Programmable policy enforcement** with Forseti contracts for SSH access
+- **Admin UX**: servers, users, roles, policy templates, change requests, sessions, logs
+- **Browser-based RDP** - full Windows remote desktop in a browser tab via [IronRDP](https://github.com/Devolutions/IronRDP) WASM. No client install, no ports to open, no VPN. See [RDP Architecture](bridges/punchd-bridge/docs/ARCHITECTURE.md#rdp-remote-desktop-ironrdp-wasm--rdcleanpath).
+- **P2P DataChannel transport** - automatic upgrade from HTTP relay to direct peer-to-peer WebRTC, with a Service Worker that silently reroutes all browser fetches through the encrypted DataChannel. See [Connection Lifecycle](bridges/punchd-bridge/docs/ARCHITECTURE.md#connection-lifecycle).
+- **Signal server** (`signal-server/`) - coordinates P2P connections between browsers and gateways via WebSocket signaling (SDP/ICE), relays HTTP traffic before DataChannel is ready, and generates ephemeral TURN credentials. Deployed with a coturn sidecar for STUN NAT discovery and TURN relay fallback. See [Architecture](bridges/punchd-bridge/docs/ARCHITECTURE.md#system-overview).
+- **Multi-backend routing** (`bridges/punchd-bridge`) - proxy to multiple HTTP backends and RDP servers from a single gateway. See [Multi-Backend Routing](bridges/punchd-bridge/docs/ARCHITECTURE.md#multi-backend-routing).
+
+## Project Structure
+
+```
+keylessh/
+├── client/                  # React UI (xterm.js, SSH client, SFTP browser)
+├── server/                  # Express API + WebSocket bridge + SQLite
+├── shared/                  # Shared types + schema
+├── signal-server/           # P2P signaling + HTTP relay for punchd-bridge
+├── bridges/
+│   ├── tcp-bridge/          # Stateless WS↔TCP forwarder (optional)
+│   └── punchd-bridge/       # NAT-traversing HTTP reverse proxy gateway
+│       └── gateway/         # Gateway source code
+├── docs/                    # Architecture, deployment, developer guides
+└── script/                  # TideCloak setup scripts
+```
 
 ## Documentation
 
 - Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Deployment: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - Developer guide: [docs/DEVELOPERS.md](docs/DEVELOPERS.md)
+
+### Component docs
+
+- [Punch'd Bridge](bridges/punchd-bridge/docs/ARCHITECTURE.md) — [connection lifecycle](bridges/punchd-bridge/docs/ARCHITECTURE.md#connection-lifecycle) (portal → relay → P2P → SW takeover), [RDP/RDCleanPath](bridges/punchd-bridge/docs/ARCHITECTURE.md#rdp-remote-desktop-ironrdp-wasm--rdcleanpath), [multi-backend routing](bridges/punchd-bridge/docs/ARCHITECTURE.md#multi-backend-routing), [DataChannel messages](bridges/punchd-bridge/docs/ARCHITECTURE.md#datachannel-messages-gateway--browser), [API endpoints](bridges/punchd-bridge/docs/ARCHITECTURE.md#signal-server-api-routes), [security & rate limits](bridges/punchd-bridge/docs/ARCHITECTURE.md#security), [sequence diagrams](bridges/punchd-bridge/docs/diagrams/)
+- [Signal Server](signal-server/deploy.sh) — WebSocket signaling (SDP/ICE), HTTP relay, gateway registry, TURN credential generation, coturn sidecar for STUN/TURN
 
 ## Quickstart (Local Dev)
 
@@ -90,6 +113,9 @@ npm run dev
 ```
 
 Access the KeyleSSH app in your browser at: `http://localhost:3000`
+
+> [!IMPORTANT]
+> **CSP iframe error?** The secure enclave (TideCloak/Heimdall) is loaded in a hidden iframe to share the session ID. If you see a console error like `Framing 'http://localhost:XXXX/' violates the Content Security Policy directive: "frame-src ..."`, add the blocked origin to the `frame-src` list in [`server/index.ts`](server/index.ts). See [Troubleshooting](docs/DEVELOPERS.md#troubleshooting) for details.
 
 ## Example server set-up
 

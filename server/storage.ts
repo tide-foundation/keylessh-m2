@@ -10,6 +10,7 @@ import {
   subscriptions,
   billingHistory,
   bridges,
+  signalServers,
   organizations,
   organizationUsers,
   enterpriseLeads,
@@ -33,6 +34,8 @@ import {
   type BillingHistory,
   type Bridge,
   type InsertBridge,
+  type SignalServer,
+  type InsertSignalServer,
   type Organization,
   type OrganizationUser,
   type EnterpriseLead,
@@ -2280,6 +2283,90 @@ export class EnterpriseLeadStorage {
   }
 }
 
+export class SignalServerStorage {
+  async createSignalServer(data: InsertSignalServer): Promise<SignalServer> {
+    const id = randomUUID();
+    const now = new Date();
+
+    await db.insert(signalServers).values({
+      id,
+      name: data.name,
+      url: data.url,
+      description: data.description || null,
+      enabled: data.enabled !== false,
+      createdAt: now,
+    });
+
+    return {
+      id,
+      name: data.name,
+      url: data.url,
+      description: data.description || null,
+      enabled: data.enabled !== false,
+      createdAt: now,
+    };
+  }
+
+  async getSignalServer(id: string): Promise<SignalServer | undefined> {
+    const [result] = await db.select().from(signalServers).where(eq(signalServers.id, id)).limit(1);
+    return result;
+  }
+
+  async getSignalServers(): Promise<SignalServer[]> {
+    return await db.select().from(signalServers).orderBy(signalServers.name);
+  }
+
+  async getEnabledSignalServers(): Promise<SignalServer[]> {
+    return await db.select().from(signalServers)
+      .where(eq(signalServers.enabled, true))
+      .orderBy(signalServers.name);
+  }
+
+  async updateSignalServer(id: string, data: Partial<InsertSignalServer>): Promise<SignalServer | undefined> {
+    const existing = await this.getSignalServer(id);
+    if (!existing) return undefined;
+
+    const updates: string[] = [];
+    const values: any[] = [];
+    let paramIndex = 1;
+
+    if (data.name !== undefined) {
+      updates.push(`name = $${paramIndex++}`);
+      values.push(data.name);
+    }
+    if (data.url !== undefined) {
+      updates.push(`url = $${paramIndex++}`);
+      values.push(data.url);
+    }
+    if (data.description !== undefined) {
+      updates.push(`description = $${paramIndex++}`);
+      values.push(data.description || null);
+    }
+    if (data.enabled !== undefined) {
+      updates.push(`enabled = $${paramIndex++}`);
+      values.push(data.enabled);
+    }
+
+    if (updates.length > 0) {
+      values.push(id);
+      await pool.query(
+        `UPDATE signal_servers SET ${updates.join(', ')} WHERE id = $${paramIndex}`,
+        values
+      );
+    }
+
+    return this.getSignalServer(id);
+  }
+
+  async deleteSignalServer(id: string): Promise<boolean> {
+    const result = await pool.query(
+      `DELETE FROM signal_servers WHERE id = $1`,
+      [id]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+}
+
 export const storage = new SQLiteStorage();
 export const approvalStorage = new ApprovalStorage();
 export const policyStorage = new PolicyStorage();
@@ -2289,5 +2376,6 @@ export const subscriptionStorage = new SubscriptionStorage();
 export const recordingStorage = new RecordingStorage();
 export const fileOperationStorage = new FileOperationStorage();
 export const bridgeStorage = new BridgeStorage();
+export const signalServerStorage = new SignalServerStorage();
 export const organizationStorage = new OrganizationStorage();
 export const enterpriseLeadStorage = new EnterpriseLeadStorage();

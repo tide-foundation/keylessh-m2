@@ -42,6 +42,16 @@ export const bridges = pgTable("bridges", {
   organizationId: text("organization_id").notNull().default("default"),
 });
 
+// Signal servers - P2P signaling + HTTP relay endpoints (gateway connections)
+export const signalServers = pgTable("signal_servers", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  url: text("url").notNull(), // e.g. https://tidestun.codesyo.com:9090
+  description: text("description"),
+  enabled: boolean("enabled").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+});
+
 export const servers = pgTable("servers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
@@ -288,6 +298,7 @@ export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true,
 export const insertSubscriptionSchema = createInsertSchema(subscriptions).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertBillingHistorySchema = createInsertSchema(billingHistory).omit({ id: true, createdAt: true });
 export const insertBridgeSchema = createInsertSchema(bridges).omit({ id: true, createdAt: true });
+export const insertSignalServerSchema = createInsertSchema(signalServers).omit({ id: true, createdAt: true });
 export const insertOrganizationSchema = createInsertSchema(organizations).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertOrganizationUserSchema = createInsertSchema(organizationUsers).omit({ id: true, joinedAt: true });
 export const insertEnterpriseLeadSchema = createInsertSchema(enterpriseLeads).omit({ id: true, createdAt: true, updatedAt: true });
@@ -298,6 +309,7 @@ export type InsertSession = z.infer<typeof insertSessionSchema>;
 export type InsertSubscription = z.infer<typeof insertSubscriptionSchema>;
 export type InsertBillingHistory = z.infer<typeof insertBillingHistorySchema>;
 export type InsertBridge = z.infer<typeof insertBridgeSchema>;
+export type InsertSignalServer = z.infer<typeof insertSignalServerSchema>;
 export type InsertOrganization = z.infer<typeof insertOrganizationSchema>;
 export type InsertOrganizationUser = z.infer<typeof insertOrganizationUserSchema>;
 export type InsertEnterpriseLead = z.infer<typeof insertEnterpriseLeadSchema>;
@@ -309,6 +321,7 @@ export type FileOperation = typeof fileOperations.$inferSelect;
 export type Subscription = typeof subscriptions.$inferSelect;
 export type BillingHistory = typeof billingHistory.$inferSelect;
 export type Bridge = typeof bridges.$inferSelect;
+export type SignalServer = typeof signalServers.$inferSelect;
 export type Organization = typeof organizations.$inferSelect;
 export type OrganizationUser = typeof organizationUsers.$inferSelect;
 export type EnterpriseLead = typeof enterpriseLeads.$inferSelect;
