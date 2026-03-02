@@ -14,7 +14,7 @@ fi
 
 # Configuration (from .env or defaults)
 RESOURCE_GROUP="${RESOURCE_GROUP:-KeyleSSH}"
-WEBAPP_NAME="${WEBAPP_NAME:-keylessh-multi}"
+WEBAPP_NAME="${WEBAPP_NAME:-keylessh-devops}"
 
 # Get project root (parent of azure folder)
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
