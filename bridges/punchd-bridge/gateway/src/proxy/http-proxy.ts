@@ -119,6 +119,7 @@ function serveFile(
     // Prevent path traversal and symlink escape — real path must be inside PUBLIC_DIR
     const realPath = realpathSync(resolved);
     if (!realPath.startsWith(PUBLIC_DIR + "/")) {
+      console.log(`[serveFile] 403: PUBLIC_DIR="${PUBLIC_DIR}" realPath="${realPath}" filename="${filename}"`);
       res.writeHead(403, { "Content-Type": "text/plain" });
       res.end("Forbidden");
       return;
