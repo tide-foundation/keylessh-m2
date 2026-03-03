@@ -373,7 +373,7 @@ export async function createSshPolicyRequest(
   const policyParams = new Map<string, any>();
   policyParams.set("Role", config.roleName);
   policyParams.set("threshold", config.threshold);
-  policyParams.set("resource", config.resource);
+  policyParams.set("Resource", config.resource);
   policyParams.set("approval_type", config.approvalType);
   policyParams.set("execution_type", config.executionType);
 
@@ -435,7 +435,7 @@ export async function createSshPolicyRequestWithCode(
   const policyParams = new Map<string, any>();
   policyParams.set("Role", config.roleName);
   policyParams.set("threshold", config.threshold);
-  policyParams.set("resource", config.resource);
+  policyParams.set("Resource", config.resource);
   policyParams.set("approval_type", config.approvalType);
   policyParams.set("execution_type", config.executionType);
 
