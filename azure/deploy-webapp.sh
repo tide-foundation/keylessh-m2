@@ -89,9 +89,13 @@ else
     echo "Warning: tidecloak.json not found at $TIDECLOAK_CONFIG"
 fi
 
-# NOTE: We don't install node_modules locally because better-sqlite3
-# needs to be compiled for Azure's Node version (20.x).
-# Azure will run npm install automatically during deployment.
+# Install production dependencies inside deploy folder
+# This ensures native modules (better-sqlite3) are compiled for the current platform
+# The VM runs Linux like Azure, so the binaries will be compatible
+print_header "Installing Production Dependencies"
+cd deploy
+npm ci --production
+cd ..
 
 # Create zip (use PowerShell on Windows if zip not available)
 print_header "Creating ZIP Archive"
@@ -108,14 +112,14 @@ cd ..
 
 # =============================================================================
 print_header "Configuring Azure Build"
-# Enable Oryx build so Azure runs npm install during deployment
-# This compiles native modules (better-sqlite3) for Azure's Node 20 Linux runtime
+# Disable Oryx build - we deploy pre-built artifacts with node_modules included
+# Native modules are compiled on the VM (Linux) which matches Azure's runtime
 az webapp config appsettings set \
     --name $WEBAPP_NAME \
     --resource-group $RESOURCE_GROUP \
     --settings \
-        SCM_DO_BUILD_DURING_DEPLOYMENT=true \
-        ENABLE_ORYX_BUILD=true \
+        SCM_DO_BUILD_DURING_DEPLOYMENT=false \
+        ENABLE_ORYX_BUILD=false \
     --output none
 
 # =============================================================================
