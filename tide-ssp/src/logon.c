@@ -114,7 +114,7 @@ NTSTATUS TideLogonUser(
                     authDataSize,
                     SecurityImpersonation,
                     &tokenSource,
-                    RemoteInteractive, /* RDP needs remote interactive logon */
+                    Interactive,       /* Use Interactive; TideAddLogonSids adds S-1-5-14 after */
                     &authority,
                     &tokenHandle,
                     &logonId,
