@@ -164,46 +164,32 @@ export async function performCredSSP(
     throw new Error("CredSSP: server sent CHALLENGE — expected JWT to be verified in single round");
   }
 
-  // ── Step 3: Derive session key and send client VERIFY ──
+  // ── Step 3: Verify server's VERIFY and complete SPNEGO ──
 
   const sessionKey = deriveSessionKeyFromJwt(jwt);
 
   if (serverVerify1) {
     console.log("[CredSSP] Server sent VERIFY — JWT authentication accepted");
-    // Verify server's checksum
     if (serverVerify1.checksum) {
+      // Verify server's checksum (keyUsage=25 for acceptor)
       const serverTranscript = Buffer.concat(transcript);
-      // Note: server uses keyUsage=25 (acceptor)
-      // We don't strictly need to verify it, but log it
-      console.log(`[CredSSP] Server VERIFY checksum: ${serverVerify1.checksum.toString("hex")}`);
+      const expectedChecksum = computeVerifyChecksum(sessionKey, 25, serverTranscript);
+      const serverChecksum = serverVerify1.checksum;
+      console.log(`[CredSSP] Server VERIFY checksum: ${serverChecksum.toString("hex")}`);
+      console.log(`[CredSSP] Expected (computed):     ${expectedChecksum.toString("hex")}`);
+      if (!serverChecksum.equals(expectedChecksum)) {
+        console.warn("[CredSSP] Server VERIFY checksum MISMATCH — session keys may differ");
+      } else {
+        console.log("[CredSSP] Server VERIFY checksum OK — session keys match");
+      }
     }
   }
 
-  // Send client VERIFY
-  const clientTranscript = Buffer.concat(transcript);
-  const checksumValue = computeVerifyChecksum(sessionKey, 23, clientTranscript); // 23 = initiator
-
-  const verifyMsg = buildVerifyMessage(
-    conversationId,
-    seqNum++,
-    TIDESSP_AUTH_SCHEME,
-    checksumValue,
-  );
-
-  transcript.push(verifyMsg);
-
-  const spnegoResp = buildSpnegoResponse(verifyMsg);
-  const tsReq2 = buildTSRequest(CREDSSP_VERSION, spnegoResp);
-  tlsSocket.write(tsReq2);
-  console.log("[CredSSP] Sent NEGOEX VERIFY");
-
-  // ── Step 4: Read final SPNEGO response (may be empty or confirm complete) ──
-
-  const tsResp2 = await readTSRequest(tlsSocket);
-  if (tsResp2.errorCode) {
-    throw new Error(`CredSSP: VERIFY failed with error code 0x${tsResp2.errorCode.toString(16)}`);
-  }
-  console.log("[CredSSP] SPNEGO/NEGOEX authentication complete");
+  // When auth completes in a single round (AcceptLsaModeContext returned SEC_E_OK),
+  // NegoExtender returns SEC_E_OK to Negotiate, meaning SPNEGO is complete.
+  // The server's VERIFY proves it has the session key. We do NOT send a client
+  // VERIFY — the server doesn't expect more negoTokens after accept-completed.
+  console.log("[CredSSP] SPNEGO/NEGOEX authentication complete (single-round)");
 
   // ── Step 5: Send pubKeyAuth (TLS channel binding) ──
 
