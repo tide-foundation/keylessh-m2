@@ -254,10 +254,10 @@ export async function performCredSSP(
   let serverChecksumOk = false;
 
   // Key usage convention (empirically determined):
-  //   Acceptor (server) VERIFY: keyUsage = 23
-  //   Initiator (client) VERIFY: keyUsage = 25
+  //   Both sides use keyUsage = 23 for VERIFY checksums.
+  //   The VERIFY covers the same transcript, so both produce identical checksums.
   const KU_ACCEPTOR_VERIFY = 23;
-  const KU_INITIATOR_VERIFY = 25;
+  const KU_INITIATOR_VERIFY = 23;
 
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
     const expected = computeAes128Checksum(sessionKey, KU_ACCEPTOR_VERIFY, transcriptData);
