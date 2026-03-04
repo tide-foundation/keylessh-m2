@@ -187,7 +187,10 @@ export function buildExchangeMessage(
  *   64: Checksum.ChecksumType (u32)
  *   68: Checksum.ChecksumValue.ByteArrayOffset (u32)
  *   72: Checksum.ChecksumValue.ByteArrayLength (u32)
- *   76: Checksum bytes
+ *   76: (4 bytes padding for 8-byte alignment)
+ *   80: Checksum bytes
+ *
+ * Windows NegoExtender uses headerLen=80 (with 4-byte alignment pad).
  */
 export function buildVerifyMessage(
   conversationId: Buffer,
@@ -196,7 +199,7 @@ export function buildVerifyMessage(
   checksumValue: Buffer,
   checksumType: number,
 ): Buffer {
-  const headerLen = 76;
+  const headerLen = 80; // matches Windows NegoExtender layout
   const totalLen = headerLen + checksumValue.length;
   const buf = Buffer.alloc(totalLen);
 
@@ -208,8 +211,9 @@ export function buildVerifyMessage(
   buf.writeUInt32LE(20, 56);                     // cbHeaderLength
   buf.writeUInt32LE(CHECKSUM_SCHEME_RFC3961, 60); // ChecksumScheme
   buf.writeInt32LE(checksumType, 64);             // ChecksumType
-  buf.writeUInt32LE(headerLen, 68);               // value offset
+  buf.writeUInt32LE(headerLen, 68);               // value offset (80)
   buf.writeUInt32LE(checksumValue.length, 72);    // value length
+  // bytes 76-79: zero padding (Buffer.alloc fills with 0)
 
   checksumValue.copy(buf, headerLen);
 
