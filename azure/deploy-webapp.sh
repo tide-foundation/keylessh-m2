@@ -123,25 +123,15 @@ az webapp config appsettings set \
     --output none
 
 # =============================================================================
-print_header "Deploying to Azure Web App (with Oryx build)"
+print_header "Deploying to Azure Web App"
 
-# Get publish credentials
-CREDS=$(az webapp deployment list-publishing-credentials \
+# Deploy using az CLI with --clean to remove old files first
+az webapp deploy \
     --name $WEBAPP_NAME \
     --resource-group $RESOURCE_GROUP \
-    --query "{username:publishingUserName, password:publishingPassword}" -o json)
-
-DEPLOY_USER=$(echo $CREDS | jq -r '.username')
-DEPLOY_PASS=$(echo $CREDS | jq -r '.password')
-
-# Deploy using Kudu zipdeploy API (triggers Oryx build)
-curl -X POST \
-    --user "$DEPLOY_USER:$DEPLOY_PASS" \
-    --data-binary @deploy.zip \
-    -H "Content-Type: application/zip" \
-    "https://$WEBAPP_NAME.scm.azurewebsites.net/api/zipdeploy?isAsync=false"
-
-echo ""
+    --src-path deploy.zip \
+    --type zip \
+    --clean true
 
 # =============================================================================
 print_header "Cleaning Up"
