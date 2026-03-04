@@ -324,7 +324,24 @@ export async function performCredSSP(
     serverCksumType,
   );
 
-  const verifySpnego = buildSpnegoResponse(clientVerifyMsg);
+  // Compute SPNEGO mechListMIC over the MechTypeList from our NegTokenInit.
+  // The MechTypeList is: SEQUENCE { NEGOEX_OID }
+  const mechTypesList = encodeTlv(TAG_SEQUENCE, NEGOEX_OID);
+  console.log(`[CredSSP] MechTypesList (${mechTypesList.length}b): ${mechTypesList.toString("hex")}`);
+
+  // Try mechListMIC with multiple key usages for debugging
+  if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
+    for (const ku of [23, 25, 22, 15]) {
+      const mic = computeAes128Checksum(sessionKey, ku, mechTypesList);
+      console.log(`[CredSSP]   mechListMIC ku=${ku}: ${mic.toString("hex")}`);
+    }
+  }
+
+  // Use ku=23 for mechListMIC (same as VERIFY)
+  const mechListMIC = computeAes128Checksum(sessionKey, 23, mechTypesList);
+  console.log(`[CredSSP] Using mechListMIC (ku=23): ${mechListMIC.toString("hex")}`);
+
+  const verifySpnego = buildSpnegoResponse(clientVerifyMsg, mechListMIC);
   console.log(`[CredSSP] Client NEGOEX VERIFY raw (${clientVerifyMsg.length}b): ${clientVerifyMsg.toString("hex")}`);
   console.log(`[CredSSP] Client SPNEGO response raw (${verifySpnego.length}b): ${verifySpnego.toString("hex")}`);
   // Also log the server's SPNEGO for comparison
@@ -421,11 +438,14 @@ function buildSpnegoInit(mechToken: Buffer): Buffer {
 }
 
 /**
- * Build a SPNEGO NegTokenResp (client continuation).
+ * Build a SPNEGO NegTokenResp (client continuation) with optional mechListMIC.
  */
-function buildSpnegoResponse(responseToken: Buffer): Buffer {
+function buildSpnegoResponse(responseToken: Buffer, mechListMIC?: Buffer): Buffer {
   const elements: Buffer[] = [];
   elements.push(encodeExplicit(2, encodeOctetString(responseToken)));
+  if (mechListMIC) {
+    elements.push(encodeExplicit(3, encodeOctetString(mechListMIC)));
+  }
   const negTokenResp = encodeSequence(elements);
   return encodeTlv(0xa1, negTokenResp);
 }
