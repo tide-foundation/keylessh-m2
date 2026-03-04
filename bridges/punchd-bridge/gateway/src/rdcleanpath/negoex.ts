@@ -500,6 +500,19 @@ export function computeAes128Checksum(
   return createHmac("sha1", kc).update(data).digest().subarray(0, 12);
 }
 
+/** Debug variant using Ki (0x55) instead of Kc (0x99) */
+export function computeAes128ChecksumKi(
+  sessionKey: Buffer,
+  keyUsage: number,
+  data: Buffer,
+): Buffer {
+  const constant = Buffer.alloc(5);
+  constant.writeUInt32BE(keyUsage, 0);
+  constant[4] = 0x55;
+  const ki = dk(sessionKey, constant);
+  return createHmac("sha1", ki).update(data).digest().subarray(0, 12);
+}
+
 /**
  * Generate a random NEGOEX conversation ID (GUID).
  */
