@@ -307,10 +307,12 @@ export function deriveSessionKeyFromJwt(jwt: string): Buffer {
   if (lastDot < 0) throw new Error("Invalid JWT");
   const sigB64 = jwt.substring(lastDot + 1);
   const sigBytes = Buffer.from(sigB64, "base64url");
-  return createHash("sha256")
+  console.log(`[NEGOEX] JWT sig bytes (${sigBytes.length}): ${sigBytes.subarray(0, 8).toString("hex")}...${sigBytes.subarray(60, 64).toString("hex")}`);
+  const key = createHash("sha256")
     .update(sigBytes)
     .digest()
     .subarray(0, 16);
+  return key;
 }
 
 /**
