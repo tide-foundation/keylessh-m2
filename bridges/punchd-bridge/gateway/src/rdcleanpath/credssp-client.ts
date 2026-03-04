@@ -138,6 +138,19 @@ export async function performCredSSP(
   const serverMsgs1 = parseNegoexMessages(serverNegoex1);
   console.log(`[CredSSP] Server sent ${serverMsgs1.length} NEGOEX message(s): types=[${serverMsgs1.map(m => m.messageType).join(", ")}]`);
 
+  // Debug: dump raw NEGOEX message headers from server
+  {
+    let dpos = 0;
+    while (dpos + 40 <= serverNegoex1.length) {
+      const mType = serverNegoex1.readUInt32LE(dpos + 8);
+      const mSeq = serverNegoex1.readUInt32LE(dpos + 12);
+      const mHdrLen = serverNegoex1.readUInt32LE(dpos + 16);
+      const mMsgLen = serverNegoex1.readUInt32LE(dpos + 20);
+      console.log(`[CredSSP] Server msg: type=${mType}, seq=${mSeq}, hdrLen=${mHdrLen}, msgLen=${mMsgLen}`);
+      dpos += mMsgLen;
+    }
+  }
+
   // Record server's NEGOEX messages in transcript — EXCLUDE VERIFY messages.
   // MS-NEGOEX: VERIFY checksum is computed over all messages except VERIFYs.
   // We need to extract only the non-VERIFY message bytes from the server response.
