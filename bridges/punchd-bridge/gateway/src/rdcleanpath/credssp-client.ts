@@ -205,6 +205,30 @@ export async function performCredSSP(
         const hk = hmac("md5", sessionKey).update(kuBuf).update(serverTranscript).digest();
         console.log(`[CredSSP] HMAC-MD5(key,ku${ku}||data): ${hk.toString("hex")}${serverChecksum.equals(hk) ? " *** MATCH ***" : ""}`);
       }
+      // checksumType=2 = rsa-md4 (UNKEYED) per RFC 3961
+      const md4 = hash("md4").update(serverTranscript).digest();
+      console.log(`[CredSSP] MD4(data): ${md4.toString("hex")}${serverChecksum.equals(md4) ? " *** MATCH ***" : ""}`);
+      // Try different transcript: only server msg (ACCEPTOR_NEGO)
+      const srvOnly = transcript[2]; // msg[2] = ACCEPTOR_NEGO
+      const md4srv = hash("md4").update(srvOnly).digest();
+      console.log(`[CredSSP] MD4(srv_only): ${md4srv.toString("hex")}${serverChecksum.equals(md4srv) ? " *** MATCH ***" : ""}`);
+      // Try different transcript: only client msgs
+      const cliOnly = Buffer.concat([transcript[0], transcript[1]]);
+      const md4cli = hash("md4").update(cliOnly).digest();
+      console.log(`[CredSSP] MD4(cli_only): ${md4cli.toString("hex")}${serverChecksum.equals(md4cli) ? " *** MATCH ***" : ""}`);
+      // Try server-first order
+      const srvFirst = Buffer.concat([transcript[2], transcript[0], transcript[1]]);
+      const md4sf = hash("md4").update(srvFirst).digest();
+      console.log(`[CredSSP] MD4(srv_first): ${md4sf.toString("hex")}${serverChecksum.equals(md4sf) ? " *** MATCH ***" : ""}`);
+      // Try rc4-hmac checksum with full transcript but using MD4 inside
+      // Ksign = HMAC-MD5(key, "signaturekey\0"), tmp = MD4(ku||data), ck = HMAC-MD5(Ksign, tmp)
+      for (const ku of [23, 25]) {
+        const ksign = hmac("md5", sessionKey).update(Buffer.from("signaturekey\0", "ascii")).digest();
+        const kuBuf2 = Buffer.alloc(4); kuBuf2.writeInt32LE(ku);
+        const tmp = hash("md4").update(kuBuf2).update(serverTranscript).digest();
+        const ck = hmac("md5", ksign).update(tmp).digest();
+        console.log(`[CredSSP] rc4-md4 ku=${ku}: ${ck.toString("hex")}${serverChecksum.equals(ck) ? " *** MATCH ***" : ""}`);
+      }
     }
   }
 
