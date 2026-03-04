@@ -172,6 +172,14 @@ export async function performCredSSP(
     serverConvId.copy(conversationId);
   }
 
+  // Update seqNum to continue after the server's messages (global sequence)
+  for (const msg of serverMsgs1) {
+    if (msg.sequenceNum >= seqNum) {
+      seqNum = msg.sequenceNum + 1;
+    }
+  }
+  console.log(`[CredSSP] Next seqNum: ${seqNum}`);
+
   // Check if server sent VERIFY (JWT accepted, single round) or CHALLENGE (fallback)
   const serverVerify1 = serverMsgs1.find(m => m.messageType === MSG_VERIFY);
   const serverChallenge = serverMsgs1.find(m => m.messageType === MSG_CHALLENGE);
