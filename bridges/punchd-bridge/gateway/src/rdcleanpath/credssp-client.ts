@@ -189,6 +189,37 @@ export async function performCredSSP(
     console.log(`[CredSSP]   part[${ti}]: type=${msgType}, len=${part.length}, first8=${part.subarray(0, 8).toString("hex")}`);
   }
   console.log(`[CredSSP] Transcript SHA256: ${createHash("sha256").update(transcriptData).digest().toString("hex")}`);
+
+  // Debug: try multiple transcript compositions to find the correct one
+  if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
+    const serverCksum = serverVerify1.checksum;
+    const tryChecksum = (label: string, data: Buffer) => {
+      const cksum = computeAes128Checksum(sessionKey, 25, data);
+      const match = serverCksum.equals(cksum);
+      if (match) console.log(`[CredSSP] *** MATCH *** ${label}: ${cksum.toString("hex")}`);
+      else console.log(`[CredSSP]   ${label}: ${cksum.toString("hex")}`);
+      return match;
+    };
+    // Full transcript (current)
+    tryChecksum("all 3 msgs", transcriptData);
+    // Without ACCEPTOR_NEGO
+    tryChecksum("INIT+APREQ only", Buffer.concat([transcript[0], transcript[1]]));
+    // Without INITIATOR_NEGO
+    tryChecksum("APREQ+ACCEPT only", Buffer.concat([transcript[1], transcript[2]]));
+    // Only AP_REQUEST
+    tryChecksum("APREQ only", transcript[1]);
+    // Only INIT_NEGO+ACCEPT_NEGO
+    tryChecksum("INIT+ACCEPT only", Buffer.concat([transcript[0], transcript[2]]));
+    // All 3 msgs + server VERIFY message
+    const verifyBuf = serverNegoex1;
+    tryChecksum("all msgs + raw server", verifyBuf);
+    // Try with key usage 23 instead of 25
+    const cksum23 = computeAes128Checksum(sessionKey, 23, transcriptData);
+    console.log(`[CredSSP]   ku=23 all 3: ${cksum23.toString("hex")}${serverCksum.equals(cksum23) ? " *** MATCH ***" : ""}`);
+    // Try with key usage 25 but 0x55 (Ki) instead of 0x99 (Kc)
+    // (Would need to temporarily modify, skip for now)
+  }
+
   let serverChecksumOk = false;
 
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
