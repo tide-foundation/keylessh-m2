@@ -307,21 +307,24 @@ export async function performCredSSP(
     console.log(`[CredSSP]   +svrVerify ku=25: ${ck25wv.toString("hex")}`);
   }
 
-  // Use ku=25 for initiator (standard convention: initiator=25, acceptor=23)
-  const KU_CLIENT_VERIFY = 25;
+  // Diagnostic: send WRONG checksum first to see if error changes.
+  // If SEC_E_MESSAGE_ALTERED with both wrong and right checksums, the error is NOT from VERIFY.
+  const KU_CLIENT_VERIFY = 23;
   let clientChecksum: Buffer;
   if (serverCksumType === CHECKSUM_TYPE_HMAC_SHA1_96_AES128) {
     clientChecksum = computeAes128Checksum(sessionKey, KU_CLIENT_VERIFY, transcriptData);
   } else {
     clientChecksum = md4(transcriptData);
   }
-  console.log(`[CredSSP] Client VERIFY: ku=${KU_CLIENT_VERIFY}, checksum=${clientChecksum.toString("hex")}`);
+  // Deliberately corrupt the checksum for diagnostic
+  const wrongChecksum = Buffer.alloc(clientChecksum.length, 0xAA);
+  console.log(`[CredSSP] Client VERIFY: ku=${KU_CLIENT_VERIFY}, correct=${clientChecksum.toString("hex")}, SENDING WRONG=${wrongChecksum.toString("hex")}`);
 
   const clientVerifyMsg = buildVerifyMessage(
     conversationId,
     seqNum++,
     TIDESSP_AUTH_SCHEME,
-    clientChecksum,
+    wrongChecksum,  // DIAGNOSTIC: deliberately wrong checksum
     serverCksumType,
   );
 
@@ -336,7 +339,10 @@ export async function performCredSSP(
 
   // ── Step 4: Read server's SPNEGO accept-complete ──
   const tsRespComplete = await readTSRequest(tlsSocket);
-  console.log(`[CredSSP] Server accept-complete: version=${tsRespComplete.version}, errorCode=${tsRespComplete.errorCode ?? "none"}`);
+  console.log(`[CredSSP] Server step4: version=${tsRespComplete.version}, errorCode=${tsRespComplete.errorCode ?? "none"}, hasNegoToken=${!!tsRespComplete.negoToken}, hasPubKeyAuth=${!!tsRespComplete.pubKeyAuth}`);
+  if (tsRespComplete.negoToken) {
+    logSpnegoFields("Server step4 SPNEGO", tsRespComplete.negoToken);
+  }
   if (tsRespComplete.errorCode) {
     throw new Error(`CredSSP: server error after VERIFY 0x${tsRespComplete.errorCode.toString(16)}`);
   }
