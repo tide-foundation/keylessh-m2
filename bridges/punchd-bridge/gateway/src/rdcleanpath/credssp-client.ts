@@ -167,12 +167,15 @@ export async function performCredSSP(
   // ── Step 3: Verify server's VERIFY and complete SPNEGO ──
 
   const sessionKey = deriveSessionKeyFromJwt(jwt);
+  console.log(`[CredSSP] Gateway session key: ${sessionKey.toString("hex")}`);
 
   if (serverVerify1) {
     console.log("[CredSSP] Server sent VERIFY — JWT authentication accepted");
     if (serverVerify1.checksum) {
       // Verify server's checksum (keyUsage=25 for acceptor)
       const serverTranscript = Buffer.concat(transcript);
+      console.log(`[CredSSP] Transcript: ${transcript.length} messages, ${serverTranscript.length} bytes`);
+      console.log(`[CredSSP] Transcript SHA256: ${require("crypto").createHash("sha256").update(serverTranscript).digest("hex").substring(0, 32)}`);
       const expectedChecksum = computeVerifyChecksum(sessionKey, 25, serverTranscript);
       const serverChecksum = serverVerify1.checksum;
       console.log(`[CredSSP] Server VERIFY checksum: ${serverChecksum.toString("hex")}`);

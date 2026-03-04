@@ -441,6 +441,18 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
         deriveSessionKeyFromSig(sigBytes, 64, ctx->SessionKey);
         ctx->SessionKeyValid = TRUE;
 
+        tide_log("Session key: %02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                 ctx->SessionKey[0],ctx->SessionKey[1],ctx->SessionKey[2],ctx->SessionKey[3],
+                 ctx->SessionKey[4],ctx->SessionKey[5],ctx->SessionKey[6],ctx->SessionKey[7],
+                 ctx->SessionKey[8],ctx->SessionKey[9],ctx->SessionKey[10],ctx->SessionKey[11],
+                 ctx->SessionKey[12],ctx->SessionKey[13],ctx->SessionKey[14],ctx->SessionKey[15]);
+
+        /* Also log the raw signature bytes being hashed */
+        tide_log("JWT sig bytes: %02x%02x%02x%02x%02x%02x%02x%02x...%02x%02x%02x%02x",
+                 sigBytes[0],sigBytes[1],sigBytes[2],sigBytes[3],
+                 sigBytes[4],sigBytes[5],sigBytes[6],sigBytes[7],
+                 sigBytes[60],sigBytes[61],sigBytes[62],sigBytes[63]);
+
         /* Skip Windows logon session creation for now.
          * CredSSP only needs SPNEGO auth to succeed — the actual Windows
          * logon happens when termsrv processes the authInfo credentials.
@@ -580,20 +592,26 @@ static NTSTATUS NTAPI TideSsp_ExchangeMetaData(
 #endif
 
 /*
- * NegoExtender queries SECPKG_ATTR_NEGO_KEYS for session keys.
+ * SecPkgContext_NegoKeys — the structure NegoExtender uses for
+ * SECPKG_ATTR_NEGO_KEYS. Has two key slots: one for encryption
+ * and one for VERIFY checksum computation.
  *
- * We don't know the exact struct layout NegoExtender uses,
- * so first we dump the raw buffer to diagnose, then try to
- * fill it using the SecPkgContext_SessionKey layout (which we
- * know doesn't crash).
- *
- * Approach: use SEH to catch any access violation during writes.
+ * On x64 with default packing (total 32 bytes):
+ *   Offset 0:  KeyType (ULONG, 4)
+ *   Offset 4:  KeyLength (USHORT, 2) + padding (2)
+ *   Offset 8:  KeyValue (PUCHAR, 8)
+ *   Offset 16: VerifyKeyType (ULONG, 4)
+ *   Offset 20: VerifyKeyLength (USHORT, 2) + padding (2)
+ *   Offset 24: VerifyKeyValue (PUCHAR, 8)
  */
-
-static PUCHAR allocKey(ULONG size) {
-    /* Use process heap — simpler and less likely to crash than LSA heap */
-    return (PUCHAR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
-}
+typedef struct _TIDE_NEGO_KEYS {
+    ULONG  KeyType;
+    USHORT KeyLength;
+    PUCHAR KeyValue;
+    ULONG  VerifyKeyType;
+    USHORT VerifyKeyLength;
+    PUCHAR VerifyKeyValue;
+} TIDE_NEGO_KEYS;
 
 static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG attr, PVOID buf) {
     tide_log("QueryContextAttributes: attr=%u (0x%X), handle=%p, buf=%p", attr, attr, (void*)h, buf);
@@ -611,65 +629,63 @@ static NTSTATUS NTAPI TideSsp_QueryContextAttributes(LSA_SEC_HANDLE h, ULONG att
         sizes->cbSecurityTrailer = 0;
         return STATUS_SUCCESS;
     }
-    if (attr == SECPKG_ATTR_NEGO_KEYS || attr == SECPKG_ATTR_SESSION_KEY) {
+    if (attr == SECPKG_ATTR_NEGO_KEYS) {
         PTIDE_CONTEXT ctx = (PTIDE_CONTEXT)h;
-        tide_log("NEGO_KEYS/SESSION_KEY: ctx=%p, sessionKeyValid=%d",
-                 (void*)ctx, ctx ? ctx->SessionKeyValid : -1);
+        tide_log("NEGO_KEYS: ctx=%p, valid=%d", (void*)ctx, ctx ? ctx->SessionKeyValid : -1);
 
         if (!ctx || !ctx->SessionKeyValid) {
-            /* No key yet — zero out the buffer */
-            tide_log("NEGO_KEYS: no session key, zeroing buffer");
-            memset(buf, 0, 64); /* zero a safe amount */
-            return STATUS_SUCCESS;
+            tide_log("NEGO_KEYS: no session key available");
+            return SEC_E_NO_CREDENTIALS;
         }
 
-        /* Dump first 64 bytes of buf BEFORE we write (see what NegoExtender initialized) */
-        {
-            PUCHAR p = (PUCHAR)buf;
-            tide_log("NEGO_KEYS: buf BEFORE write: %02x%02x%02x%02x %02x%02x%02x%02x "
-                     "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
-                     "%02x%02x%02x%02x %02x%02x%02x%02x",
-                     p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],
-                     p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15],
-                     p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23],
-                     p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
-        }
+        /* Allocate key buffers from process heap */
+        PUCHAR key1 = (PUCHAR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, SESSION_KEY_SIZE);
+        PUCHAR key2 = (PUCHAR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, SESSION_KEY_SIZE);
+        tide_log("NEGO_KEYS: allocated key1=%p, key2=%p", (void*)key1, (void*)key2);
+        if (!key1 || !key2) return SEC_E_INSUFFICIENT_MEMORY;
 
-        /*
-         * Try filling as SecPkgContext_SessionKey first — this is the safest
-         * layout we know works (didn't crash before).
-         * Layout: { ULONG SessionKeyLength; PUCHAR SessionKey; }
-         * On x64: 4 bytes + 4 padding + 8 bytes pointer = 16 bytes
-         */
-        PUCHAR key = allocKey(SESSION_KEY_SIZE);
-        if (!key) return SEC_E_INSUFFICIENT_MEMORY;
-        memcpy(key, ctx->SessionKey, SESSION_KEY_SIZE);
+        memcpy(key1, ctx->SessionKey, SESSION_KEY_SIZE);
+        memcpy(key2, ctx->SessionKey, SESSION_KEY_SIZE);
 
-        SecPkgContext_SessionKey *sk = (SecPkgContext_SessionKey *)buf;
-        sk->SessionKeyLength = SESSION_KEY_SIZE;
-        sk->SessionKey = key;
+        tide_log("NEGO_KEYS: key bytes: %02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                 key1[0],key1[1],key1[2],key1[3],key1[4],key1[5],key1[6],key1[7],
+                 key1[8],key1[9],key1[10],key1[11],key1[12],key1[13],key1[14],key1[15]);
 
-        tide_log("NEGO_KEYS: filled SessionKey layout (len=%u, key=%p)",
-                 SESSION_KEY_SIZE, (void*)key);
-        tide_log("NEGO_KEYS: key bytes: %02x%02x%02x%02x%02x%02x%02x%02x...",
-                 key[0],key[1],key[2],key[3],key[4],key[5],key[6],key[7]);
-
-        /* Dump buf AFTER write */
-        {
-            PUCHAR p = (PUCHAR)buf;
-            tide_log("NEGO_KEYS: buf AFTER write: %02x%02x%02x%02x %02x%02x%02x%02x "
-                     "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
-                     "%02x%02x%02x%02x %02x%02x%02x%02x",
-                     p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],
-                     p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15],
-                     p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23],
-                     p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
-        }
+        /* Fill NegoKeys structure */
+        tide_log("NEGO_KEYS: writing struct fields...");
+        TIDE_NEGO_KEYS *nk = (TIDE_NEGO_KEYS *)buf;
+        nk->KeyType = 23;              /* rc4-hmac */
+        tide_log("NEGO_KEYS: wrote KeyType=23");
+        nk->KeyLength = SESSION_KEY_SIZE;
+        tide_log("NEGO_KEYS: wrote KeyLength=%u", SESSION_KEY_SIZE);
+        nk->KeyValue = key1;
+        tide_log("NEGO_KEYS: wrote KeyValue=%p", (void*)key1);
+        nk->VerifyKeyType = 23;
+        tide_log("NEGO_KEYS: wrote VerifyKeyType=23");
+        nk->VerifyKeyLength = SESSION_KEY_SIZE;
+        tide_log("NEGO_KEYS: wrote VerifyKeyLength=%u", SESSION_KEY_SIZE);
+        nk->VerifyKeyValue = key2;
+        tide_log("NEGO_KEYS: wrote VerifyKeyValue=%p — DONE", (void*)key2);
 
         return STATUS_SUCCESS;
     }
-    /* Encode the attribute number in the error so we can identify it from gateway logs. */
-    tide_log("QueryContextAttributes: UNKNOWN attr=%u (0x%X), returning error", attr, attr);
+    if (attr == SECPKG_ATTR_SESSION_KEY) {
+        PTIDE_CONTEXT ctx = (PTIDE_CONTEXT)h;
+        SecPkgContext_SessionKey *sk = (SecPkgContext_SessionKey *)buf;
+        if (!ctx || !ctx->SessionKeyValid) {
+            sk->SessionKeyLength = 0;
+            sk->SessionKey = NULL;
+            return STATUS_SUCCESS;
+        }
+        PUCHAR key = (PUCHAR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, SESSION_KEY_SIZE);
+        if (!key) return SEC_E_INSUFFICIENT_MEMORY;
+        memcpy(key, ctx->SessionKey, SESSION_KEY_SIZE);
+        sk->SessionKeyLength = SESSION_KEY_SIZE;
+        sk->SessionKey = key;
+        tide_log("SESSION_KEY: returned 16-byte key");
+        return STATUS_SUCCESS;
+    }
+    tide_log("QueryContextAttributes: UNKNOWN attr=%u (0x%X)", attr, attr);
     return (NTSTATUS)(0xC0090000L | (attr & 0xFFFF));
 }
 
