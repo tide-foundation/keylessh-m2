@@ -39,6 +39,7 @@ import {
   parseNegoexMessages,
   deriveSessionKeyFromJwt,
   computeAes128Checksum,
+  computeAes128ChecksumKi,
   md4,
   generateConversationId,
   NEGOEX_OID,
@@ -216,8 +217,17 @@ export async function performCredSSP(
     // Try with key usage 23 instead of 25
     const cksum23 = computeAes128Checksum(sessionKey, 23, transcriptData);
     console.log(`[CredSSP]   ku=23 all 3: ${cksum23.toString("hex")}${serverCksum.equals(cksum23) ? " *** MATCH ***" : ""}`);
-    // Try with key usage 25 but 0x55 (Ki) instead of 0x99 (Kc)
-    // (Would need to temporarily modify, skip for now)
+    // Try with Ki (0x55) instead of Kc (0x99) for all transcript combos
+    const tryKi = (label: string, data: Buffer, ku: number) => {
+      const cksum = computeAes128ChecksumKi(sessionKey, ku, data);
+      const match = serverCksum.equals(cksum);
+      if (match) console.log(`[CredSSP] *** MATCH *** Ki ${label}: ${cksum.toString("hex")}`);
+      return match;
+    };
+    tryKi("ku=25 all3", transcriptData, 25);
+    tryKi("ku=23 all3", transcriptData, 23);
+    tryKi("ku=25 INIT+APREQ", Buffer.concat([transcript[0], transcript[1]]), 25);
+    tryKi("ku=25 APREQ only", transcript[1], 25);
   }
 
   let serverChecksumOk = false;
