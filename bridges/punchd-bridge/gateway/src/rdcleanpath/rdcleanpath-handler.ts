@@ -201,13 +201,13 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
         // Send JWT directly to TideSSP — it verifies the EdDSA signature
         await performCredSSP(tlsSocket, username, request.proxyAuth);
 
-        console.log(`[RDCleanPath] CredSSP/NLA completed for "${backendName}"`);
+        console.log(`[RDCleanPath] CredSSP/NLA completed for "${backendName}" at ${Date.now()}`);
 
         // Read and consume the 4-byte Early User Authorization Result PDU
         // (MS-RDPBCGR §2.2.10.2) — sent by the server after NLA completes.
         const authResult = await readExactBytes(tlsSocket, 4);
         const authValue = authResult.readUInt32LE(0);
-        console.log(`[RDCleanPath] Early User Auth Result: 0x${authValue.toString(16).padStart(8, "0")}`);
+        console.log(`[RDCleanPath] Early User Auth Result: 0x${authValue.toString(16).padStart(8, "0")} at ${Date.now()}`);
         if (authValue !== 0x00000000) {
           throw new Error(`Early User Authorization denied: 0x${authValue.toString(16).padStart(8, "0")}`);
         }
@@ -236,26 +236,43 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
 
       // Step 7: Enter relay mode
       state = State.RELAY;
-      console.log(`[RDCleanPath] Relay mode active for "${backendName}"`);
+      console.log(`[RDCleanPath] Relay mode active for "${backendName}" at ${Date.now()}`);
+
+      // Monitor underlying TCP socket for errors (before TLS reports them)
+      if (tcpSocket) {
+        tcpSocket.on("error", (err: Error) => {
+          console.error(`[RDCleanPath] TCP socket error for "${backendName}": ${err.message} at ${Date.now()}`);
+        });
+        tcpSocket.on("close", (hadError: boolean) => {
+          console.log(`[RDCleanPath] TCP socket closed for "${backendName}" (hadError=${hadError}) at ${Date.now()}`);
+        });
+        tcpSocket.on("end", () => {
+          console.log(`[RDCleanPath] TCP socket end for "${backendName}" at ${Date.now()}`);
+        });
+      }
 
       // TLS socket → client
       tlsSocket.on("data", (data: Buffer) => {
         if (state !== State.RELAY) return;
         relayBytesToClient += data.length;
         const hex = data.subarray(0, Math.min(64, data.length)).toString("hex");
-        console.log(`[RDCleanPath] Relay RDP→client: ${data.length} bytes (total: ${relayBytesToClient}) hex: ${hex}`);
+        console.log(`[RDCleanPath] Relay RDP→client: ${data.length} bytes (total: ${relayBytesToClient}) hex: ${hex} at ${Date.now()}`);
         opts.sendBinary(data);
       });
 
       tlsSocket.on("close", () => {
-        console.log(`[RDCleanPath] TLS socket closed for "${backendName}" (state=${state}, toClient=${relayBytesToClient}, fromClient=${relayBytesFromClient})`);
+        console.log(`[RDCleanPath] TLS socket closed for "${backendName}" (state=${state}, toClient=${relayBytesToClient}, fromClient=${relayBytesFromClient}) at ${Date.now()}`);
         if (state !== State.RELAY) return;
         cleanup();
         opts.sendClose(1000, "RDP connection closed");
       });
 
+      tlsSocket.on("end", () => {
+        console.log(`[RDCleanPath] TLS socket end (graceful) for "${backendName}" at ${Date.now()}`);
+      });
+
       tlsSocket.on("error", (err: Error) => {
-        console.error(`[RDCleanPath] TLS socket error for "${backendName}" (state=${state}): ${err.message}`);
+        console.error(`[RDCleanPath] TLS socket error for "${backendName}" (state=${state}): ${err.message} at ${Date.now()}`);
         if (state !== State.RELAY) return;
         cleanup();
         opts.sendClose(1006, "RDP connection error");
@@ -300,9 +317,9 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
               decodeMcsConnectInitial(data);
             }
             relayBytesFromClient += data.length;
-            console.log(`[RDCleanPath] Relay client→RDP: ${data.length} bytes (total: ${relayBytesFromClient}), tls: readable=${tlsSocket.readable} writable=${tlsSocket.writable}`);
+            console.log(`[RDCleanPath] Relay client→RDP: ${data.length} bytes (total: ${relayBytesFromClient}), tls: readable=${tlsSocket.readable} writable=${tlsSocket.writable} at ${Date.now()}`);
             const writeOk = tlsSocket.write(data);
-            console.log(`[RDCleanPath] tlsSocket.write returned ${writeOk}`);
+            console.log(`[RDCleanPath] tlsSocket.write returned ${writeOk} at ${Date.now()}`);
           }
           break;
 
@@ -519,43 +536,40 @@ function patchMcsSelectedProtocol(data: Buffer): void {
  * Helps diagnose what IronRDP is sending vs what the server expects.
  */
 function decodeMcsConnectInitial(data: Buffer): void {
-  // Find GCC Conference Create Request inside MCS Connect Initial
-  // Look for the T.124 GCC key: 00 05 00 14 7c 00 01
-  const gccKey = Buffer.from([0x00, 0x05, 0x00, 0x14, 0x7c, 0x00, 0x01]);
-  let gccPos = -1;
-  for (let i = 7; i < data.length - gccKey.length; i++) {
-    if (data.subarray(i, i + gccKey.length).equals(gccKey)) {
-      gccPos = i;
+  // Find H.221 non-standard key "Duca" (Microsoft) in GCC Conference Create Request
+  let ducaPos = -1;
+  for (let i = 7; i < data.length - 6; i++) {
+    if (data[i] === 0x44 && data[i + 1] === 0x75 && data[i + 2] === 0x63 && data[i + 3] === 0x61) {
+      ducaPos = i;
       break;
     }
   }
-  if (gccPos < 0) {
-    console.log("[RDCleanPath] MCS decode: GCC key not found");
+  if (ducaPos < 0) {
+    console.log("[RDCleanPath] MCS decode: H.221 key 'Duca' not found");
     return;
   }
-  console.log(`[RDCleanPath] MCS decode: GCC key at offset ${gccPos}`);
 
-  // Skip past GCC header to find user data blocks
-  // After the GCC key, there's conference name + PER-encoded user data
-  // Look for the first CS_ block header (0xC0xx LE)
-  let udPos = -1;
-  for (let i = gccPos + gccKey.length; i < data.length - 4; i++) {
-    if (data[i + 1] === 0xC0 && data[i] >= 0x01 && data[i] <= 0x0A) {
-      udPos = i;
-      break;
-    }
+  // After "Duca", read PER-encoded length of user data
+  let udStart = ducaPos + 4;
+  const lenByte = data[udStart];
+  let udLen: number;
+  if (lenByte < 0x80) {
+    udLen = lenByte;
+    udStart += 1;
+  } else {
+    // Two-byte PER length: (first & 0x3F) << 8 | second
+    udLen = ((lenByte & 0x3F) << 8) | data[udStart + 1];
+    udStart += 2;
   }
-  if (udPos < 0) {
-    console.log("[RDCleanPath] MCS decode: no user data blocks found");
-    return;
-  }
+  console.log(`[RDCleanPath] MCS decode: Duca at ${ducaPos}, userdata: offset=${udStart}, len=${udLen}`);
 
   // Parse user data blocks
-  let pos = udPos;
-  while (pos + 4 <= data.length) {
+  let pos = udStart;
+  const udEnd = Math.min(udStart + udLen, data.length);
+  while (pos + 4 <= udEnd) {
     const type = data.readUInt16LE(pos);
     const len = data.readUInt16LE(pos + 2);
-    if (len < 4 || pos + len > data.length) break;
+    if (len < 4 || pos + len > udEnd) break;
     const typeName =
       type === 0xC001 ? "CS_CORE" :
       type === 0xC002 ? "CS_SECURITY" :
@@ -566,33 +580,39 @@ function decodeMcsConnectInitial(data: Buffer): void {
       type === 0xC008 ? "CS_MONITOR_EX" :
       type === 0xC00A ? "CS_MULTITRANSPORT" :
       `0x${type.toString(16)}`;
-    console.log(`[RDCleanPath] MCS block: ${typeName} (type=0x${type.toString(16)}, len=${len})`);
+    console.log(`[RDCleanPath] MCS block: ${typeName} (type=0x${type.toString(16)}, len=${len}, offset=${pos})`);
 
-    if (type === 0xC001 && len >= 216) {
-      // CS_CORE details
-      const ver = data.readUInt32LE(pos + 4);
-      const width = data.readUInt16LE(pos + 8);
-      const height = data.readUInt16LE(pos + 10);
-      const colorDepth = data.readUInt16LE(pos + 12);
-      const sasSeq = data.readUInt16LE(pos + 14);
-      const kbLayout = data.readUInt32LE(pos + 16);
-      const clientBuild = data.readUInt32LE(pos + 20);
-      // clientName is at offset 28 (24 bytes from pos+4), 32 bytes UTF-16LE
-      const clientName = data.subarray(pos + 28, pos + 60).toString("utf16le").replace(/\0+$/, "");
-      const earlyCapFlags = len >= 212 ? data.readUInt32LE(pos + 200) : 0;
-      const selProto = len >= 216 ? data.readUInt32LE(pos + 212) : -1;
-      console.log(`[RDCleanPath]   CS_CORE: ver=0x${ver.toString(16)}, ${width}x${height}, colorDepth=${colorDepth}, sas=${sasSeq}`);
-      console.log(`[RDCleanPath]   CS_CORE: kbLayout=0x${kbLayout.toString(16)}, build=${clientBuild}, client="${clientName}"`);
-      console.log(`[RDCleanPath]   CS_CORE: earlyCapFlags=0x${earlyCapFlags.toString(16)}, serverSelectedProtocol=${selProto}`);
+    if (type === 0xC001) {
+      // CS_CORE details — offsets relative to data start (pos+4)
+      const d = pos + 4;
+      const dLen = len - 4;
+      const ver = data.readUInt32LE(d);
+      const width = data.readUInt16LE(d + 4);
+      const height = data.readUInt16LE(d + 6);
+      const colorDepth = data.readUInt16LE(d + 8);
+      const sasSeq = data.readUInt16LE(d + 10);
+      const kbLayout = data.readUInt32LE(d + 12);
+      const clientBuild = data.readUInt32LE(d + 16);
+      const clientName = data.subarray(d + 20, d + 52).toString("utf16le").replace(/\0+$/, "");
+      console.log(`[RDCleanPath]   ver=0x${ver.toString(16)}, ${width}x${height}, color=0x${colorDepth.toString(16)}, sas=0x${sasSeq.toString(16)}`);
+      console.log(`[RDCleanPath]   kbLayout=0x${kbLayout.toString(16)}, build=${clientBuild}, client="${clientName}"`);
+      if (dLen >= 140) console.log(`[RDCleanPath]   highColor=${data.readUInt16LE(d + 136)}, supportedDepths=0x${data.readUInt16LE(d + 138).toString(16)}`);
+      if (dLen >= 142) console.log(`[RDCleanPath]   earlyCapFlags=0x${data.readUInt16LE(d + 140).toString(16)}`);
+      if (dLen >= 208) console.log(`[RDCleanPath]   connectionType=${data[d + 206]}`);
+      if (dLen >= 212) console.log(`[RDCleanPath]   serverSelectedProtocol=${data.readUInt32LE(d + 208)}`);
     }
 
     if (type === 0xC002) {
-      // CS_SECURITY
       const encMethods = data.readUInt32LE(pos + 4);
       const extEncMethods = len >= 12 ? data.readUInt32LE(pos + 8) : 0;
-      console.log(`[RDCleanPath]   CS_SECURITY: encMethods=0x${encMethods.toString(16)}, extEncMethods=0x${extEncMethods.toString(16)}`);
+      console.log(`[RDCleanPath]   encMethods=0x${encMethods.toString(16)}, extEncMethods=0x${extEncMethods.toString(16)}`);
+    }
+
+    if (type === 0xC003 && len >= 8) {
+      console.log(`[RDCleanPath]   channelCount=${data.readUInt32LE(pos + 4)}`);
     }
 
     pos += len;
   }
+  console.log(`[RDCleanPath] MCS decode: ${pos - udStart}/${udLen} bytes parsed`);
 }
