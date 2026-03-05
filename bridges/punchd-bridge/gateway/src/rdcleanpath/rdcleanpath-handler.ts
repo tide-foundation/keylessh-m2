@@ -71,7 +71,7 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
   let tlsSocket: TLSSocket | null = null;
   let relayBytesToClient = 0;
   let relayBytesFromClient = 0;
-  let needsMcsPatch = false; // eddsa: patch first relay message
+  let firstRelayMessage = false; // eddsa: log first relay message for diagnostics
 
   function sendError(errorCode: number, httpStatus?: number, wsaError?: number, tlsAlert?: number): void {
     try {
@@ -241,17 +241,14 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
           throw new Error(`Server disconnected after successful auth: ${probeResult}`);
         }
 
-        // Modify X.224 selectedProtocol from PROTOCOL_HYBRID (2) to
-        // PROTOCOL_SSL (1) so IronRDP skips NLA (we already did it).
-        // selectedProtocol is at byte offset 15 (LE uint32).
+        // Pass PROTOCOL_HYBRID through to IronRDP as-is.
+        // In RDCleanPath mode, IronRDP doesn't do NLA itself (gateway handles it),
+        // so it should generate MCS Connect Initial with serverSelectedProtocol=2 natively.
         if (x224Response.length >= 19) {
-          x224Response[15] = 0x01; // PROTOCOL_SSL
-          x224Response[16] = 0x00;
-          x224Response[17] = 0x00;
-          x224Response[18] = 0x00;
-          console.log(`[RDCleanPath] Patched X.224 selectedProtocol to PROTOCOL_SSL`);
-          needsMcsPatch = true; // need to fix serverSelectedProtocol in first MCS message
+          const sp = x224Response.readUInt32LE(15);
+          console.log(`[RDCleanPath] X.224 selectedProtocol=${sp} (passing through to IronRDP as-is)`);
         }
+        firstRelayMessage = true;
       }
 
       // Step 6: Send RDCleanPath Response PDU
@@ -331,18 +328,23 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
         case State.RELAY:
           // Forward client data to TLS socket
           if (tlsSocket && !tlsSocket.destroyed) {
-            // For eddsa: patch serverSelectedProtocol in the first MCS Connect Initial
-            // We changed X.224 selectedProtocol to PROTOCOL_SSL (1) so IronRDP skips NLA,
-            // but IronRDP echoes that value in MCS CS_CORE. The server expects PROTOCOL_HYBRID (2).
-            if (needsMcsPatch) {
-              needsMcsPatch = false;
-              // Log full MCS hex before patching for diagnosis
-              console.log(`[RDCleanPath] MCS Connect Initial BEFORE patch (${data.length} bytes):`);
+            // For eddsa: log the first relay message to verify IronRDP generates
+            // correct HYBRID-mode MCS (no patching needed anymore)
+            if (firstRelayMessage) {
+              firstRelayMessage = false;
+              const firstByte = data[0];
+              if (firstByte === 0x03) {
+                console.log(`[RDCleanPath] First relay message: TPKT/MCS (${data.length} bytes) — good`);
+              } else if (firstByte === 0x30) {
+                console.log(`[RDCleanPath] First relay message: ASN.1/CredSSP (${data.length} bytes) — IronRDP is trying NLA!`);
+              } else {
+                console.log(`[RDCleanPath] First relay message: unknown first byte 0x${firstByte.toString(16)} (${data.length} bytes)`);
+              }
+              // Full hex dump for diagnosis
               for (let off = 0; off < data.length; off += 48) {
                 const slice = data.subarray(off, Math.min(off + 48, data.length));
                 console.log(`[RDCleanPath]   +${off.toString().padStart(3, "0")}: ${slice.toString("hex")}`);
               }
-              patchMcsSelectedProtocol(data);
               decodeMcsConnectInitial(data);
             }
             relayBytesFromClient += data.length;
@@ -533,39 +535,6 @@ function readExactBytes(sock: TLSSocket, n: number): Promise<Buffer> {
       reject(new Error(`Socket closed (wanted ${n} bytes, got ${got})`));
     });
   });
-}
-
-/**
- * Patch the serverSelectedProtocol field in an MCS Connect Initial PDU.
- *
- * After eddsa NLA, we patched X.224 selectedProtocol to PROTOCOL_SSL (1)
- * so IronRDP skips NLA. But IronRDP echoes this value in the CS_CORE
- * block of the MCS Connect Initial. The RDP server validates it against
- * the original PROTOCOL_HYBRID (2) it sent, and disconnects on mismatch.
- *
- * CS_CORE layout: type(2) + length(2) + fixed fields(128) + optional fields.
- * serverSelectedProtocol is at byte offset 212 within CS_CORE, present
- * when block length >= 216.
- */
-function patchMcsSelectedProtocol(data: Buffer): void {
-  // Search for CS_CORE header: type 0xC001 (LE: 01 C0)
-  for (let i = 7; i < data.length - 216; i++) {
-    if (data[i] === 0x01 && data[i + 1] === 0xC0) {
-      const blockLen = data.readUInt16LE(i + 2);
-      if (blockLen >= 216 && blockLen < 1024 && i + blockLen <= data.length) {
-        // serverSelectedProtocol is at offset 212 within CS_CORE
-        const spOffset = i + 212;
-        const current = data.readUInt32LE(spOffset);
-        console.log(`[RDCleanPath] CS_CORE at offset ${i}, len=${blockLen}, serverSelectedProtocol=${current}`);
-        if (current === 0x01) { // PROTOCOL_SSL
-          data.writeUInt32LE(0x02, spOffset); // PROTOCOL_HYBRID
-          console.log(`[RDCleanPath] Patched MCS serverSelectedProtocol: SSL(1)→HYBRID(2)`);
-        }
-        return;
-      }
-    }
-  }
-  console.warn("[RDCleanPath] Could not find CS_CORE in MCS Connect Initial");
 }
 
 /**
