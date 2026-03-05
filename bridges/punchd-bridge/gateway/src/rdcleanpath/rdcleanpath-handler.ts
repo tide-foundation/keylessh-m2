@@ -213,6 +213,34 @@ export function createRDCleanPathSession(opts: RDCleanPathSessionOptions): RDCle
           throw new Error(`Early User Authorization denied: 0x${authValue.toString(16).padStart(8, "0")}`);
         }
 
+        // Probe: wait 50ms to detect if server disconnects after auth result
+        // (before we send MCS). If server RSTs here, the issue is server-side.
+        const tls = tlsSocket!;
+        const probeResult = await new Promise<string>((resolve) => {
+          const timer = setTimeout(() => {
+            tls.off("data", onProbeData);
+            tls.off("error", onProbeErr);
+            resolve("stable");
+          }, 50);
+          function onProbeData(chunk: Buffer) {
+            clearTimeout(timer);
+            tls.off("error", onProbeErr);
+            tls.unshift(chunk);
+            resolve(`server_data:${chunk.length}b:${chunk.subarray(0, 16).toString("hex")}`);
+          }
+          function onProbeErr(err: Error) {
+            clearTimeout(timer);
+            tls.off("data", onProbeData);
+            resolve(`error:${err.message}`);
+          }
+          tls.on("data", onProbeData);
+          tls.on("error", onProbeErr);
+        });
+        console.log(`[RDCleanPath] Post-auth probe (50ms): ${probeResult} at ${Date.now()}`);
+        if (probeResult.startsWith("error:")) {
+          throw new Error(`Server disconnected after successful auth: ${probeResult}`);
+        }
+
         // Modify X.224 selectedProtocol from PROTOCOL_HYBRID (2) to
         // PROTOCOL_SSL (1) so IronRDP skips NLA (we already did it).
         // selectedProtocol is at byte offset 15 (LE uint32).
