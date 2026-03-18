@@ -10,6 +10,8 @@ import type {
   TemplateParameter,
   Bridge,
   InsertBridge,
+  SignalServer,
+  InsertSignalServer,
   Organization,
   OrganizationUser,
   OrgRole,
@@ -143,6 +145,22 @@ export const api = {
         }),
       delete: (id: string) =>
         apiRequest<void>(`/api/admin/bridges/${id}`, { method: "DELETE" }),
+    },
+    signalServers: {
+      list: () => apiRequest<SignalServer[]>("/api/admin/signal-servers"),
+      get: (id: string) => apiRequest<SignalServer>(`/api/admin/signal-servers/${id}`),
+      create: (data: InsertSignalServer) =>
+        apiRequest<SignalServer>("/api/admin/signal-servers", {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      update: (id: string, data: Partial<InsertSignalServer>) =>
+        apiRequest<SignalServer>(`/api/admin/signal-servers/${id}`, {
+          method: "PUT",
+          body: JSON.stringify(data),
+        }),
+      delete: (id: string) =>
+        apiRequest<void>(`/api/admin/signal-servers/${id}`, { method: "DELETE" }),
     },
     users: {
       list: () => apiRequest<AdminUser[]>("/api/admin/users"),
@@ -562,7 +580,7 @@ export interface GatewayEndpoint {
 }
 
 // Re-export types for convenience
-export type { PolicyTemplate, InsertPolicyTemplate, TemplateParameter, Bridge, InsertBridge, Organization, OrganizationUser, OrgRole };
+export type { PolicyTemplate, InsertPolicyTemplate, TemplateParameter, Bridge, InsertBridge, SignalServer, InsertSignalServer, Organization, OrganizationUser, OrgRole };
 
 // SSH Policy Configuration for role creation
 export interface SshPolicyConfig {
