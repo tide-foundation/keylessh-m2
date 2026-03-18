@@ -116,7 +116,7 @@ async fn handle_save(
 
     // Build TOML
     let mut toml = String::new();
-    toml.push_str("# KeyleSSH Gateway Configuration\n");
+    toml.push_str("# Punchd Gateway Configuration\n");
     toml.push_str("# Edit this file and restart the gateway to apply changes.\n\n");
 
     write_field(&mut toml, "gateway_id", &gateway_id);
@@ -183,7 +183,7 @@ const SETUP_HTML: &str = r##"<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KeyleSSH Gateway Setup</title>
+<title>Punchd Gateway Setup</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -227,7 +227,7 @@ const SETUP_HTML: &str = r##"<!DOCTYPE html>
 </head>
 <body>
 <div class="container">
-  <h1>KeyleSSH Gateway Setup</h1>
+  <h1>Punchd Gateway Setup</h1>
   <p class="subtitle">Configure your gateway. Settings are saved to gateway.toml.</p>
 
   <form id="form">

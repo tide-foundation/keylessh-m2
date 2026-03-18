@@ -121,7 +121,7 @@ async fn main() {
     tray::spawn_tray(logs_url, gateway_url);
 
     // Startup banner
-    tracing::info!("KeyleSSH Gateway (local-facing)");
+    tracing::info!("Punchd Gateway (local-facing)");
     tracing::info!(
         "Login: {scheme}://localhost:{}/login",
         config.listen_port
