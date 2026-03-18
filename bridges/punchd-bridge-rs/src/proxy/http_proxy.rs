@@ -1862,7 +1862,7 @@ async fn handle_tc_proxy(
     mut resp_headers: HeaderMap,
 ) -> Response {
     let public_proto = if state.use_tls { "https" } else { "http" };
-    let public_base = format!("{public_proto}://{host}/_idp");
+    let public_base = format!("{public_proto}://{host}");
 
     let cookies = parse_cookies(headers.get(header::COOKIE).and_then(|v| v.to_str().ok()));
     let (tc_session_id, is_new_session) = state.get_tc_session_id(&cookies);
