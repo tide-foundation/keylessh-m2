@@ -82,7 +82,8 @@ async fn main() {
             axum::routing::get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
         )
         .route("/logs", axum::routing::get(serve_logs_page))
-        .route("/logs/stream", axum::routing::get(serve_logs_stream));
+        .route("/logs/stream", axum::routing::get(serve_logs_stream))
+        .route("/logs/buffer", axum::routing::get(serve_logs_buffer));
 
     // STUN registration
     let local_addr = std::env::var("GATEWAY_ADDRESS").unwrap_or_else(|_| {
@@ -222,4 +223,8 @@ async fn serve_logs_stream() -> Sse<impl futures_util::Stream<Item = Result<Even
         }
     });
     Sse::new(stream)
+}
+
+async fn serve_logs_buffer() -> axum::Json<Vec<String>> {
+    axum::Json(logstream::recent_lines())
 }

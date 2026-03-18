@@ -2,28 +2,74 @@
 //!
 //! Captures tracing events and broadcasts them to SSE listeners via `/logs`.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use tokio::sync::broadcast;
 
 static LOG_TX: OnceLock<broadcast::Sender<String>> = OnceLock::new();
+static LOG_BUFFER: OnceLock<Mutex<LogRingBuffer>> = OnceLock::new();
 
-/// Initialize the log broadcast channel. Call once at startup.
+struct LogRingBuffer {
+    lines: Vec<String>,
+    next: usize,
+    full: bool,
+}
+
+impl LogRingBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            lines: vec![String::new(); capacity],
+            next: 0,
+            full: false,
+        }
+    }
+
+    fn push(&mut self, line: String) {
+        self.lines[self.next] = line;
+        self.next += 1;
+        if self.next >= self.lines.len() {
+            self.next = 0;
+            self.full = true;
+        }
+    }
+
+    fn snapshot(&self) -> Vec<String> {
+        if self.full {
+            let mut out = Vec::with_capacity(self.lines.len());
+            out.extend_from_slice(&self.lines[self.next..]);
+            out.extend_from_slice(&self.lines[..self.next]);
+            out
+        } else {
+            self.lines[..self.next].to_vec()
+        }
+    }
+}
+
+/// Initialize the log broadcast channel and ring buffer. Call once at startup.
 pub fn init() -> broadcast::Sender<String> {
     let (tx, _) = broadcast::channel(512);
     LOG_TX.set(tx.clone()).ok();
+    LOG_BUFFER.set(Mutex::new(LogRingBuffer::new(1000))).ok();
     tx
 }
 
-/// Get a reference to the global log sender.
-pub fn sender() -> Option<&'static broadcast::Sender<String>> {
-    LOG_TX.get()
-}
-
-/// Push a log line into the broadcast channel.
+/// Push a log line into the broadcast channel and ring buffer.
 pub fn push(line: String) {
+    if let Some(buf) = LOG_BUFFER.get() {
+        if let Ok(mut buf) = buf.lock() {
+            buf.push(line.clone());
+        }
+    }
     if let Some(tx) = LOG_TX.get() {
         let _ = tx.send(line);
     }
+}
+
+/// Get a snapshot of recent log lines.
+pub fn recent_lines() -> Vec<String> {
+    LOG_BUFFER
+        .get()
+        .and_then(|buf| buf.lock().ok().map(|b| b.snapshot()))
+        .unwrap_or_default()
 }
 
 /// Subscribe to the log stream.
