@@ -16,7 +16,6 @@ pub fn spawn_tray(_logs_url: String, _gateway_url: String) {
 #[cfg(target_os = "windows")]
 mod win32 {
     use std::mem::{size_of, zeroed};
-    use std::ptr::null;
 
     // ── Fundamental types (match Win32 exactly) ──────────────
     #[allow(non_camel_case_types)]
@@ -231,18 +230,18 @@ mod win32 {
 
         AppendMenuW(menu, MF_STRING, ID_OPEN_LOGS, logs.as_ptr());
         AppendMenuW(menu, MF_STRING, ID_OPEN_GATEWAY, gateway.as_ptr());
-        AppendMenuW(menu, MF_SEPARATOR, 0, null());
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, ID_QUIT, quit.as_ptr());
 
         let mut pt: POINT = zeroed();
         GetCursorPos(&mut pt);
         SetForegroundWindow(hwnd);
-        TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, null());
+        TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, std::ptr::null());
         DestroyMenu(menu);
     }
 
     unsafe fn add_tray_icon(hwnd: HWND) -> bool {
-        let icon = LoadIconW(null() as HINSTANCE, 32512 as *const u16); // IDI_APPLICATION
+        let icon = LoadIconW(std::ptr::null_mut() as HINSTANCE, 32512 as *const u16); // IDI_APPLICATION
         eprintln!("[Tray] icon handle: {:?}", icon);
 
         let mut nid: NOTIFYICONDATAW = zeroed();
@@ -280,7 +279,7 @@ mod win32 {
         GATEWAY_URL = Some(gateway_url.to_string());
 
         let class_name = to_wide("KeyleSSHTray");
-        let h_instance = GetModuleHandleW(null());
+        let h_instance = GetModuleHandleW(std::ptr::null());
 
         let wc = WNDCLASSEXW {
             cb_size: size_of::<WNDCLASSEXW>() as u32,
@@ -289,12 +288,12 @@ mod win32 {
             cb_cls_extra: 0,
             cb_wnd_extra: 0,
             h_instance,
-            h_icon: null() as HICON,
-            h_cursor: null() as HCURSOR,
-            hbr_background: null() as HBRUSH,
-            lpsz_menu_name: null(),
+            h_icon: std::ptr::null_mut() as HICON,
+            h_cursor: std::ptr::null_mut() as HCURSOR,
+            hbr_background: std::ptr::null_mut() as HBRUSH,
+            lpsz_menu_name: std::ptr::null(),
             lpsz_class_name: class_name.as_ptr(),
-            h_icon_sm: null() as HICON,
+            h_icon_sm: std::ptr::null_mut() as HICON,
         };
 
         let atom = RegisterClassExW(&wc);
@@ -307,7 +306,7 @@ mod win32 {
         let hwnd = CreateWindowExW(
             0, class_name.as_ptr(), title.as_ptr(),
             0, 0, 0, 0, 0,
-            HWND_MESSAGE, null() as HMENU, h_instance, null() as *mut std::ffi::c_void,
+            HWND_MESSAGE, std::ptr::null_mut() as HMENU, h_instance, std::ptr::null_mut(),
         );
 
         if hwnd.is_null() {
@@ -320,7 +319,7 @@ mod win32 {
 
         // Win32 message loop
         let mut msg: MSG = zeroed();
-        while GetMessageW(&mut msg, null() as HWND, 0, 0) > 0 {
+        while GetMessageW(&mut msg, std::ptr::null_mut() as HWND, 0, 0) > 0 {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
