@@ -929,6 +929,14 @@ async fn handle_request(
         return handle_logs_stream(resp_headers);
     }
 
+    // Logs buffer (polling fallback for STUN relay)
+    if effective_path == "/logs/buffer" {
+        let lines = crate::logstream::recent_lines();
+        let json = serde_json::to_string(&lines).unwrap_or_else(|_| "[]".to_string());
+        resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        return make_response(StatusCode::OK, resp_headers, &json);
+    }
+
     // ── TideCloak reverse proxy (/realms/*, /resources/*, /admin) ──
     if effective_path.starts_with("/realms/")
         || effective_path.starts_with("/resources/")
@@ -2255,12 +2263,20 @@ function addLine(text) {
   }
 }
 
+let pollMode = false;
+let lastLineCount = 0;
+let sseFailCount = 0;
+
 function connect() {
-  const proto = location.protocol === 'https:' ? 'https:' : location.protocol;
+  if (pollMode) { startPolling(); return; }
+
   const es = new EventSource(location.origin + '/logs/stream');
+  let opened = false;
 
   es.onopen = () => {
-    statusEl.textContent = 'connected';
+    opened = true;
+    sseFailCount = 0;
+    statusEl.textContent = 'live (SSE)';
     statusEl.className = 'status connected';
   };
 
@@ -2269,11 +2285,42 @@ function connect() {
   };
 
   es.onerror = () => {
-    statusEl.textContent = 'disconnected';
-    statusEl.className = 'status disconnected';
     es.close();
-    setTimeout(connect, 2000);
+    sseFailCount++;
+    if (!opened || sseFailCount >= 3) {
+      pollMode = true;
+      statusEl.textContent = 'polling';
+      statusEl.className = 'status connected';
+      startPolling();
+    } else {
+      statusEl.textContent = 'reconnecting...';
+      statusEl.className = 'status disconnected';
+      setTimeout(connect, 2000);
+    }
   };
+}
+
+function startPolling() {
+  fetchBuffer();
+  setInterval(fetchBuffer, 2000);
+}
+
+function fetchBuffer() {
+  fetch(location.origin + '/logs/buffer')
+    .then(r => r.json())
+    .then(lines => {
+      if (lines.length !== lastLineCount) {
+        logEl.innerHTML = '';
+        lines.forEach(l => addLine(l));
+        lastLineCount = lines.length;
+        statusEl.textContent = 'polling (' + lines.length + ' lines)';
+        statusEl.className = 'status connected';
+      }
+    })
+    .catch(() => {
+      statusEl.textContent = 'disconnected';
+      statusEl.className = 'status disconnected';
+    });
 }
 
 connect();
