@@ -241,7 +241,15 @@ mod win32 {
     }
 
     unsafe fn add_tray_icon(hwnd: HWND) -> bool {
-        let icon = LoadIconW(std::ptr::null_mut() as HINSTANCE, 32512 as *const u16); // IDI_APPLICATION
+        // Load the exe's embedded icon (set via winresource in build.rs)
+        let h_instance = GetModuleHandleW(std::ptr::null());
+        let icon = LoadIconW(h_instance, 1 as *const u16); // resource ID 1 = the exe icon
+        // Fallback to generic icon if embedded icon not found
+        let icon = if icon.is_null() {
+            LoadIconW(std::ptr::null_mut() as HINSTANCE, 32512 as *const u16)
+        } else {
+            icon
+        };
         eprintln!("[Tray] icon handle: {:?}", icon);
 
         let mut nid: NOTIFYICONDATAW = zeroed();
@@ -251,7 +259,7 @@ mod win32 {
         nid.u_flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.u_callback_message = WM_TRAYICON;
         nid.h_icon = icon;
-        nid.sz_tip = wide_into_array::<128>("KeyleSSH Gateway");
+        nid.sz_tip = wide_into_array::<128>("Punchd Gateway");
 
         eprintln!("[Tray] NOTIFYICONDATAW size: {} bytes", nid.cb_size);
 
@@ -278,7 +286,7 @@ mod win32 {
         LOGS_URL = Some(logs_url.to_string());
         GATEWAY_URL = Some(gateway_url.to_string());
 
-        let class_name = to_wide("KeyleSSHTray");
+        let class_name = to_wide("PunchdGatewayTray");
         let h_instance = GetModuleHandleW(std::ptr::null());
 
         let wc = WNDCLASSEXW {
@@ -302,7 +310,7 @@ mod win32 {
             return;
         }
 
-        let title = to_wide("KeyleSSH");
+        let title = to_wide("Punchd Gateway");
         let hwnd = CreateWindowExW(
             0, class_name.as_ptr(), title.as_ptr(),
             0, 0, 0, 0, 0,

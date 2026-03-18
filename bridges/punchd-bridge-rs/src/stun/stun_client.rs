@@ -150,6 +150,14 @@ async fn connect_and_run(
     tracing::info!("[STUN-Reg] Connected to STUN server");
     let mut reconnect_delay_reset = true;
 
+    // Shared HTTP client for relay requests (reuse connections, avoid per-request allocation)
+    let relay_http_client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap();
+
     let (ws_sink, mut ws_stream) = ws_stream.split();
     let ws_sink = Arc::new(Mutex::new(ws_sink));
 
@@ -283,6 +291,7 @@ async fn connect_and_run(
                                     options.clone(),
                                     ws_sink.clone(),
                                     pending_requests.clone(),
+                                    relay_http_client.clone(),
                                 )
                                 .await;
                             }
@@ -349,6 +358,7 @@ async fn handle_http_request(
         Message,
     >>>,
     pending_requests: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
+    http_client: reqwest::Client,
 ) {
     let request_id = msg["id"].as_str().unwrap_or("").to_string();
     let method = msg["method"].as_str().unwrap_or("GET").to_string();
@@ -441,12 +451,7 @@ async fn handle_http_request(
         let scheme = if options.use_tls { "https" } else { "http" };
         let target_url = format!("{}://127.0.0.1:{}{}", scheme, options.listen_port, url_path);
 
-        let client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .unwrap();
+        let client = http_client;
 
         let reqwest_method = match method.to_uppercase().as_str() {
             "GET" => reqwest::Method::GET,

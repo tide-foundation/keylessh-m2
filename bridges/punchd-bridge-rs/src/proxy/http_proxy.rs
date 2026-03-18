@@ -2163,7 +2163,7 @@ pub static LOGS_HTML: &str = r##"<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KeyleSSH Gateway - Logs</title>
+<title>Punchd Gateway - Logs</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
@@ -2194,7 +2194,7 @@ pub static LOGS_HTML: &str = r##"<!DOCTYPE html>
 </head>
 <body>
 <div class="header">
-  <h1>KeyleSSH Gateway Logs</h1>
+  <h1>Punchd Gateway Logs</h1>
   <span id="status" class="status disconnected">disconnected</span>
   <div class="controls">
     <input type="text" id="filter" class="filter" placeholder="Filter logs...">
