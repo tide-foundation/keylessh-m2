@@ -2230,11 +2230,11 @@ export async function registerRoutes(
   // Admin Role Routes
   // ============================================
 
-  // GET /api/admin/roles - List client roles
+  // GET /api/admin/roles - List client roles (TideCloak API - requires realm-admin)
   app.get(
     "/api/admin/roles",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -2247,11 +2247,11 @@ export async function registerRoutes(
     }
   );
 
-  // POST /api/admin/roles - Create new role
+  // POST /api/admin/roles - Create new role (TideCloak API - requires realm-admin)
   app.post(
     "/api/admin/roles",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -2292,11 +2292,11 @@ export async function registerRoutes(
     }
   );
 
-  // PUT /api/admin/roles - Update role
+  // PUT /api/admin/roles - Update role (TideCloak API - requires realm-admin)
   app.put(
     "/api/admin/roles",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -2317,11 +2317,11 @@ export async function registerRoutes(
     }
   );
 
-  // DELETE /api/admin/roles - Delete role
+  // DELETE /api/admin/roles - Delete role (TideCloak API - requires realm-admin)
   app.delete(
     "/api/admin/roles",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -2399,11 +2399,11 @@ export async function registerRoutes(
     }
   );
 
-  // GET /api/admin/roles/all - List all roles including admin role
+  // GET /api/admin/roles/all - List all roles including admin role (TideCloak API - requires realm-admin)
   app.get(
     "/api/admin/roles/all",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3149,7 +3149,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/access-approvals",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3191,7 +3191,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/access-approvals/raw",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3224,7 +3224,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/access-approvals/approve",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3256,7 +3256,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/access-approvals/approve-with-id",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3292,7 +3292,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/access-approvals/reject",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3316,7 +3316,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/access-approvals/commit",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3343,7 +3343,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/access-approvals/cancel",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3374,7 +3374,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/role-approvals",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3406,7 +3406,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/role-approvals/raw",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3430,7 +3430,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/role-approvals/approve",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3461,7 +3461,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/role-approvals/approve-with-id",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3496,7 +3496,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/role-approvals/reject",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3520,7 +3520,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/role-approvals/commit",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3547,7 +3547,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/role-approvals/cancel",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3574,7 +3574,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/logs/access",
     authenticate,
-    requireOrgAdmin,
+    requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const limit = parseInt(req.query.limit as string) || 100;
