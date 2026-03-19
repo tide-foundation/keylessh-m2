@@ -26,7 +26,7 @@ import {
 } from "https";
 import { createHmac, randomBytes } from "crypto";
 import { readFileSync, realpathSync } from "fs";
-import { join, resolve } from "path";
+import { join, resolve, sep } from "path";
 import type { TidecloakAuth } from "../auth/tidecloak.js";
 import type { TidecloakConfig } from "../config.js";
 import {
@@ -118,7 +118,7 @@ function serveFile(
     const resolved = resolve(PUBLIC_DIR, filename);
     // Prevent path traversal and symlink escape — real path must be inside PUBLIC_DIR
     const realPath = realpathSync(resolved);
-    if (!realPath.startsWith(PUBLIC_DIR + "/")) {
+    if (!realPath.startsWith(PUBLIC_DIR + sep)) {
       res.writeHead(403, { "Content-Type": "text/plain" });
       res.end("Forbidden");
       return;
@@ -141,7 +141,7 @@ function serveBinaryFile(
   try {
     const resolved = resolve(PUBLIC_DIR, filename);
     const realPath = realpathSync(resolved);
-    if (!realPath.startsWith(PUBLIC_DIR + "/")) {
+    if (!realPath.startsWith(PUBLIC_DIR + sep)) {
       res.writeHead(403, { "Content-Type": "text/plain" });
       res.end("Forbidden");
       return;
@@ -1404,13 +1404,17 @@ export function createProxy(options: ProxyOptions): {
                   html = patchScript + html;
                 }
               }
-              // Inject WebRTC upgrade script
+              // Inject WebRTC upgrade script — MUST be first script in <head>
+              // so the SW register monkey-patch runs before backend scripts
+              // (e.g. Jellyfin's serviceworker.js) can register competing SWs.
               if (options.iceServers?.length) {
-                const script = `<script src="${backendPrefix}/js/webrtc-upgrade.js" defer></script>`;
-                if (html.includes("</body>")) {
-                  html = html.replace("</body>", `${script}\n</body>`);
+                const script = `<script src="${backendPrefix}/js/webrtc-upgrade.js"></script>`;
+                if (html.includes("<head>")) {
+                  html = html.replace("<head>", `<head>${script}`);
+                } else if (html.includes("<HEAD>")) {
+                  html = html.replace("<HEAD>", `<HEAD>${script}`);
                 } else {
-                  html += script;
+                  html = script + html;
                 }
               }
               delete headers["content-length"];

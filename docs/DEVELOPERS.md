@@ -1,10 +1,13 @@
 # Developer Guide
 
-This repo is a monorepo with three runtimes:
+This repo is a monorepo with the following components:
 
 - `client/`: React + Vite UI (xterm.js terminal + browser SSH client)
 - `server/`: Express REST API + WebSocket TCP bridge + SQLite storage
-- `tcp-bridge/`: optional external WS↔TCP forwarder (stateless)
+- `signal-server/`: P2P signaling + HTTP relay for punchd-bridge gateways
+- `bridges/`
+  - `tcp-bridge/`: optional external WS↔TCP forwarder (stateless)
+  - `punchd-bridge/`: NAT-traversing HTTP reverse proxy gateway (WebRTC P2P + HTTP relay)
 
 If you’re new to the codebase, start with the “Where to look” section.
 
@@ -78,8 +81,8 @@ SSH username access is token-based (applies to everyone, including admins).
   - `/ws/tcp` WebSocket endpoint
   - Validates: JWT, session ownership, serverId→host/port mapping, sshUser allowlist
   - Local mode: opens TCP sockets directly
-  - External mode: forwards JWT to `tcp-bridge/` with connection params (`BRIDGE_URL`)
-- `tcp-bridge/src/index.ts`
+  - External mode: forwards JWT to `bridges/tcp-bridge/` with connection params (`BRIDGE_URL`)
+- `bridges/tcp-bridge/src/index.ts`
   - Independently validates JWTs against TideCloak JWKS (same `tidecloak.json` config)
   - Forwards raw bytes between WebSocket and TCP socket
 
@@ -192,6 +195,26 @@ To modify:
 2. Contract ID is computed via `POST /api/forseti/compile` on policy creation (SHA512 hash of source code)
 3. ORKs compile and IL-vet the contract during policy execution (blocks forbidden namespaces)
 4. Test with a new policy template to get the new contractId
+
+## Troubleshooting
+
+### "Framing violates Content Security Policy" error
+
+If you see a browser console error like:
+
+```
+Framing 'http://localhost:XXXX/' violates the following Content Security Policy directive: "frame-src ..."
+```
+
+The secure enclave (TideCloak/Heimdall) is loaded in a hidden iframe to share the session ID. This error means the enclave's origin isn't allowed by the CSP. To fix it, add the blocked origin to the `frame-src` directive in [`server/index.ts`](../server/index.ts):
+
+```ts
+res.setHeader(
+  "Content-Security-Policy",
+  "frame-src 'self' https://*.tideprotocol.com https://*.dauth.me http://localhost:8080 http://localhost:1001"
+  //                                                                ^^^ add your origin here
+);
+```
 
 ## Related Docs
 

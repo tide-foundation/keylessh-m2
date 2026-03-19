@@ -4,39 +4,36 @@ Deploy KeyleSSH from Azure Marketplace in minutes.
 
 ---
 
-## Getting Started
-
-### Step 1: Request Enterprise Onboarding
-
-KeyleSSH uses Tide Protocol's decentralized identity for secure authentication. To get started:
-
-1. **Fill out the onboarding form** at [keylessh.com/enterprise](https://keylessh.com/enterprise)
-2. Provide your:
-   - Company name
-   - Contact email
-   - Azure subscription ID
-   - Expected number of users
-   - Expected number of servers
-3. Our team will provision your TideCloak realm and provide your configuration
-
-**What you'll receive:**
-- `tidecloak.json` configuration file
-- Admin credentials for your realm
-- Onboarding call to configure your deployment
-
-> **Typical onboarding time:** 1-2 business days
-
----
-
 ## Prerequisites
 
-Before deploying, ensure you have:
+Before deploying KeyleSSH, you need:
 
-1. **TideCloak Configuration** - Provided during enterprise onboarding (`tidecloak.json`)
-2. **Azure Subscription** - With permissions to create:
-   - Resource groups
-   - Container Apps
-   - Storage accounts
+### 1. TideCloak Configuration
+
+KeyleSSH uses TideCloak for decentralized identity. You'll need a `tidecloak.json` configuration file from your TideCloak realm.
+
+**If you don't have TideCloak yet:**
+- Contact [Tide Protocol](https://tideprotocol.com) to set up a realm
+- Or deploy TideCloak yourself from [TideCloak documentation](https://docs.tidecloak.com)
+
+**Your tidecloak.json should look like:**
+```json
+{
+  "realm": "your-realm",
+  "auth-server-url": "https://your-tidecloak-server/",
+  "resource": "keylessh",
+  "credentials": {
+    "secret": "your-client-secret"
+  }
+}
+```
+
+### 2. Azure Subscription
+
+An active Azure subscription with permissions to create:
+- Resource groups
+- Container Apps
+- Storage accounts
 
 ---
 
@@ -61,11 +58,11 @@ Before deploying, ensure you have:
 
 ### Step 3: Upload TideCloak Configuration
 
-1. Open the `tidecloak.json` file provided during onboarding
+1. Open your `tidecloak.json` file
 2. Copy the entire contents
 3. Paste into the **TideCloak Configuration** field
 
-> **Note:** The configuration is stored securely as an Azure secret.
+> **Note:** The configuration is stored securely as an Azure secret and base64-encoded during deployment.
 
 ### Step 4: Configure Resources (Optional)
 
@@ -100,7 +97,7 @@ Your URL will look like: `https://mycompany-keylessh-app.azurecontainerapps.io`
 
 ### 2. Configure TideCloak Redirect URI
 
-Our onboarding team will configure this for you, or you can do it yourself:
+Add KeyleSSH to your TideCloak client's allowed redirects:
 
 1. Log into your TideCloak admin console
 2. Go to **Clients** → **keylessh**
@@ -230,8 +227,8 @@ KeyleSSH uses consumption-based pricing. Typical costs:
 4. Look for error messages
 
 **Common issues:**
-- Invalid TideCloak configuration → Contact support with error details
-- TideCloak unreachable → Verify network connectivity
+- Invalid TideCloak configuration → Check tidecloak.json format
+- TideCloak unreachable → Verify auth-server-url is accessible
 
 ### Can't Connect to SSH Servers
 
@@ -274,8 +271,9 @@ Edit the KeyleSSH Container App:
 
 1. **Enable Azure Private Endpoints** - Restrict network access
 2. **Use Managed Identity** - For Azure resource access
-3. **Review Session Recordings** - Regularly audit access
-4. **Set Up Quorum Policies** - Require multi-party approval for sensitive servers
+3. **Enable Azure AD Conditional Access** - Additional authentication controls
+4. **Review Session Recordings** - Regularly audit access
+5. **Set Up Quorum Policies** - Require multi-party approval for sensitive servers
 
 ---
 
@@ -283,7 +281,7 @@ Edit the KeyleSSH Container App:
 
 - **Documentation**: https://docs.keylessh.com
 - **Email**: support@tideprotocol.com
-- **Enterprise Onboarding**: https://keylessh.com/enterprise
+- **Issues**: https://github.com/tide-foundation/keylessh-m2/issues
 
 ---
 

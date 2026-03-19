@@ -566,7 +566,7 @@ export interface OrgClientRole {
   clientRole?: boolean;
 }
 
-// Gateway endpoint type (from signal servers)
+// Gateway endpoint from signal server aggregation
 export interface GatewayEndpoint {
   id: string;
   displayName: string;

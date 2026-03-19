@@ -2,42 +2,35 @@ import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { Socket, connect } from "net";
 import { jwtVerify, createLocalJWKSet, JWTPayload } from "jose";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 
 /**
- * TCP Bridge - Stateless WebSocket to TCP bridge for SSH connections.
+ * TCP Bridge — Stateless WebSocket-to-TCP forwarder for SSH connections.
  *
- * - Validates JWT using embedded JWKS (no external API calls)
- * - Receives host/port from browser (browser got them from main server session creation)
- * - Forwards WebSocket data to TCP and vice versa
- * - Scales horizontally (Azure Container Apps)
+ * Clients connect via WebSocket with JWT auth, and the bridge opens a TCP
+ * connection to the target SSH server, forwarding data bidirectionally.
  *
  * Environment variables:
- * - PORT: Port to listen on (default: 8080)
- * - TIDECLOAK_CONFIG_PATH: Path to tidecloak.json with JWKS
+ * - PORT: Port to listen on (default: 8081)
+ * - client_adapter: JSON string of tidecloak.json config (highest priority)
  * - TIDECLOAK_CONFIG_B64: Base64-encoded config (alternative for Azure)
  */
 
 const PORT = parseInt(process.env.PORT || "8081");
+const CLIENT_ADAPTER = process.env.client_adapter;
 const CONFIG_B64 = process.env.TIDECLOAK_CONFIG_B64;
 
-// Config path priority: env var > ./data/tidecloak.json > ../data/tidecloak.json
-function resolveConfigPath(): string {
-  if (process.env.TIDECLOAK_CONFIG_PATH) {
-    return process.env.TIDECLOAK_CONFIG_PATH;
+// Resolve path to tidecloak.json in data directory
+function resolveConfigPath(): string | null {
+  const candidates = [
+    join(process.cwd(), "data", "tidecloak.json"),
+    join(process.cwd(), "..", "data", "tidecloak.json"),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
   }
-  // Check local data/ first (running from repo root)
-  const localPath = join(process.cwd(), "data", "tidecloak.json");
-  // Fall back to parent data/ (running from tcp-bridge/)
-  const parentPath = join(process.cwd(), "..", "data", "tidecloak.json");
-
-  try {
-    readFileSync(localPath);
-    return localPath;
-  } catch {
-    return parentPath;
-  }
+  return null;
 }
 
 interface TidecloakConfig {
@@ -63,13 +56,20 @@ function loadConfig(): boolean {
   try {
     let configData: string;
 
-    if (CONFIG_B64) {
+    if (CLIENT_ADAPTER) {
+      configData = CLIENT_ADAPTER;
+      console.log("[Bridge] Loading config from client_adapter env variable");
+    } else if (CONFIG_B64) {
       configData = Buffer.from(CONFIG_B64, "base64").toString("utf-8");
-      console.log("[Bridge] Loading JWKS from TIDECLOAK_CONFIG_B64");
+      console.log("[Bridge] Loading config from TIDECLOAK_CONFIG_B64");
     } else {
       const configPath = resolveConfigPath();
+      if (!configPath) {
+        console.error("[Bridge] No tidecloak.json found in data directory");
+        return false;
+      }
       configData = readFileSync(configPath, "utf-8");
-      console.log(`[Bridge] Loading JWKS from ${configPath}`);
+      console.log(`[Bridge] Loading config from ${configPath}`);
     }
 
     tcConfig = JSON.parse(configData) as TidecloakConfig;
@@ -116,17 +116,28 @@ if (!loadConfig()) {
   process.exit(1);
 }
 
+// ── HTTP Server ─────────────────────────────────────────────────
+
+let activeTcpConnections = 0;
+
 const server = createServer((req, res) => {
-  if (req.url === "/health") {
+  const url = req.url || "/";
+  const path = url.split("?")[0];
+
+  if (path === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", connections: activeConnections }));
+    res.end(JSON.stringify({
+      status: "ok",
+      tcpConnections: activeTcpConnections,
+    }));
     return;
   }
-  res.writeHead(404);
+
+  res.writeHead(404, { "Content-Type": "text/plain" });
   res.end("Not found");
 });
 
-let activeConnections = 0;
+// ── WebSocket Server ────────────────────────────────────────────
 
 const wss = new WebSocketServer({ server });
 
@@ -156,7 +167,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
 
   const userId = payload.sub || "unknown";
   console.log(`[Bridge] Connection: ${userId} -> ${host}:${port} (session: ${sessionId})`);
-  activeConnections++;
+  activeTcpConnections++;
 
   // Connect to SSH server
   const tcpSocket: Socket = connect({ host, port });
@@ -197,7 +208,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
 
   ws.on("close", () => {
     console.log("[Bridge] WebSocket closed");
-    activeConnections--;
+    activeTcpConnections--;
     if (!tcpSocket.destroyed) {
       tcpSocket.destroy();
     }
@@ -211,9 +222,11 @@ wss.on("connection", async (ws: WebSocket, req) => {
   });
 });
 
+// ── Start ───────────────────────────────────────────────────────
+
 server.listen(PORT, () => {
   console.log(`[Bridge] TCP Bridge listening on port ${PORT}`);
-  console.log(`[Bridge] Health check: http://localhost:${PORT}/health`);
+  console.log(`[Bridge] Health: http://localhost:${PORT}/health`);
 });
 
 process.on("SIGTERM", () => {

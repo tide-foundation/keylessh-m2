@@ -2367,6 +2367,7 @@ export class SignalServerStorage {
   }
 }
 
+
 export const storage = new SQLiteStorage();
 export const approvalStorage = new ApprovalStorage();
 export const policyStorage = new PolicyStorage();

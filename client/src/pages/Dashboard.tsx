@@ -506,7 +506,7 @@ export default function Dashboard() {
     queryKey: ["/api/sessions"],
   });
 
-  const { data: gatewayEndpoints } = useQuery<GatewayEndpoint[]>({
+  const { data: gatewayEndpoints, refetch: refetchGatewayEndpoints } = useQuery<GatewayEndpoint[]>({
     queryKey: ["/api/gateway-endpoints"],
     queryFn: api.gatewayEndpoints.list,
   });
@@ -523,8 +523,8 @@ export default function Dashboard() {
   const isFetching = isFetchingServers || isFetchingSessions;
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([refetchServers(), refetchSessions()]);
-  }, [refetchServers, refetchSessions]);
+    await Promise.all([refetchServers(), refetchSessions(), refetchGatewayEndpoints()]);
+  }, [refetchServers, refetchSessions, refetchGatewayEndpoints]);
 
   const terminateSession = useCallback(async (sessionId: string) => {
     const token = localStorage.getItem("access_token");
@@ -660,9 +660,13 @@ export default function Dashboard() {
         <div className="flex items-center justify-between">
           <h2 className="text-base sm:text-lg font-medium flex items-center gap-2 text-foreground">
             <Server className="h-5 w-5 text-[hsl(var(--neon-cyan))]" />
-            Available Servers
+            Available Services
           </h2>
-          {servers && <Badge variant="secondary" className="label-info">{servers.length}</Badge>}
+          <Badge variant="secondary" className="label-info">
+            {filteredServices.length !== allServices.length
+              ? `${filteredServices.length} / ${allServices.length}`
+              : allServices.length}
+          </Badge>
         </div>
 
         {!serversLoading && allServices.length > 0 && (

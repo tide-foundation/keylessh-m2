@@ -29,10 +29,10 @@ using System.Text;
 /// </summary>
 public class Contract : IAccessPolicy
 {
-    [PolicyParam(Required = true, Description = "Role required for SSH access")]
+    [PolicyParam(Required = true, Description = "Role required for SSH access.")]
     public string Role { get; set; }
 
-    [PolicyParam(Required = true, Description = "Resource identifier for role check")]
+    [PolicyParam(Required = true, Description = "Resource identifier for role check.")]
     public string Resource { get; set; }
 
     [PolicyParam(Required = false, Description = "Organization ID for multi-tenant isolation")]
@@ -398,9 +398,9 @@ export async function createSshPolicyRequest(
 
   // Create policy request with the contract ID
   const policyParams = new Map<string, any>();
-  policyParams.set("role", config.roleName);
+  policyParams.set("Role", config.roleName);
   policyParams.set("threshold", config.threshold);
-  policyParams.set("resource", config.resource);
+  policyParams.set("Resource", config.resource);
   policyParams.set("approval_type", config.approvalType);
   policyParams.set("execution_type", config.executionType);
   if (config.organizationId) {
@@ -463,9 +463,9 @@ export async function createSshPolicyRequestWithCode(
 
   // Create policy request with the contract ID
   const policyParams = new Map<string, any>();
-  policyParams.set("role", config.roleName);
+  policyParams.set("Role", config.roleName);
   policyParams.set("threshold", config.threshold);
-  policyParams.set("resource", config.resource);
+  policyParams.set("Resource", config.resource);
   policyParams.set("approval_type", config.approvalType);
   policyParams.set("execution_type", config.executionType);
   if (config.organizationId) {
