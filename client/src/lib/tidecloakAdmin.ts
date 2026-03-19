@@ -143,6 +143,7 @@ const ADMIN_ROLE = "tide-realm-admin";
 
 interface CacheEntry<T> { data: T; expiry: number; }
 
+const _usersCache: { entry?: CacheEntry<UserRepresentation[]> } = {};
 const _usersWithRolesCache: { entry?: CacheEntry<any[]> } = {};
 const _rolesCache: { entry?: CacheEntry<RoleRepresentation[]> } = {};
 const CACHE_TTL = 30_000; // 30 seconds
@@ -162,15 +163,27 @@ async function limitedAll<T>(tasks: (() => Promise<T>)[], limit: number): Promis
 }
 
 /** Invalidate user/role caches (call after mutations) */
-export function invalidateUsersCache(): void { _usersWithRolesCache.entry = undefined; }
+export function invalidateUsersCache(): void { _usersCache.entry = undefined; _usersWithRolesCache.entry = undefined; }
 export function invalidateRolesCache(): void { _rolesCache.entry = undefined; }
+
+/** Fire-and-forget prefetch of users+roles right after login so caches are warm */
+export function prefetchAdminData(): void {
+  // These run in parallel, populate caches, errors are silently ignored
+  getUsersWithRoles().catch(() => {});
+  getClientRoles().catch(() => {});
+}
 
 // ============================================
 // User Management
 // ============================================
 
 export async function getUsers(): Promise<UserRepresentation[]> {
-  return tcFetch<UserRepresentation[]>("/users?briefRepresentation=false");
+  if (_usersCache.entry && Date.now() < _usersCache.entry.expiry) {
+    return _usersCache.entry.data;
+  }
+  const users = await tcFetch<UserRepresentation[]>("/users?briefRepresentation=false");
+  _usersCache.entry = { data: users, expiry: Date.now() + CACHE_TTL };
+  return users;
 }
 
 /**
