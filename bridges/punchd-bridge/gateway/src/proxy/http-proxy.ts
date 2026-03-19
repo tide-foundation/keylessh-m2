@@ -612,6 +612,7 @@ export function createProxy(options: ProxyOptions): {
       }
 
       let url = req.url || "/";
+      const originalUrl = url; // preserve before prefix stripping for DPoP htu
       let path = url.split("?")[0];
       let backendPrefix = ""; // e.g. "/__b/MediaBox"
       let activeBackend = ""; // e.g. "MediaBox"
@@ -1148,7 +1149,7 @@ export function createProxy(options: ProxyOptions): {
               return;
             }
 
-            const requestUrl = `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}${(url).split("?")[0]}`;
+            const requestUrl = `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}${originalUrl.split("?")[0]}`;
             const result = verifyDPoPProof(dpopProof, req.method || "GET", requestUrl, cnfJkt);
             if (!result.valid) {
               console.warn("[Gateway] DPoP proof verification failed:", result.error);
