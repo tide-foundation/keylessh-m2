@@ -792,43 +792,30 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
 
     tracing::info!("[RDCleanPath-WS] Handler started");
 
-    let (ws_sink, mut ws_stream) = socket.split();
-    let ws_sink = Arc::new(tokio::sync::Mutex::new(ws_sink));
+    let (mut ws_sink, mut ws_stream) = socket.split();
 
-    // Channel for the session to signal when it's done (so we keep the handler alive)
-    let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    // Use an ordered channel for outgoing WS messages to preserve data ordering.
+    // The send_binary callback must NOT spawn independent tasks (they'd race the mutex).
+    enum WsOut {
+        Binary(Vec<u8>),
+        Close(u16, String),
+    }
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<WsOut>();
 
     let send_binary: crate::rdcleanpath::rdcleanpath_handler::SendBinaryFn = {
-        let sink = ws_sink.clone();
+        let tx = out_tx.clone();
         Arc::new(move |data: Vec<u8>| {
-            let sink = sink.clone();
-            tokio::spawn(async move {
-                let _ = sink.lock().await.send(Message::Binary(data.into())).await;
-            });
+            let _ = tx.send(WsOut::Binary(data));
         })
     };
 
     let send_close: crate::rdcleanpath::rdcleanpath_handler::SendCloseFn = {
-        let sink = ws_sink.clone();
-        let done = done_tx.clone();
+        let tx = out_tx.clone();
         Arc::new(move |code: u16, reason: String| {
-            let sink = sink.clone();
-            let done = done.clone();
-            tokio::spawn(async move {
-                tracing::info!("[RDCleanPath-WS] Session sending close: {} {}", code, reason);
-                let _ = sink
-                    .lock()
-                    .await
-                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                        code,
-                        reason: reason.into(),
-                    })))
-                    .await;
-                let _ = done.send(());
-            });
+            let _ = tx.send(WsOut::Close(code, reason));
         })
     };
-    drop(done_tx); // Only the send_close callback holds a reference now
+    drop(out_tx); // Only the callbacks hold references now
 
     let session = crate::rdcleanpath::rdcleanpath_handler::RDCleanPathSession::new(
         crate::rdcleanpath::rdcleanpath_handler::RDCleanPathSessionOptions {
@@ -841,37 +828,51 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
         },
     );
 
-    // Forward incoming WebSocket messages to the RDCleanPath session.
-    // Keep the handler alive until either the WS stream ends OR the session signals done.
-    loop {
-        tokio::select! {
-            msg = ws_stream.next() => {
-                match msg {
-                    Some(Ok(Message::Binary(data))) => {
-                        session.handle_message(data.to_vec());
-                    }
-                    Some(Ok(Message::Close(_))) => {
-                        tracing::info!("[RDCleanPath-WS] Received close frame");
-                        break;
-                    }
-                    Some(Ok(_)) => {} // Ping/Pong/Text — ignore
-                    Some(Err(e)) => {
-                        tracing::warn!("[RDCleanPath-WS] Read error: {}, continuing", e);
-                        // Don't break — transient errors shouldn't kill the session
-                    }
-                    None => {
-                        tracing::info!("[RDCleanPath-WS] Stream ended");
-                        break;
-                    }
+    // Single writer task — drains the channel in order, no races.
+    let writer_task = tokio::spawn(async move {
+        while let Some(msg) = out_rx.recv().await {
+            let result = match msg {
+                WsOut::Binary(data) => ws_sink.send(Message::Binary(data.into())).await,
+                WsOut::Close(code, reason) => {
+                    tracing::info!("[RDCleanPath-WS] Session sending close: {} {}", code, reason);
+                    let r = ws_sink
+                        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                            code,
+                            reason: reason.into(),
+                        })))
+                        .await;
+                    return; // Close sent — stop writing
                 }
+            };
+            if let Err(e) = result {
+                tracing::warn!("[RDCleanPath-WS] Write error: {}", e);
+                return;
             }
-            _ = done_rx.recv() => {
-                tracing::info!("[RDCleanPath-WS] Session done, exiting");
+        }
+    });
+
+    // Forward incoming WebSocket messages to the RDCleanPath session.
+    loop {
+        match ws_stream.next().await {
+            Some(Ok(Message::Binary(data))) => {
+                session.handle_message(data.to_vec());
+            }
+            Some(Ok(Message::Close(_))) => {
+                tracing::info!("[RDCleanPath-WS] Received close frame");
+                break;
+            }
+            Some(Ok(_)) => {} // Ping/Pong/Text — ignore
+            Some(Err(e)) => {
+                tracing::warn!("[RDCleanPath-WS] Read error: {}, continuing", e);
+            }
+            None => {
+                tracing::info!("[RDCleanPath-WS] Stream ended");
                 break;
             }
         }
     }
 
+    writer_task.abort();
     tracing::info!("[RDCleanPath-WS] Handler exiting");
 }
 
