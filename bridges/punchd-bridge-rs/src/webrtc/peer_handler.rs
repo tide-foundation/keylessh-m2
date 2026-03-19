@@ -1021,6 +1021,40 @@ async fn handle_ws_open(
     let protocol = if opts.use_tls { "wss" } else { "ws" };
     let ws_url = format!("{}://127.0.0.1:{}{}", protocol, opts.listen_port, ws_path);
 
+    // Extract headers from the ws_open message (e.g., cookie for auth)
+    let msg_headers = msg["headers"].as_object();
+
+    // Build a request with headers
+    let mut request = tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(&ws_url)
+        .header("Host", format!("127.0.0.1:{}", opts.listen_port));
+    if let Some(hdrs) = msg_headers {
+        for (key, val) in hdrs {
+            if let Some(v) = val.as_str() {
+                request = request.header(key.as_str(), v);
+            }
+        }
+    }
+    for p in &protocols {
+        request = request.header("Sec-WebSocket-Protocol", p.as_str());
+    }
+    let request = match request.body(()) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("[WebRTC] WS request build failed: {}", e);
+            send_control(
+                &state,
+                json!({
+                    "type": "ws_error",
+                    "id": ws_id,
+                    "message": format!("Bad request: {}", e),
+                }),
+            )
+            .await;
+            return;
+        }
+    };
+
     tracing::info!("[WebRTC] WS tunnel opened: {} (id: {})", ws_path, ws_id);
 
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -1035,7 +1069,7 @@ async fn handle_ws_open(
     let ws_id_clone = ws_id.clone();
 
     tokio::spawn(async move {
-        // Connect to local WebSocket
+        // Connect to local WebSocket with auth headers
         let connect_result = if protocol == "wss" {
             // For wss with self-signed certs, use native-tls with danger_accept_invalid_certs
             let connector = native_tls::TlsConnector::builder()
@@ -1044,14 +1078,14 @@ async fn handle_ws_open(
                 .ok()
                 .map(tokio_tungstenite::Connector::NativeTls);
             tokio_tungstenite::connect_async_tls_with_config(
-                &ws_url,
+                request,
                 None,
                 false,
                 connector,
             )
             .await
         } else {
-            tokio_tungstenite::connect_async(&ws_url).await
+            tokio_tungstenite::connect_async(request).await
         };
 
         let ws_stream = match connect_result {
