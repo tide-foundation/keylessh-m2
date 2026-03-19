@@ -2046,6 +2046,7 @@ export async function registerRoutes(
               approvalType: policy.approvalType,
               executionType: policy.executionType,
               threshold: policy.threshold,
+              organizationId: orgId,
             });
             log(`Created SSH policy for role: ${name}`);
           } catch (policyError) {
@@ -2090,13 +2091,14 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const roleName = req.params.name;
+        const orgId = getOrgId(req);
 
         const { deleteOrgRole } = await import("./lib/orgRoleManagement");
         await deleteOrgRole(roleName);
 
         // Also delete any associated SSH policy
         try {
-          await policyStorage.deletePolicy(roleName);
+          await policyStorage.deletePolicy(roleName, orgId);
         } catch (policyError) {
           log(`Warning: Role deleted but failed to delete policy: ${policyError}`);
         }
@@ -2208,7 +2210,8 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const { roleName } = req.params;
-        const policy = await policyStorage.getPolicy(roleName);
+        const orgId = getOrgId(req);
+        const policy = await policyStorage.getPolicy(roleName, orgId);
 
         if (!policy) {
           res.status(404).json({ error: "Policy not found for this role" });
@@ -2231,7 +2234,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/roles",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -2248,10 +2251,11 @@ export async function registerRoutes(
   app.post(
     "/api/admin/roles",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
+        const orgId = getOrgId(req);
         const { name, description, policy } = req.body;
 
         if (!name) {
@@ -2271,6 +2275,7 @@ export async function registerRoutes(
               approvalType: policy.approvalType,
               executionType: policy.executionType,
               threshold: policy.threshold,
+              organizationId: orgId,
             });
             log(`Created SSH policy for role: ${name}`);
           } catch (policyError) {
@@ -2291,7 +2296,7 @@ export async function registerRoutes(
   app.put(
     "/api/admin/roles",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -2316,10 +2321,11 @@ export async function registerRoutes(
   app.delete(
     "/api/admin/roles",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
+        const orgId = getOrgId(req);
         const roleName = req.query.roleName as string;
 
         if (!roleName) {
@@ -2333,7 +2339,7 @@ export async function registerRoutes(
         // Also delete any associated SSH policy (only if role was actually deleted, not queued for approval)
         if (!result.approvalCreated) {
           try {
-            await policyStorage.deletePolicy(roleName);
+            await policyStorage.deletePolicy(roleName, orgId);
           } catch (policyError) {
             log(`Warning: Role deleted but failed to delete policy: ${policyError}`);
           }
@@ -2356,7 +2362,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/roles/policies",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const orgId = getOrgId(req as AuthenticatedRequest);
@@ -2373,11 +2379,12 @@ export async function registerRoutes(
   app.get(
     "/api/admin/roles/:roleName/policy",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const { roleName } = req.params;
-        const policy = await policyStorage.getPolicy(roleName);
+        const orgId = getOrgId(req);
+        const policy = await policyStorage.getPolicy(roleName, orgId);
 
         if (!policy) {
           res.status(404).json({ error: "Policy not found for this role" });
@@ -2396,7 +2403,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/roles/all",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -2417,7 +2424,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/ssh-policies/pending",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const { policyRequest, roleName, threshold, contractCode } = req.body;
@@ -2435,6 +2442,7 @@ export async function registerRoutes(
         }
         const id = request.getUniqueId();
 
+        const orgId = getOrgId(req);
         const policy = await pendingPolicyStorage.createPendingPolicy({
           id,
           roleId: roleName,
@@ -2443,6 +2451,7 @@ export async function registerRoutes(
           policyRequestData: policyRequest,
           contractCode: contractCode || undefined,
           threshold: threshold || 1,
+          organizationId: orgId,
         });
 
         log(`Created pending SSH policy for role: ${roleName} by ${req.user?.email} (id: ${id})`);
@@ -2458,7 +2467,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/ssh-policies/pending",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const orgId = getOrgId(req as AuthenticatedRequest);
@@ -2475,11 +2484,12 @@ export async function registerRoutes(
   app.get(
     "/api/admin/ssh-policies/pending/:id",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const { id } = req.params;
-        const policy = await pendingPolicyStorage.getPendingPolicy(id);
+        const orgId = getOrgId(req);
+        const policy = await pendingPolicyStorage.getPendingPolicy(id, orgId);
 
         if (!policy) {
           res.status(404).json({ error: "Policy not found" });
@@ -2500,10 +2510,11 @@ export async function registerRoutes(
   app.post(
     "/api/admin/ssh-policies/pending/approve",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const { policyRequest, decision } = req.body;
+        const orgId = getOrgId(req);
 
         if (!policyRequest) {
           res.status(400).json({ error: "policyRequest is required" });
@@ -2518,7 +2529,7 @@ export async function registerRoutes(
         }
         const id = request.getUniqueId();
 
-        const policy = await pendingPolicyStorage.getPendingPolicy(id);
+        const policy = await pendingPolicyStorage.getPendingPolicy(id, orgId);
         if (!policy) {
           res.status(404).json({ error: "Policy not found" });
           return;
@@ -2569,11 +2580,12 @@ export async function registerRoutes(
   app.post(
     "/api/admin/ssh-policies/pending/:id/reject",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const { id } = req.params;
-        const policy = await pendingPolicyStorage.getPendingPolicy(id);
+        const orgId = getOrgId(req);
+        const policy = await pendingPolicyStorage.getPendingPolicy(id, orgId);
 
         if (!policy) {
           res.status(404).json({ error: "Policy not found" });
@@ -2615,14 +2627,15 @@ export async function registerRoutes(
   app.post(
     "/api/admin/ssh-policies/pending/:id/commit",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const { id } = req.params;
+        const orgId = getOrgId(req);
         const { signature } = req.body as { signature?: string };
 
         // Get the pending policy to extract the committed policy bytes
-        const pendingPolicy = await pendingPolicyStorage.getPendingPolicy(id);
+        const pendingPolicy = await pendingPolicyStorage.getPendingPolicy(id, orgId);
         if (!pendingPolicy) {
           return res.status(404).json({ error: "Policy not found" });
         }
@@ -2654,6 +2667,7 @@ export async function registerRoutes(
             executionType: "private",
             threshold: pendingPolicy.threshold,
             policyData: policyDataBase64,
+            organizationId: orgId,
           });
 
           log(`Stored committed policy for role ${pendingPolicy.roleId}, policy bytes: ${policyBytes.length} bytes`);
@@ -2695,11 +2709,12 @@ export async function registerRoutes(
   app.post(
     "/api/admin/ssh-policies/pending/:id/cancel",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const { id } = req.params;
 
+        // cancelPolicy internally fetches the pending policy to derive orgId for logs
         await pendingPolicyStorage.cancelPolicy(id, req.user?.email || "unknown");
 
         log(`SSH policy ${id} cancelled by ${req.user?.email}`);
@@ -2716,10 +2731,11 @@ export async function registerRoutes(
   app.post(
     "/api/admin/ssh-policies/pending/:id/revoke",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const { id } = req.params;
+        const orgId = getOrgId(req);
         const userVuid = req.tokenPayload?.vuid || req.user?.id || "unknown";
         const userEmail = req.user?.email || "unknown";
 
@@ -2732,7 +2748,7 @@ export async function registerRoutes(
 
         // If it was an approval, we need to remove the approval from the PolicySignRequest
         if (decision === 1) {
-          const policy = await pendingPolicyStorage.getPendingPolicy(id);
+          const policy = await pendingPolicyStorage.getPendingPolicy(id, orgId);
           if (policy) {
             try {
               const request = PolicySignRequest.decode(base64ToBytes(policy.policyRequestData));
@@ -2783,12 +2799,13 @@ export async function registerRoutes(
   app.get(
     "/api/admin/ssh-policies/logs",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
+        const orgId = getOrgId(req);
         const limit = parseInt(req.query.limit as string) || 100;
         const offset = parseInt(req.query.offset as string) || 0;
-        const rawLogs = await pendingPolicyStorage.getLogs(limit, offset);
+        const rawLogs = await pendingPolicyStorage.getLogs(orgId, limit, offset);
         // Map field names to match client API interface
         const logs = rawLogs.map(log => ({
           id: log.id,
@@ -2822,7 +2839,8 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const { roleId } = req.params;
-        const policy = await policyStorage.getPolicy(roleId);
+        const orgId = getOrgId(req);
+        const policy = await policyStorage.getPolicy(roleId, orgId);
 
         if (!policy) {
           return res.status(404).json({ error: "No committed policy found for this role" });
@@ -2851,11 +2869,12 @@ export async function registerRoutes(
     async (req: AuthenticatedRequest, res) => {
       try {
         const { sshUser } = req.params;
+        const orgId = getOrgId(req);
         const roleId = `ssh:${sshUser}`;
 
         log(`[PolicyMatch] Looking for policy with roleId: ${roleId}`);
 
-        const policy = await policyStorage.getPolicy(roleId);
+        const policy = await policyStorage.getPolicy(roleId, orgId);
 
         if (!policy) {
           return res.status(404).json({
@@ -2962,7 +2981,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/approvals",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const orgId = getOrgId(req as AuthenticatedRequest);
@@ -2979,7 +2998,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/approvals",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.user!;
@@ -2994,11 +3013,13 @@ export async function registerRoutes(
             return;
           }
 
+          const orgId = getOrgId(req);
           const success = await approvalStorage.addDecision(
             approvalId,
             userVuid,
             user.email,
-            decision === true || decision === 1
+            decision === true || decision === 1,
+            orgId
           );
 
           if (!success) {
@@ -3044,7 +3065,7 @@ export async function registerRoutes(
   app.put(
     "/api/admin/approvals/:id/commit",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.user!;
@@ -3069,7 +3090,7 @@ export async function registerRoutes(
   app.put(
     "/api/admin/approvals/:id/cancel",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.user!;
@@ -3094,7 +3115,7 @@ export async function registerRoutes(
   app.delete(
     "/api/admin/approvals",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.user!;
@@ -3128,7 +3149,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/access-approvals",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3170,7 +3191,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/access-approvals/raw",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3203,7 +3224,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/access-approvals/approve",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3235,7 +3256,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/access-approvals/approve-with-id",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3271,7 +3292,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/access-approvals/reject",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3295,7 +3316,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/access-approvals/commit",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3322,7 +3343,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/access-approvals/cancel",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3353,7 +3374,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/role-approvals",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3385,7 +3406,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/role-approvals/raw",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3409,7 +3430,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/role-approvals/approve",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3440,7 +3461,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/role-approvals/approve-with-id",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3475,7 +3496,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/role-approvals/reject",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3499,7 +3520,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/role-approvals/commit",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3526,7 +3547,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/role-approvals/cancel",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const token = req.accessToken!;
@@ -3553,7 +3574,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/logs/access",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const limit = parseInt(req.query.limit as string) || 100;
@@ -3608,7 +3629,7 @@ export async function registerRoutes(
   app.get(
     "/api/admin/policy-templates",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const orgId = getOrgId(req as AuthenticatedRequest);
@@ -3625,11 +3646,12 @@ export async function registerRoutes(
   app.get(
     "/api/admin/policy-templates/:id",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const { id } = req.params;
-        const template = await templateStorage.getTemplate(id);
+        const orgId = getOrgId(req);
+        const template = await templateStorage.getTemplate(id, orgId);
 
         if (!template) {
           res.status(404).json({ error: "Template not found" });
@@ -3648,7 +3670,7 @@ export async function registerRoutes(
   app.post(
     "/api/admin/policy-templates",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     (_req: AuthenticatedRequest, res) => {
       res.status(403).json({ error: "Policy template creation is disabled" });
     }
@@ -3658,7 +3680,7 @@ export async function registerRoutes(
   app.put(
     "/api/admin/policy-templates/:id",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     (_req: AuthenticatedRequest, res) => {
       res.status(403).json({ error: "Policy template editing is disabled" });
     }
@@ -3668,7 +3690,7 @@ export async function registerRoutes(
   app.delete(
     "/api/admin/policy-templates/:id",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     (_req: AuthenticatedRequest, res) => {
       res.status(403).json({ error: "Policy template deletion is disabled" });
     }
@@ -3678,13 +3700,14 @@ export async function registerRoutes(
   app.post(
     "/api/admin/policy-templates/:id/preview",
     authenticate,
-    requireAdmin,
+    requireOrgAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
         const { id } = req.params;
+        const orgId = getOrgId(req);
         const { params } = req.body;
 
-        const template = await templateStorage.getTemplate(id);
+        const template = await templateStorage.getTemplate(id, orgId);
         if (!template) {
           res.status(404).json({ error: "Template not found" });
           return;

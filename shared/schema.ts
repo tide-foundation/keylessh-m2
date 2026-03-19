@@ -206,6 +206,7 @@ export const approvalDecisions = pgTable("approval_decisions", {
   userEmail: text("user_email").notNull(),
   decision: integer("decision").notNull(), // 0 = deny, 1 = approve
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  organizationId: text("organization_id").notNull().default("default"),
 }, (table) => [
   unique("uq_approval_decision").on(table.approvalId, table.userVuid),
 ]);
@@ -219,6 +220,7 @@ export const accessChangeLogs = pgTable("access_change_logs", {
   userEmail: text("user_email").notNull(),
   targetUser: text("target_user"),
   details: text("details"),
+  organizationId: text("organization_id").notNull().default("default"),
 });
 
 // SSH signing policies for roles (committed policies)
@@ -257,6 +259,7 @@ export const sshPolicyDecisions = pgTable("ssh_policy_decisions", {
   userEmail: text("user_email").notNull(),
   decision: integer("decision").notNull(), // 0 = deny, 1 = approve
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  organizationId: text("organization_id").notNull().default("default"),
 }, (table) => [
   unique("uq_policy_decision").on(table.policyRequestId, table.userVuid),
 ]);
@@ -273,6 +276,7 @@ export const sshPolicyLogs = pgTable("ssh_policy_logs", {
   status: text("status").notNull().default("pending"), // 'pending', 'approved', 'committed', 'cancelled'
   approvalCount: integer("approval_count").notNull().default(0),
   threshold: integer("threshold").notNull().default(1),
+  organizationId: text("organization_id").notNull().default("default"),
 });
 
 // Policy templates for reusable Forseti contracts

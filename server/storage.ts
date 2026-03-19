@@ -753,7 +753,7 @@ export class ApprovalStorage {
       [id, type, requestedBy, targetUserId, targetUserEmail, JSON.stringify(data), orgId]
     );
 
-    await this.addAccessChangeLog('created', id, requestedBy, targetUserEmail, JSON.stringify(data));
+    await this.addAccessChangeLog('created', id, requestedBy, targetUserEmail, JSON.stringify(data), orgId);
     return id;
   }
 
@@ -761,13 +761,15 @@ export class ApprovalStorage {
     approvalId: string,
     userVuid: string,
     userEmail: string,
-    approved: boolean
+    approved: boolean,
+    orgId?: string
   ): Promise<boolean> {
     try {
+      const effectiveOrgId = orgId || DEFAULT_ORG_ID;
       await pool.query(
-        `INSERT INTO approval_decisions (approval_id, user_vuid, user_email, decision)
-         VALUES ($1, $2, $3, $4)`,
-        [approvalId, userVuid, userEmail, approved ? 1 : 0]
+        `INSERT INTO approval_decisions (approval_id, user_vuid, user_email, decision, organization_id)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [approvalId, userVuid, userEmail, approved ? 1 : 0, effectiveOrgId]
       );
 
       await this.addAccessChangeLog(
@@ -775,7 +777,8 @@ export class ApprovalStorage {
         approvalId,
         userEmail,
         undefined,
-        undefined
+        undefined,
+        effectiveOrgId
       );
 
       return true;
@@ -794,6 +797,12 @@ export class ApprovalStorage {
   }
 
   async commitApproval(id: string, userEmail: string): Promise<boolean> {
+    const approvalRecord = await pool.query(
+      `SELECT organization_id FROM pending_approvals WHERE id = $1`,
+      [id]
+    );
+    const approvalOrgId = approvalRecord.rows[0]?.organization_id || DEFAULT_ORG_ID;
+
     const result = await pool.query(
       `UPDATE pending_approvals SET status = 'committed', updated_at = NOW()
        WHERE id = $1 AND status = 'pending'`,
@@ -801,13 +810,19 @@ export class ApprovalStorage {
     );
 
     if ((result.rowCount ?? 0) > 0) {
-      await this.addAccessChangeLog('committed', id, userEmail);
+      await this.addAccessChangeLog('committed', id, userEmail, undefined, undefined, approvalOrgId);
     }
 
     return (result.rowCount ?? 0) > 0;
   }
 
   async cancelApproval(id: string, userEmail: string): Promise<boolean> {
+    const approvalRecord = await pool.query(
+      `SELECT organization_id FROM pending_approvals WHERE id = $1`,
+      [id]
+    );
+    const approvalOrgId = approvalRecord.rows[0]?.organization_id || DEFAULT_ORG_ID;
+
     const result = await pool.query(
       `UPDATE pending_approvals SET status = 'cancelled', updated_at = NOW()
        WHERE id = $1 AND status = 'pending'`,
@@ -815,7 +830,7 @@ export class ApprovalStorage {
     );
 
     if ((result.rowCount ?? 0) > 0) {
-      await this.addAccessChangeLog('cancelled', id, userEmail);
+      await this.addAccessChangeLog('cancelled', id, userEmail, undefined, undefined, approvalOrgId);
     }
 
     return (result.rowCount ?? 0) > 0;
@@ -823,10 +838,11 @@ export class ApprovalStorage {
 
   async deleteApproval(id: string, userEmail: string): Promise<boolean> {
     const approvalResult = await pool.query(
-      `SELECT target_user_email FROM pending_approvals WHERE id = $1`,
+      `SELECT target_user_email, organization_id FROM pending_approvals WHERE id = $1`,
       [id]
     );
     const approval = approvalResult.rows[0];
+    const approvalOrgId = approval?.organization_id || DEFAULT_ORG_ID;
 
     const result = await pool.query(
       `DELETE FROM pending_approvals WHERE id = $1`,
@@ -834,17 +850,18 @@ export class ApprovalStorage {
     );
 
     if ((result.rowCount ?? 0) > 0) {
-      await this.addAccessChangeLog('deleted', id, userEmail, approval?.target_user_email);
+      await this.addAccessChangeLog('deleted', id, userEmail, approval?.target_user_email, undefined, approvalOrgId);
     }
 
     return (result.rowCount ?? 0) > 0;
   }
 
-  async getApproval(id: string): Promise<PendingApproval | undefined> {
-    const { rows } = await pool.query(
-      `SELECT * FROM pending_approvals WHERE id = $1`,
-      [id]
-    );
+  async getApproval(id: string, orgId?: string): Promise<PendingApproval | undefined> {
+    const query = orgId
+      ? `SELECT * FROM pending_approvals WHERE id = $1 AND organization_id = $2`
+      : `SELECT * FROM pending_approvals WHERE id = $1`;
+    const params = orgId ? [id, orgId] : [id];
+    const { rows } = await pool.query(query, params);
 
     if (rows.length === 0) return undefined;
     const row = rows[0];
@@ -878,19 +895,21 @@ export class ApprovalStorage {
     approvalId: string,
     userEmail: string,
     targetUser?: string,
-    details?: string
+    details?: string,
+    orgId?: string
   ): Promise<void> {
+    const effectiveOrgId = orgId || DEFAULT_ORG_ID;
     await pool.query(
-      `INSERT INTO access_change_logs (type, approval_id, user_email, target_user, details)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [type, approvalId, userEmail, targetUser, details]
+      `INSERT INTO access_change_logs (type, approval_id, user_email, target_user, details, organization_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [type, approvalId, userEmail, targetUser, details, effectiveOrgId]
     );
   }
 
-  async getAccessChangeLogs(limit: number = 100, offset: number = 0): Promise<AccessChangeLog[]> {
+  async getAccessChangeLogs(orgId: string, limit: number = 100, offset: number = 0): Promise<AccessChangeLog[]> {
     const { rows } = await pool.query(
-      `SELECT * FROM access_change_logs ORDER BY timestamp DESC LIMIT $1 OFFSET $2`,
-      [limit, offset]
+      `SELECT * FROM access_change_logs WHERE organization_id = $1 ORDER BY timestamp DESC LIMIT $2 OFFSET $3`,
+      [orgId, limit, offset]
     );
 
     return rows.map((row: any) => ({
@@ -915,6 +934,7 @@ export interface SshPolicy {
   policyData?: string;
   createdAt: number;
   updatedAt?: number;
+  organizationId?: string;
 }
 
 export interface InsertSshPolicy {
@@ -924,45 +944,50 @@ export interface InsertSshPolicy {
   executionType: "public" | "private";
   threshold: number;
   policyData?: string;
+  organizationId?: string;
 }
 
 // SSH Policy storage class
 export class PolicyStorage {
   async upsertPolicy(policy: InsertSshPolicy): Promise<SshPolicy> {
-    const existing = await this.getPolicy(policy.roleId);
+    const orgId = policy.organizationId || DEFAULT_ORG_ID;
+    const existing = await this.getPolicy(policy.roleId, orgId);
 
     if (existing) {
       await pool.query(
         `UPDATE ssh_policies
          SET contract_type = $1, approval_type = $2, execution_type = $3, threshold = $4, policy_data = $5, updated_at = NOW()
-         WHERE role_id = $6`,
-        [policy.contractType, policy.approvalType, policy.executionType, policy.threshold, policy.policyData || null, policy.roleId]
+         WHERE role_id = $6 AND organization_id = $7`,
+        [policy.contractType, policy.approvalType, policy.executionType, policy.threshold, policy.policyData || null, policy.roleId, orgId]
       );
 
       return {
         ...policy,
+        organizationId: orgId,
         createdAt: existing.createdAt,
         updatedAt: Math.floor(Date.now() / 1000),
       };
     } else {
       await pool.query(
-        `INSERT INTO ssh_policies (role_id, contract_type, approval_type, execution_type, threshold, policy_data)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [policy.roleId, policy.contractType, policy.approvalType, policy.executionType, policy.threshold, policy.policyData || null]
+        `INSERT INTO ssh_policies (role_id, contract_type, approval_type, execution_type, threshold, policy_data, organization_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [policy.roleId, policy.contractType, policy.approvalType, policy.executionType, policy.threshold, policy.policyData || null, orgId]
       );
 
       return {
         ...policy,
+        organizationId: orgId,
         createdAt: Math.floor(Date.now() / 1000),
       };
     }
   }
 
-  async getPolicy(roleId: string): Promise<SshPolicy | undefined> {
-    const { rows } = await pool.query(
-      `SELECT * FROM ssh_policies WHERE role_id = $1`,
-      [roleId]
-    );
+  async getPolicy(roleId: string, orgId?: string): Promise<SshPolicy | undefined> {
+    const query = orgId
+      ? `SELECT * FROM ssh_policies WHERE role_id = $1 AND organization_id = $2`
+      : `SELECT * FROM ssh_policies WHERE role_id = $1`;
+    const params = orgId ? [roleId, orgId] : [roleId];
+    const { rows } = await pool.query(query, params);
 
     if (rows.length === 0) return undefined;
     const row = rows[0];
@@ -976,6 +1001,7 @@ export class PolicyStorage {
       policyData: row.policy_data || undefined,
       createdAt: Math.floor(new Date(row.created_at).getTime() / 1000),
       updatedAt: row.updated_at ? Math.floor(new Date(row.updated_at).getTime() / 1000) : undefined,
+      organizationId: row.organization_id,
     };
   }
 
@@ -997,11 +1023,12 @@ export class PolicyStorage {
     }));
   }
 
-  async deletePolicy(roleId: string): Promise<boolean> {
-    const result = await pool.query(
-      `DELETE FROM ssh_policies WHERE role_id = $1`,
-      [roleId]
-    );
+  async deletePolicy(roleId: string, orgId?: string): Promise<boolean> {
+    const query = orgId
+      ? `DELETE FROM ssh_policies WHERE role_id = $1 AND organization_id = $2`
+      : `DELETE FROM ssh_policies WHERE role_id = $1`;
+    const params = orgId ? [roleId, orgId] : [roleId];
+    const result = await pool.query(query, params);
     return (result.rowCount ?? 0) > 0;
   }
 }
@@ -1023,6 +1050,7 @@ export interface PendingSshPolicy {
   approvedBy?: string[];
   deniedBy?: string[];
   commitReady?: boolean;
+  organizationId?: string;
 }
 
 export interface InsertPendingSshPolicy {
@@ -1033,6 +1061,7 @@ export interface InsertPendingSshPolicy {
   policyRequestData: string;
   contractCode?: string;
   threshold?: number;
+  organizationId?: string;
 }
 
 export interface SshPolicyDecision {
@@ -1046,17 +1075,18 @@ export interface SshPolicyDecision {
 // Pending SSH Policy storage class
 export class PendingPolicyStorage {
   async createPendingPolicy(policy: InsertPendingSshPolicy): Promise<PendingSshPolicy> {
+    const orgId = policy.organizationId || DEFAULT_ORG_ID;
     await pool.query(
-      `INSERT INTO pending_ssh_policies (id, role_id, requested_by, requested_by_email, policy_request_data, contract_code, threshold)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [policy.id, policy.roleId, policy.requestedBy, policy.requestedByEmail || null, policy.policyRequestData, policy.contractCode || null, policy.threshold || 1]
+      `INSERT INTO pending_ssh_policies (id, role_id, requested_by, requested_by_email, policy_request_data, contract_code, threshold, organization_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [policy.id, policy.roleId, policy.requestedBy, policy.requestedByEmail || null, policy.policyRequestData, policy.contractCode || null, policy.threshold || 1, orgId]
     );
 
     const threshold = policy.threshold || 1;
     await pool.query(
-      `INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, details, status, approval_count, threshold)
-       VALUES ('created', $1, $2, $3, $4, 'pending', 0, $5)`,
-      [policy.id, policy.requestedByEmail || policy.requestedBy, policy.roleId, JSON.stringify({ threshold }), threshold]
+      `INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, details, status, approval_count, threshold, organization_id)
+       VALUES ('created', $1, $2, $3, $4, 'pending', 0, $5, $6)`,
+      [policy.id, policy.requestedByEmail || policy.requestedBy, policy.roleId, JSON.stringify({ threshold }), threshold, orgId]
     );
 
     return {
@@ -1064,16 +1094,21 @@ export class PendingPolicyStorage {
       status: "pending",
       threshold: policy.threshold || 1,
       createdAt: Math.floor(Date.now() / 1000),
+      organizationId: orgId,
     };
   }
 
-  async getPendingPolicy(id: string): Promise<PendingSshPolicy | undefined> {
+  async getPendingPolicy(id: string, orgId?: string): Promise<PendingSshPolicy | undefined> {
+    const whereClause = orgId
+      ? `WHERE p.id = $1 AND p.organization_id = $2`
+      : `WHERE p.id = $1`;
+    const params = orgId ? [id, orgId] : [id];
     const { rows } = await pool.query(
       `SELECT p.*,
         (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approval_count,
         (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 0) as rejection_count
-       FROM pending_ssh_policies p WHERE p.id = $1`,
-      [id]
+       FROM pending_ssh_policies p ${whereClause}`,
+      params
     );
 
     if (rows.length === 0) return undefined;
@@ -1092,6 +1127,7 @@ export class PendingPolicyStorage {
       updatedAt: row.updated_at ? Math.floor(new Date(row.updated_at).getTime() / 1000) : undefined,
       approvalCount: parseInt(row.approval_count),
       rejectionCount: parseInt(row.rejection_count),
+      organizationId: row.organization_id,
     };
   }
 
@@ -1161,17 +1197,21 @@ export class PendingPolicyStorage {
   }
 
   async addDecision(decision: Omit<SshPolicyDecision, "createdAt">): Promise<void> {
+    const policy = await this.getPendingPolicy(decision.policyRequestId);
+    const policyOrgId = policy?.organizationId || DEFAULT_ORG_ID;
+
     await pool.query(
-      `INSERT INTO ssh_policy_decisions (policy_request_id, user_vuid, user_email, decision)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO ssh_policy_decisions (policy_request_id, user_vuid, user_email, decision, organization_id)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT(policy_request_id, user_vuid) DO UPDATE SET decision = EXCLUDED.decision, created_at = NOW()`,
-      [decision.policyRequestId, decision.userVuid, decision.userEmail, decision.decision]
+      [decision.policyRequestId, decision.userVuid, decision.userEmail, decision.decision, policyOrgId]
     );
 
-    const policy = await this.getPendingPolicy(decision.policyRequestId);
     const logType = decision.decision === 1 ? "approved" : "denied";
-    const approvalCount = policy?.approvalCount || 0;
-    const threshold = policy?.threshold || 1;
+    // Re-fetch to get updated counts after the decision insert
+    const updatedPolicy = await this.getPendingPolicy(decision.policyRequestId);
+    const approvalCount = updatedPolicy?.approvalCount || 0;
+    const threshold = updatedPolicy?.threshold || 1;
 
     let statusAfterAction = "pending";
     if (decision.decision === 1 && approvalCount >= threshold) {
@@ -1180,9 +1220,9 @@ export class PendingPolicyStorage {
     }
 
     await pool.query(
-      `INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [logType, decision.policyRequestId, decision.userEmail, policy?.roleId || null, statusAfterAction, approvalCount, threshold]
+      `INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold, organization_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [logType, decision.policyRequestId, decision.userEmail, updatedPolicy?.roleId || null, statusAfterAction, approvalCount, threshold, policyOrgId]
     );
   }
 
@@ -1245,11 +1285,12 @@ export class PendingPolicyStorage {
     if (policy.status !== "approved") throw new Error("Policy not approved yet");
 
     await this.updateStatus(id, "committed");
+    const policyOrgId = policy.organizationId || DEFAULT_ORG_ID;
 
     await pool.query(
-      `INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold)
-       VALUES ('committed', $1, $2, $3, 'committed', $4, $5)`,
-      [id, userEmail, policy.roleId, policy.approvalCount || 0, policy.threshold]
+      `INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold, organization_id)
+       VALUES ('committed', $1, $2, $3, 'committed', $4, $5, $6)`,
+      [id, userEmail, policy.roleId, policy.approvalCount || 0, policy.threshold, policyOrgId]
     );
   }
 
@@ -1258,15 +1299,16 @@ export class PendingPolicyStorage {
     if (!policy) throw new Error("Policy not found");
 
     await this.updateStatus(id, "cancelled");
+    const policyOrgId = policy.organizationId || DEFAULT_ORG_ID;
 
     await pool.query(
-      `INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold)
-       VALUES ('cancelled', $1, $2, $3, 'cancelled', $4, $5)`,
-      [id, userEmail, policy.roleId, policy.approvalCount || 0, policy.threshold]
+      `INSERT INTO ssh_policy_logs (type, policy_request_id, user_email, role_id, status, approval_count, threshold, organization_id)
+       VALUES ('cancelled', $1, $2, $3, 'cancelled', $4, $5, $6)`,
+      [id, userEmail, policy.roleId, policy.approvalCount || 0, policy.threshold, policyOrgId]
     );
   }
 
-  async getLogs(limit: number = 100, offset: number = 0): Promise<any[]> {
+  async getLogs(orgId: string, limit: number = 100, offset: number = 0): Promise<any[]> {
     const { rows } = await pool.query(
       `SELECT
         l.*,
@@ -1274,9 +1316,10 @@ export class PendingPolicyStorage {
         p.requested_by_email as policy_requested_by
        FROM ssh_policy_logs l
        LEFT JOIN pending_ssh_policies p ON l.policy_request_id = p.id
+       WHERE l.organization_id = $1
        ORDER BY l.timestamp DESC
-       LIMIT $1 OFFSET $2`,
-      [limit, offset]
+       LIMIT $2 OFFSET $3`,
+      [orgId, limit, offset]
     );
 
     return rows.map((row: any) => ({
@@ -1324,11 +1367,12 @@ export class TemplateStorage {
     };
   }
 
-  async getTemplate(id: string): Promise<PolicyTemplate | undefined> {
-    const { rows } = await pool.query(
-      `SELECT * FROM policy_templates WHERE id = $1`,
-      [id]
-    );
+  async getTemplate(id: string, orgId?: string): Promise<PolicyTemplate | undefined> {
+    const query = orgId
+      ? `SELECT * FROM policy_templates WHERE id = $1 AND organization_id = $2`
+      : `SELECT * FROM policy_templates WHERE id = $1`;
+    const params = orgId ? [id, orgId] : [id];
+    const { rows } = await pool.query(query, params);
 
     if (rows.length === 0) return undefined;
     const row = rows[0];
@@ -1345,11 +1389,12 @@ export class TemplateStorage {
     };
   }
 
-  async getTemplateByName(name: string): Promise<PolicyTemplate | undefined> {
-    const { rows } = await pool.query(
-      `SELECT * FROM policy_templates WHERE name = $1`,
-      [name]
-    );
+  async getTemplateByName(name: string, orgId?: string): Promise<PolicyTemplate | undefined> {
+    const query = orgId
+      ? `SELECT * FROM policy_templates WHERE name = $1 AND organization_id = $2`
+      : `SELECT * FROM policy_templates WHERE name = $1`;
+    const params = orgId ? [name, orgId] : [name];
+    const { rows } = await pool.query(query, params);
 
     if (rows.length === 0) return undefined;
     const row = rows[0];
@@ -1384,8 +1429,8 @@ export class TemplateStorage {
     }));
   }
 
-  async updateTemplate(id: string, data: Partial<InsertPolicyTemplate>): Promise<PolicyTemplate | undefined> {
-    const existing = await this.getTemplate(id);
+  async updateTemplate(id: string, data: Partial<InsertPolicyTemplate>, orgId?: string): Promise<PolicyTemplate | undefined> {
+    const existing = await this.getTemplate(id, orgId);
     if (!existing) return undefined;
 
     const updates: string[] = [];
@@ -1413,20 +1458,28 @@ export class TemplateStorage {
       updates.push(`updated_at = NOW()`);
       values.push(id);
 
+      let whereClause = `WHERE id = $${paramIndex}`;
+      if (orgId) {
+        paramIndex++;
+        values.push(orgId);
+        whereClause += ` AND organization_id = $${paramIndex}`;
+      }
+
       await pool.query(
-        `UPDATE policy_templates SET ${updates.join(', ')} WHERE id = $${paramIndex}`,
+        `UPDATE policy_templates SET ${updates.join(', ')} ${whereClause}`,
         values
       );
     }
 
-    return this.getTemplate(id);
+    return this.getTemplate(id, orgId);
   }
 
-  async deleteTemplate(id: string): Promise<boolean> {
-    const result = await pool.query(
-      `DELETE FROM policy_templates WHERE id = $1`,
-      [id]
-    );
+  async deleteTemplate(id: string, orgId?: string): Promise<boolean> {
+    const query = orgId
+      ? `DELETE FROM policy_templates WHERE id = $1 AND organization_id = $2`
+      : `DELETE FROM policy_templates WHERE id = $1`;
+    const params = orgId ? [id, orgId] : [id];
+    const result = await pool.query(query, params);
     return (result.rowCount ?? 0) > 0;
   }
 }
