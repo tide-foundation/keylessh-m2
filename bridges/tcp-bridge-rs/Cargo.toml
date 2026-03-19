@@ -3,6 +3,10 @@ name = "tcp-bridge-rs"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "TCP-Bridge"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.24"
@@ -16,6 +20,12 @@ ring = "0.17"
 url = "2"
 dashmap = "6"
 tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+[build-dependencies]
+winresource = "0.1"
 
 [profile.release]
 strip = true
