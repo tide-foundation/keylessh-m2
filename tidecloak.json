@@ -20,6 +20,8 @@
     ]
   },
   "vendorId": "4732930839663504516222320776113730334837735761259178685271951331217185118658",
+  "backgroundUrl": "https://login.dauth.me/realms/keylessh-free/tide-idp-resources/images/BACKGROUND_IMAGE",
+  "logoUrl": "https://login.dauth.me/realms/keylessh-free/tide-idp-resources/images/LOGO",
   "homeOrkUrl": "https://ork1.tideprotocol.com",
   "client-origin-auth-https://free.keylessh.com": "L/y2h94WHWe3aEvtU1W1o1Hy/fL4ZHw1aX4WXVTA/otaoauXp2HPIpcsq31ibELpSaMUID+xZXCcunDAVDMCAw==",
   "client-origin-auth-http://localhost:3000": "etbjOmQasoISHR4ua6cKJnlhalZDIbpL3XQfUy5QSXwiNSBOC3a4/TQCYpH6OrGQtjFiy/zhoRmh8z1igJKiAQ=="

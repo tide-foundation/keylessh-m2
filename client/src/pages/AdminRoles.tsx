@@ -80,7 +80,7 @@ const defaultPolicyConfig: PolicyConfig = {
 
 export default function AdminRoles() {
   const { toast } = useToast();
-  const { initializeTideRequest, organizationId } = useAuth();
+  const { initializeTideRequest, organizationId, orgRole } = useAuth();
   const authConfig = useAuthConfig();
   const [search, setSearch] = useState("");
   const [editingRole, setEditingRole] = useState<OrgClientRole | null>(null);
@@ -113,11 +113,14 @@ export default function AdminRoles() {
   const isFetchingRoles = useIsFetching({ queryKey: ["/api/org/roles"] }) > 0;
 
   // Get subscription tier to determine if role creation is allowed
+  // Org-admins are always on enterprise deployments, so skip the license check
+  const isOrgAdmin = orgRole === "org-admin" || orgRole === "global-admin";
   const { data: licenseInfo } = useQuery({
     queryKey: ["/api/admin/license"],
     queryFn: api.admin.license.get,
+    enabled: !isOrgAdmin, // org-admins can't access this endpoint
   });
-  const isFreeTier = licenseInfo?.subscription?.tier === "free" || !licenseInfo?.subscription;
+  const isFreeTier = isOrgAdmin ? false : (licenseInfo?.subscription?.tier === "free" || !licenseInfo?.subscription);
   const { secondsRemaining, refreshNow } = useAutoRefresh({
     intervalSeconds: 15,
     refresh: () => refetchRoles(),
