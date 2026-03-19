@@ -1133,7 +1133,7 @@ async fn handle_request(
                     let proto = if state.use_tls { "https" } else { "http" };
                     let request_url = format!(
                         "{proto}://{host}{}",
-                        effective_path
+                        url_path // use original path before /__b/ and /_idp/ stripping
                     );
                     if let Err(e) = state.dpop_verifier.verify_proof(
                         proof,
