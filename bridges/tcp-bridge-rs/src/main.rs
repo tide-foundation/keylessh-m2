@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Json};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -20,6 +21,9 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
+
+mod logstream;
+mod tray;
 
 // ── Config types ─────────────────────────────────────────────────
 
@@ -77,17 +81,17 @@ fn resolve_config_path() -> Option<PathBuf> {
 
 fn load_config() -> Result<TidecloakConfig, String> {
     let config_data = if let Ok(adapter) = env::var("client_adapter") {
-        eprintln!("[Bridge] Loading config from client_adapter env variable");
+        tracing::info!("Loading config from client_adapter env variable");
         adapter
     } else if let Ok(b64) = env::var("TIDECLOAK_CONFIG_B64") {
-        eprintln!("[Bridge] Loading config from TIDECLOAK_CONFIG_B64");
+        tracing::info!("Loading config from TIDECLOAK_CONFIG_B64");
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&b64)
             .map_err(|e| format!("Base64 decode error: {e}"))?;
         String::from_utf8(bytes).map_err(|e| format!("UTF-8 error: {e}"))?
     } else {
         let path = resolve_config_path().ok_or("No tidecloak.json found in data directory")?;
-        eprintln!("[Bridge] Loading config from {}", path.display());
+        tracing::info!("Loading config from {}", path.display());
         fs::read_to_string(&path).map_err(|e| format!("Read error: {e}"))?
     };
 
@@ -98,7 +102,7 @@ fn load_config() -> Result<TidecloakConfig, String> {
         return Err("No JWKS keys found in config".into());
     }
 
-    eprintln!("[Bridge] JWKS loaded successfully");
+    tracing::info!("JWKS loaded successfully");
     Ok(config)
 }
 
@@ -252,19 +256,19 @@ fn verify_token(token: &str, config: &TidecloakConfig) -> Option<JwtPayload> {
         format!("{}/realms/{}", config.auth_server_url, config.realm)
     };
     if payload.iss.as_deref() != Some(&expected_issuer) {
-        eprintln!("[Bridge] Issuer mismatch: expected {expected_issuer}, got {:?}", payload.iss);
+        tracing::warn!("Issuer mismatch: expected {expected_issuer}, got {:?}", payload.iss);
         return None;
     }
 
     if payload.azp.as_deref() != Some(&config.resource) {
-        eprintln!("[Bridge] AZP mismatch: expected {}, got {:?}", config.resource, payload.azp);
+        tracing::warn!("AZP mismatch: expected {}, got {:?}", config.resource, payload.azp);
         return None;
     }
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     if let Some(exp) = payload.exp {
         if now > exp {
-            eprintln!("[Bridge] Token expired");
+            tracing::warn!("Token expired");
             return None;
         }
     }
@@ -280,11 +284,11 @@ fn verify_token(token: &str, config: &TidecloakConfig) -> Option<JwtPayload> {
     match verify_jwt_sig_with_jwk_key(token, key) {
         Ok(true) => Some(payload),
         Ok(false) => {
-            eprintln!("[Bridge] JWT signature verification failed");
+            tracing::warn!("JWT signature verification failed");
             None
         }
         Err(e) => {
-            eprintln!("[Bridge] JWT verification error: {e}");
+            tracing::error!("JWT verification error: {e}");
             None
         }
     }
@@ -495,7 +499,7 @@ async fn ws_handler(
         match dpop_header {
             Some(proof) => {
                 if let Err(e) = verify_dpop_proof(&state, proof, "GET", &request_url, cnf_jkt.as_deref()) {
-                    eprintln!("[Bridge] DPoP proof verification failed: {e}");
+                    tracing::warn!("DPoP proof verification failed: {e}");
                     return (StatusCode::UNAUTHORIZED, format!("DPoP proof invalid: {e}")).into_response();
                 }
             }
@@ -503,7 +507,7 @@ async fn ws_handler(
         }
     } else if let Some(ref dpop_proof) = params.dpop {
         if let Err(e) = verify_dpop_proof(&state, dpop_proof, "GET", &request_url, cnf_jkt.as_deref()) {
-            eprintln!("[Bridge] DPoP query proof verification failed: {e}");
+            tracing::warn!("DPoP query proof verification failed: {e}");
             return (StatusCode::UNAUTHORIZED, format!("DPoP proof invalid: {e}")).into_response();
         }
     } else if cnf_jkt.is_some() && has_auth_header {
@@ -512,7 +516,7 @@ async fn ws_handler(
     // Note: query-param tokens without dpop proof still accepted (backwards compat)
 
     let user_id = payload.sub.unwrap_or_else(|| "unknown".into());
-    eprintln!("[Bridge] Connection: {user_id} -> {host}:{port} (session: {session_id})");
+    tracing::info!("Connection: {user_id} -> {host}:{port} (session: {session_id})");
 
     ws.on_upgrade(move |socket| bridge_tcp(state, socket, host, port))
 }
@@ -526,7 +530,7 @@ async fn bridge_tcp(state: Arc<AppState>, ws: WebSocket, host: String, port: u16
     // Connect to TCP target
     let tcp = match TcpStream::connect((&*host, port)).await {
         Ok(tcp) => {
-            eprintln!("[Bridge] TCP connected to {host}:{port}");
+            tracing::info!("TCP connected to {host}:{port}");
             let msg = serde_json::json!({"type": "connected"}).to_string();
             if ws_write.send(Message::Text(msg.into())).await.is_err() {
                 state.active_connections.fetch_sub(1, Ordering::Relaxed);
@@ -535,7 +539,7 @@ async fn bridge_tcp(state: Arc<AppState>, ws: WebSocket, host: String, port: u16
             tcp
         }
         Err(e) => {
-            eprintln!("[Bridge] TCP connect error: {e}");
+            tracing::error!("TCP connect error: {e}");
             let msg = serde_json::json!({"type": "error", "message": e.to_string()}).to_string();
             let _ = ws_write.send(Message::Text(msg.into())).await;
             let _ = ws_write.close().await;
@@ -557,7 +561,7 @@ async fn bridge_tcp(state: Arc<AppState>, ws: WebSocket, host: String, port: u16
             loop {
                 match tcp_read.read(&mut buf).await {
                     Ok(0) => {
-                        eprintln!("[Bridge] TCP closed");
+                        tracing::info!("TCP closed");
                         let mut ws = ws_write.lock().await;
                         let _ = ws.close().await;
                         done.notify_waiters();
@@ -571,7 +575,7 @@ async fn bridge_tcp(state: Arc<AppState>, ws: WebSocket, host: String, port: u16
                         }
                     }
                     Err(e) => {
-                        eprintln!("[Bridge] TCP read error: {e}");
+                        tracing::error!("TCP read error: {e}");
                         let mut ws = ws_write.lock().await;
                         let msg = serde_json::json!({"type": "error", "message": e.to_string()}).to_string();
                         let _ = ws.send(Message::Text(msg.into())).await;
@@ -597,11 +601,11 @@ async fn bridge_tcp(state: Arc<AppState>, ws: WebSocket, host: String, port: u16
                         }
                     }
                     Ok(Message::Close(_)) => {
-                        eprintln!("[Bridge] WebSocket closed");
+                        tracing::info!("WebSocket closed");
                         break;
                     }
                     Err(e) => {
-                        eprintln!("[Bridge] WebSocket error: {e}");
+                        tracing::error!("WebSocket error: {e}");
                         break;
                     }
                     _ => {}
@@ -620,6 +624,22 @@ async fn bridge_tcp(state: Arc<AppState>, ws: WebSocket, host: String, port: u16
 
 #[tokio::main]
 async fn main() {
+    // Init logging: stderr + broadcast to web UI
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        use tracing_subscriber::EnvFilter;
+        logstream::init();
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("tcp_bridge=info,warn")
+        });
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(logstream::BroadcastLayer)
+            .init();
+    }
+
     let port: u16 = env::var("PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -628,7 +648,7 @@ async fn main() {
     let config = match load_config() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[Bridge] Failed to load TideCloak config: {e}");
+            tracing::error!("Failed to load TideCloak config: {e}");
             std::process::exit(1);
         }
     };
@@ -641,14 +661,22 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(health_handler))
+        .route("/logs", get(logs_page_handler))
+        .route("/logs/stream", get(logs_stream_handler))
+        .route("/logs/buffer", get(logs_buffer_handler))
         .fallback(get(ws_handler))
         .with_state(state);
+
+    let logs_url = format!("http://localhost:{port}/logs");
+    tray::spawn_tray(logs_url);
+
+    tracing::info!("TCP Bridge listening on port {port}");
+    tracing::info!("Health: http://localhost:{port}/health");
+    tracing::info!("Logs:   http://localhost:{port}/logs");
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .unwrap();
-    eprintln!("[Bridge] TCP Bridge listening on port {port}");
-    eprintln!("[Bridge] Health: http://localhost:{port}/health");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -661,5 +689,207 @@ async fn shutdown_signal() {
         .unwrap()
         .recv()
         .await;
-    eprintln!("[Bridge] Shutting down...");
+    tracing::info!("Shutting down...");
 }
+
+// ── Log endpoints ─────────────────────────────────────────────────
+
+async fn logs_page_handler() -> Html<&'static str> {
+    Html(LOGS_HTML)
+}
+
+async fn logs_stream_handler() -> Response {
+    use tokio_stream::wrappers::BroadcastStream;
+
+    let rx = match logstream::subscribe() {
+        Some(rx) => rx,
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "Log stream not available").into_response();
+        }
+    };
+
+    let stream = BroadcastStream::new(rx).filter_map(|result| async move {
+        match result {
+            Ok(line) => {
+                let escaped = line.replace('\\', "\\\\").replace('\n', "\\n").replace('\r', "");
+                Some(Ok::<_, std::convert::Infallible>(format!("data: {escaped}\n\n")))
+            }
+            Err(_) => None,
+        }
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .header("connection", "keep-alive")
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| Response::new(Body::from("Internal error")))
+}
+
+async fn logs_buffer_handler() -> Json<Vec<String>> {
+    Json(logstream::recent_lines())
+}
+
+// ── Logs HTML page ──────────────────────────────────────────────
+
+static LOGS_HTML: &str = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TCP Bridge - Logs</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+         background: #0f172a; color: #e2e8f0; height: 100vh; display: flex; flex-direction: column; }
+  .header { padding: 0.75rem 1rem; background: #1e293b; border-bottom: 1px solid #334155;
+            display: flex; align-items: center; gap: 1rem; flex-shrink: 0; }
+  .header h1 { font-size: 1rem; color: #38bdf8; font-weight: 600; }
+  .status { font-size: 0.8rem; padding: 0.2rem 0.6rem; border-radius: 9999px; }
+  .status.connected { background: #064e3b; color: #34d399; }
+  .status.disconnected { background: #7f1d1d; color: #fca5a5; }
+  .controls { margin-left: auto; display: flex; gap: 0.5rem; }
+  .controls button { padding: 0.3rem 0.75rem; background: #334155; color: #94a3b8; border: 1px solid #475569;
+                     border-radius: 4px; cursor: pointer; font-size: 0.75rem; font-family: inherit; }
+  .controls button:hover { background: #475569; color: #e2e8f0; }
+  #log { flex: 1; overflow-y: auto; padding: 0.5rem 1rem; font-size: 0.8rem; line-height: 1.5; }
+  .line { white-space: pre-wrap; word-break: break-all; padding: 1px 0; }
+  .line:hover { background: #1e293b; }
+  .level-ERROR { color: #f87171; }
+  .level-WARN { color: #fbbf24; }
+  .level-INFO { color: #38bdf8; }
+  .level-DEBUG { color: #a78bfa; }
+  .level-TRACE { color: #64748b; }
+  .timestamp { color: #64748b; }
+  .filter { padding: 0.3rem 0.5rem; background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+            border-radius: 4px; font-size: 0.75rem; font-family: inherit; width: 200px; outline: none; }
+  .filter:focus { border-color: #38bdf8; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>TCP Bridge Logs</h1>
+  <span id="status" class="status disconnected">disconnected</span>
+  <div class="controls">
+    <input type="text" id="filter" class="filter" placeholder="Filter logs...">
+    <button onclick="toggleAutoScroll()">Auto-scroll: ON</button>
+    <button onclick="clearLogs()">Clear</button>
+  </div>
+</div>
+<div id="log"></div>
+<script>
+let autoScroll = true;
+let filterText = '';
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const filterInput = document.getElementById('filter');
+
+filterInput.addEventListener('input', (e) => {
+  filterText = e.target.value.toLowerCase();
+  document.querySelectorAll('.line').forEach(el => {
+    el.style.display = el.textContent.toLowerCase().includes(filterText) || !filterText ? '' : 'none';
+  });
+});
+
+function toggleAutoScroll() {
+  autoScroll = !autoScroll;
+  event.target.textContent = 'Auto-scroll: ' + (autoScroll ? 'ON' : 'OFF');
+}
+
+function clearLogs() {
+  logEl.innerHTML = '';
+}
+
+function addLine(text) {
+  const div = document.createElement('div');
+  div.className = 'line';
+
+  const levels = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'];
+  for (const lvl of levels) {
+    if (text.startsWith(lvl + ' ')) {
+      div.classList.add('level-' + lvl);
+      break;
+    }
+  }
+
+  div.textContent = text;
+  if (filterText && !text.toLowerCase().includes(filterText)) {
+    div.style.display = 'none';
+  }
+  logEl.appendChild(div);
+
+  while (logEl.children.length > 5000) {
+    logEl.removeChild(logEl.firstChild);
+  }
+
+  if (autoScroll) {
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+}
+
+let pollMode = false;
+let lastLineCount = 0;
+let sseFailCount = 0;
+
+function connect() {
+  if (pollMode) { startPolling(); return; }
+
+  const es = new EventSource(location.origin + '/logs/stream');
+  let opened = false;
+
+  es.onopen = () => {
+    opened = true;
+    sseFailCount = 0;
+    statusEl.textContent = 'live (SSE)';
+    statusEl.className = 'status connected';
+  };
+
+  es.onmessage = (e) => {
+    addLine(e.data);
+  };
+
+  es.onerror = () => {
+    es.close();
+    sseFailCount++;
+    if (!opened || sseFailCount >= 3) {
+      pollMode = true;
+      statusEl.textContent = 'polling';
+      statusEl.className = 'status connected';
+      startPolling();
+    } else {
+      statusEl.textContent = 'reconnecting...';
+      statusEl.className = 'status disconnected';
+      setTimeout(connect, 2000);
+    }
+  };
+}
+
+function startPolling() {
+  fetchBuffer();
+  setInterval(fetchBuffer, 2000);
+}
+
+function fetchBuffer() {
+  fetch(location.origin + '/logs/buffer')
+    .then(r => r.json())
+    .then(lines => {
+      if (lines.length !== lastLineCount) {
+        logEl.innerHTML = '';
+        lines.forEach(l => addLine(l));
+        lastLineCount = lines.length;
+        statusEl.textContent = 'polling (' + lines.length + ' lines)';
+        statusEl.className = 'status connected';
+      }
+    })
+    .catch(() => {
+      statusEl.textContent = 'disconnected';
+      statusEl.className = 'status disconnected';
+    });
+}
+
+connect();
+</script>
+</body>
+</html>
+"##;
