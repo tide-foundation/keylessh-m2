@@ -685,10 +685,17 @@ async fn main() {
 }
 
 async fn shutdown_signal() {
-    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .unwrap()
-        .recv()
-        .await;
+    #[cfg(unix)]
+    {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .unwrap()
+            .recv()
+            .await;
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+    }
     tracing::info!("Shutting down...");
 }
 
