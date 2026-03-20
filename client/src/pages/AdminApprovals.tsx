@@ -69,7 +69,6 @@ function AccessApprovalsTab({ isActive }: { isActive: boolean }) {
   const { data: approvals = [], isFetching, refetch } = useQuery<AccessApproval[]>({
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
-    staleTime: 60_000,
   });
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
@@ -385,7 +384,6 @@ function RoleApprovalsTab({ isActive }: { isActive: boolean }) {
   const { data: approvals = [], isFetching, refetch } = useQuery<RoleApproval[]>({
     queryKey: ["/api/admin/role-approvals"],
     queryFn: api.admin.roleApprovals.list,
-    staleTime: 60_000,
   });
 
   const { secondsRemaining, refreshNow } = useAutoRefresh({
@@ -682,7 +680,6 @@ function PolicyApprovalsTab({ isActive }: { isActive: boolean }) {
   const { data: policiesData, isLoading: policiesLoading, refetch: refetchPolicies } = useQuery({
     queryKey: ["/api/admin/ssh-policies/pending"],
     queryFn: api.admin.sshPolicies.listPending,
-    staleTime: 60_000,
   });
 
   const isFetchingPolicies = useIsFetching({ queryKey: ["/api/admin/ssh-policies/pending"] }) > 0;
