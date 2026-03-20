@@ -109,7 +109,6 @@ export default function AdminUsers() {
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
     enabled: !!editingUser,
-    staleTime: 60_000,
   });
 
   const allRoles = rolesData?.roles || [];
