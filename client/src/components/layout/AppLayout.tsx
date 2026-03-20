@@ -119,12 +119,12 @@ export function AppLayout({ children }: AppLayoutProps) {
   });
 
   // Fetch change request counts for nav badge.
-  // Poll every 5 min to keep badge fresh without saturating TideCloak (voucher calls block behind these).
+  // Poll every 5 min — this is the ONLY place that auto-fetches these TideCloak endpoints.
+  // All other pages inherit staleTime: Infinity (global default) and read from this cache.
   const { data: accessApprovals } = useQuery({
     queryKey: ["/api/admin/access-approvals"],
     queryFn: api.admin.accessApprovals.list,
     enabled: isAdmin,
-    staleTime: 5 * 60_000,
     refetchInterval: 5 * 60_000,
   });
 
@@ -132,7 +132,6 @@ export function AppLayout({ children }: AppLayoutProps) {
     queryKey: ["/api/admin/role-approvals"],
     queryFn: api.admin.roleApprovals.list,
     enabled: isAdmin,
-    staleTime: 5 * 60_000,
     refetchInterval: 5 * 60_000,
   });
 
@@ -140,7 +139,6 @@ export function AppLayout({ children }: AppLayoutProps) {
     queryKey: ["/api/admin/ssh-policies/pending"],
     queryFn: api.admin.sshPolicies.listPending,
     enabled: isAdmin,
-    staleTime: 5 * 60_000,
     refetchInterval: 5 * 60_000,
   });
 
