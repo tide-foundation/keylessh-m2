@@ -5,5 +5,6 @@ EXPORTS
     UnregisterSecurityPackage
     UnregisterSubAuth
     ClearMnsFlags
+    ValidateConfig
     WriteConfig
     RemoveConfig
