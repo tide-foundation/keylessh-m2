@@ -58,7 +58,7 @@ UINT __stdcall RegisterSecurityPackage(MSIHANDLE hInstall)
     UINT ret = ERROR_SUCCESS;
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, LSA_KEY, 0,
-                      KEY_READ | KEY_WRITE, &hKey) != ERROR_SUCCESS)
+                      KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, &hKey) != ERROR_SUCCESS)
         return ERROR_INSTALL_FAILURE;
 
     /* Read current SecurityPackages */
@@ -99,7 +99,7 @@ UINT __stdcall RegisterSubAuth(MSIHANDLE hInstall)
     DWORD disp = 0;
 
     if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, MSV1_0_KEY, 0, NULL,
-                        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE | KEY_WOW64_64KEY, NULL,
                         &hKey, &disp) != ERROR_SUCCESS)
         return ERROR_INSTALL_FAILURE;
 
@@ -120,7 +120,7 @@ UINT __stdcall UnregisterSecurityPackage(MSIHANDLE hInstall)
     UINT ret = ERROR_SUCCESS;
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, LSA_KEY, 0,
-                      KEY_READ | KEY_WRITE, &hKey) != ERROR_SUCCESS)
+                      KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, &hKey) != ERROR_SUCCESS)
         return ERROR_SUCCESS; /* nothing to undo */
 
     DWORD type = 0;
@@ -163,7 +163,7 @@ UINT __stdcall UnregisterSubAuth(MSIHANDLE hInstall)
     HKEY hKey = NULL;
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, MSV1_0_KEY, 0,
-                      KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+                      KEY_WRITE | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
         RegDeleteValueW(hKey, L"Auth0");
         RegCloseKey(hKey);
     }
