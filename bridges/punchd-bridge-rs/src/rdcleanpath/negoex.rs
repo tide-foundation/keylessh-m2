@@ -263,7 +263,7 @@ fn nfold(input: &[u8], out_bits: usize) -> Vec<u8> {
         let offset = i % in_len;
         let rotation = (13 * copy) % in_bits;
 
-        let src_start = ((offset * 8).wrapping_sub(rotation) % in_bits + in_bits) % in_bits;
+        let src_start = (((offset * 8) as isize - rotation as isize).rem_euclid(in_bits as isize)) as usize;
         let src_byte = src_start / 8;
         let src_bit = src_start % 8;
 
