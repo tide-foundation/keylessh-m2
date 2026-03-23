@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package Name="TideSSP"
+           Manufacturer="Tide Foundation"
+           Version="1.0.0.0"
+           UpgradeCode="A3F1B7D2-4E6C-4A8F-9B2D-1C5E3F7A9D0B"
+           Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of TideSSP is already installed."
+                  Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Require elevated privileges -->
+    <Launch Condition="Privileged" Message="This installer requires administrator privileges." />
+
+    <!-- Properties -->
+    <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />
+
+    <!-- Directory layout -->
+    <StandardDirectory Id="System64Folder">
+      <Component Id="TideSSP_DLL" Guid="B1C2D3E4-F5A6-47B8-9C0D-1E2F3A4B5C6D" Win64="yes">
+        <File Id="TideSSP.dll" Source="!(bindpath.BinDir)\TideSSP.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="TideSubAuth_DLL" Guid="C2D3E4F5-A6B7-48C9-0D1E-2F3A4B5C6D7E" Win64="yes">
+        <File Id="TideSubAuth.dll" Source="!(bindpath.BinDir)\TideSubAuth.dll" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- Feature -->
+    <Feature Id="Complete" Title="TideSSP" Level="1">
+      <ComponentRef Id="TideSSP_DLL" />
+      <ComponentRef Id="TideSubAuth_DLL" />
+    </Feature>
+
+    <!-- Custom actions (from our CA DLL) -->
+    <Binary Id="TideCA" SourceFile="!(bindpath.BinDir)\TideCA.dll" />
+
+    <!-- Install custom actions (deferred, run as SYSTEM in elevated context) -->
+    <CustomAction Id="CA_RegisterSecurityPackage"
+                  DllEntry="RegisterSecurityPackage"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <CustomAction Id="CA_RegisterSubAuth"
+                  DllEntry="RegisterSubAuth"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <!-- Uninstall custom actions -->
+    <CustomAction Id="CA_UnregisterSecurityPackage"
+                  DllEntry="UnregisterSecurityPackage"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="CA_UnregisterSubAuth"
+                  DllEntry="UnregisterSubAuth"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="CA_ClearMnsFlags"
+                  DllEntry="ClearMnsFlags"
+                  BinaryRef="TideCA"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- Register on install -->
+      <Custom Action="CA_RegisterSecurityPackage" After="InstallFiles"
+              Condition="NOT Installed" />
+      <Custom Action="CA_RegisterSubAuth" After="CA_RegisterSecurityPackage"
+              Condition="NOT Installed" />
+
+      <!-- Unregister on uninstall -->
+      <Custom Action="CA_UnregisterSecurityPackage" Before="RemoveFiles"
+              Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_UnregisterSubAuth" After="CA_UnregisterSecurityPackage"
+              Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="CA_ClearMnsFlags" After="CA_UnregisterSubAuth"
+              Condition="REMOVE=&quot;ALL&quot;" />
+
+      <!-- Schedule reboot -->
+      <ScheduleReboot After="InstallFinalize" />
+    </InstallExecuteSequence>
+
+    <!-- WiX UI (minimal) -->
+    <WixVariable Id="WixUILicenseRtf" Value="!(bindpath.InstallerDir)\License.rtf" />
+    <UIRef Id="WixUI_Minimal" />
+
+  </Package>
+</Wix>
