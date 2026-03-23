@@ -114,7 +114,9 @@ pub async fn perform_credssp(tls: &mut TlsStream<TcpStream>, jwt: &str) -> Resul
     if server_verify.checksum.is_none() {
         return Err("CredSSP: server VERIFY has no checksum".into());
     }
-    tracing::info!("[CredSSP] Server VERIFY accepted");
+    tracing::info!("[CredSSP] Server VERIFY: checksumType={:?}, checksum={}",
+        server_verify.checksum_type,
+        server_verify.checksum.as_ref().map(|c| hex::encode(c)).unwrap_or_default());
 
     // ── Step 3: Send client VERIFY ──
 
@@ -139,7 +141,10 @@ pub async fn perform_credssp(tls: &mut TlsStream<TcpStream>, jwt: &str) -> Resul
     full_transcript.extend_from_slice(&server_verify_raw);
 
     let ku_client_verify: u32 = 25;
+    tracing::info!("[CredSSP] Transcript: {} parts, {} bytes total, full_transcript={} bytes",
+        transcript.len(), transcript_data.len(), full_transcript.len());
     let client_checksum = compute_aes128_checksum(&session_key, ku_client_verify, &full_transcript);
+    tracing::info!("[CredSSP] Client VERIFY checksum (ku={}): {}", ku_client_verify, hex::encode(&client_checksum));
 
     let client_verify = build_verify_message(&conversation_id, seq_num, TIDESSP_AUTH_SCHEME, &client_checksum, CHECKSUM_TYPE_HMAC_SHA1_96_AES128);
     seq_num += 1;
@@ -147,7 +152,7 @@ pub async fn perform_credssp(tls: &mut TlsStream<TcpStream>, jwt: &str) -> Resul
     let verify_spnego = build_spnego_response(Some(&client_verify), None);
     let ts_req_verify = build_ts_request(CREDSSP_VERSION, Some(&verify_spnego), None, None, Some(&client_nonce));
     tls.write_all(&ts_req_verify).await.map_err(|e| format!("write step3: {e}"))?;
-    tracing::info!("[CredSSP] Sent client VERIFY");
+    tracing::info!("[CredSSP] Sent client VERIFY ({} bytes)", client_verify.len());
 
     // ── Step 4: Read SPNEGO accept-complete ──
 
