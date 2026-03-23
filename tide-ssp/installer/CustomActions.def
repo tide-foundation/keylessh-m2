@@ -1,0 +1,7 @@
+LIBRARY TideCA
+EXPORTS
+    RegisterSecurityPackage
+    RegisterSubAuth
+    UnregisterSecurityPackage
+    UnregisterSubAuth
+    ClearMnsFlags

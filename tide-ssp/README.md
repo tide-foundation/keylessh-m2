@@ -22,6 +22,20 @@ cmake --build build --config Release
 
 ## Install
 
+### Option A: MSI Installer
+
+Build the MSI (requires [WiX Toolset v4+](https://wixtoolset.org/) and a Developer Command Prompt):
+
+```powershell
+installer\build.bat
+```
+
+Then run `installer\out\TideSSP.msi`. The installer copies both DLLs to System32, registers the security packages, and schedules a reboot.
+
+To uninstall, use **Add/Remove Programs** or `msiexec /x TideSSP.msi`.
+
+### Option B: Manual (PowerShell)
+
 Run as Administrator:
 
 ```powershell
@@ -30,7 +44,7 @@ Run as Administrator:
 
 Then reboot.
 
-## Uninstall
+To uninstall manually:
 
 ```powershell
 .\install.ps1 -Uninstall

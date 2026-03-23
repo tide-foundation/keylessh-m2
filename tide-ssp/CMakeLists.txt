@@ -35,4 +35,28 @@ if(MSVC)
     )
 endif()
 
-install(TARGETS TideSSP RUNTIME DESTINATION bin)
+add_library(TideSubAuth SHARED
+    src/subauth.c
+)
+
+target_include_directories(TideSubAuth PRIVATE src)
+
+target_link_libraries(TideSubAuth PRIVATE
+    advapi32
+    ntdll
+)
+
+target_compile_definitions(TideSubAuth PRIVATE
+    SECURITY_WIN32
+    UNICODE
+    _UNICODE
+)
+
+if(MSVC)
+    target_compile_options(TideSubAuth PRIVATE /W4)
+    set_target_properties(TideSubAuth PROPERTIES
+        LINK_FLAGS "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/src/TideSubAuth.def"
+    )
+endif()
+
+install(TARGETS TideSSP TideSubAuth RUNTIME DESTINATION bin)
