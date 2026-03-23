@@ -433,7 +433,19 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
     // Include selected gateway ID from HttpOnly cookie so JS can target it
     const selectedGatewayRaw = parseCookie(req.headers.cookie, "gateway_relay");
     if (selectedGatewayRaw) {
-      webrtcConfig.targetGatewayId = decodeURIComponent(selectedGatewayRaw);
+      const gatewayId = decodeURIComponent(selectedGatewayRaw);
+      webrtcConfig.targetGatewayId = gatewayId;
+      // Include backendAuth map for eddsa backends (so RDP client auto-connects)
+      const gateway = registry.getGateway(gatewayId);
+      if (gateway) {
+        const authMap: Record<string, string> = {};
+        for (const b of gateway.metadata.backends || []) {
+          if (b.auth === "eddsa") authMap[b.name] = "eddsa";
+        }
+        if (Object.keys(authMap).length > 0) {
+          webrtcConfig.backendAuth = authMap;
+        }
+      }
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(webrtcConfig));
