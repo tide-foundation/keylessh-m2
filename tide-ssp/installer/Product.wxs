@@ -17,16 +17,8 @@
 
     <!-- Properties -->
     <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />
-
-    <!-- TideCloak config JSON — pass via command line or custom action.
-         Example: msiexec /i TideSSP.msi TIDE_CONFIG="{...json...}"
-         Or use TIDE_CONFIG_FILE=C:\path\to\tidecloak.json (read by CA) -->
-    <Property Id="TIDE_CONFIG" Secure="yes" />
     <Property Id="TIDE_CONFIG_FILE" Secure="yes" />
-
-    <!-- Validate that config is provided -->
-    <Launch Condition="Installed OR TIDE_CONFIG OR TIDE_CONFIG_FILE"
-            Message="TideCloak configuration is required. Provide either:&#xA;  TIDE_CONFIG=&quot;{json content}&quot;&#xA;  TIDE_CONFIG_FILE=&quot;C:\path\to\tidecloak.json&quot;&#xA;&#xA;Example: msiexec /i TideSSP.msi TIDE_CONFIG_FILE=&quot;C:\tidecloak.json&quot;" />
+    <Property Id="WIXUI_INSTALLDIR" Value="System64Folder" />
 
     <!-- Directory layout -->
     <StandardDirectory Id="System64Folder">
@@ -44,15 +36,22 @@
       <ComponentRef Id="TideSubAuth_DLL" />
     </Feature>
 
-    <!-- Custom actions (from our CA DLL) -->
+    <!-- Custom actions DLL -->
     <Binary Id="TideCA" SourceFile="!(bindpath.BinDir)\TideCA.dll" />
 
-    <!-- Pass properties to deferred custom actions -->
-    <CustomAction Id="CA_SetConfigData"
-                  Property="CA_WriteConfig"
-                  Value="TIDE_CONFIG=[TIDE_CONFIG];TIDE_CONFIG_FILE=[TIDE_CONFIG_FILE]" />
+    <!-- Immediate CA: validate config file exists and is valid JSON with jwk.keys -->
+    <CustomAction Id="CA_ValidateConfig"
+                  DllEntry="ValidateConfig"
+                  BinaryRef="TideCA"
+                  Execute="immediate"
+                  Return="check" />
 
-    <!-- Write tidecloak.json to registry (deferred, SYSTEM) -->
+    <!-- Pass config file path to deferred CA -->
+    <CustomAction Id="CA_SetWriteConfigData"
+                  Property="CA_WriteConfig"
+                  Value="[TIDE_CONFIG_FILE]" />
+
+    <!-- Deferred CA: read file and write JSON to registry -->
     <CustomAction Id="CA_WriteConfig"
                   DllEntry="WriteConfig"
                   BinaryRef="TideCA"
@@ -60,7 +59,7 @@
                   Impersonate="no"
                   Return="check" />
 
-    <!-- Install custom actions (deferred, run as SYSTEM in elevated context) -->
+    <!-- Install custom actions -->
     <CustomAction Id="CA_RegisterSecurityPackage"
                   DllEntry="RegisterSecurityPackage"
                   BinaryRef="TideCA"
@@ -104,11 +103,109 @@
                   Impersonate="no"
                   Return="ignore" />
 
+    <!-- ═══════════════════════════════════════════════════════
+         Installer UI — Config file selection dialog
+         ═══════════════════════════════════════════════════════ -->
+    <UI>
+      <!-- Dialog: Welcome -->
+      <Dialog Id="WelcomeDlg" Width="370" Height="270" Title="TideSSP Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="30"
+                 Text="{\WixUI_Font_Title}Welcome to TideSSP Setup" />
+        <Control Id="Description" Type="Text" X="20" Y="55" Width="330" Height="40"
+                 Text="This will install TideSSP for passwordless Ed25519 RDP authentication. You will need your TideCloak configuration file (tidecloak.json)." />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+                 Default="yes" Text="Next">
+          <Publish Event="NewDialog" Value="ConfigDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!-- Dialog: TideCloak Config File -->
+      <Dialog Id="ConfigDlg" Width="370" Height="270" Title="TideSSP Setup — TideCloak Configuration">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\WixUI_Font_Title}TideCloak Configuration" />
+        <Control Id="Description" Type="Text" X="20" Y="45" Width="330" Height="30"
+                 Text="Select your tidecloak.json file. This contains the Ed25519 public key used to verify RDP authentication tokens." />
+
+        <Control Id="PathLabel" Type="Text" X="20" Y="85" Width="330" Height="12"
+                 Text="Path to tidecloak.json:" />
+        <Control Id="ConfigPath" Type="PathEdit" X="20" Y="100" Width="270" Height="18"
+                 Property="TIDE_CONFIG_FILE" />
+        <Control Id="BrowseBtn" Type="PushButton" X="296" Y="100" Width="56" Height="18"
+                 Text="Browse...">
+          <Publish Event="SpawnDialog" Value="BrowseDlg" />
+        </Control>
+
+        <Control Id="Hint" Type="Text" X="20" Y="130" Width="330" Height="30"
+                 Text="You can export this file from TideCloak Admin Console (Clients → your client → Installation tab). Or pass it via command line: msiexec /i TideSSP.msi TIDE_CONFIG_FILE=&quot;C:\path\to\tidecloak.json&quot;" />
+
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17"
+                 Text="Back">
+          <Publish Event="NewDialog" Value="WelcomeDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+                 Default="yes" Text="Install">
+          <!-- Validate before proceeding -->
+          <Publish Event="DoAction" Value="CA_ValidateConfig" Order="1" />
+          <Publish Event="EndDialog" Value="Return" Order="2">
+            <![CDATA[TIDE_CONFIG_FILE <> ""]]>
+          </Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!-- Cancel confirmation dialog -->
+      <Dialog Id="CancelDlg" Width="260" Height="85" Title="Cancel Setup">
+        <Control Id="Text" Type="Text" X="48" Y="15" Width="194" Height="30"
+                 Text="Are you sure you want to cancel TideSSP installation?" />
+        <Control Id="Yes" Type="PushButton" X="72" Y="57" Width="56" Height="17"
+                 Text="Yes">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+        <Control Id="No" Type="PushButton" X="132" Y="57" Width="56" Height="17"
+                 Cancel="yes" Default="yes" Text="No">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <!-- Completion dialog -->
+      <Dialog Id="ExitDlg" Width="370" Height="270" Title="TideSSP Setup Complete">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="30"
+                 Text="{\WixUI_Font_Title}TideSSP Installation Complete" />
+        <Control Id="Description" Type="Text" X="20" Y="55" Width="330" Height="40"
+                 Text="TideSSP has been installed. A reboot is required to activate the security provider. After reboot, RDP logons via the gateway will be passwordless." />
+        <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Default="yes" Cancel="yes" Text="Finish">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <!-- Standard file browse dialog -->
+      <Property Id="BROWSE_PROPERTY" Value="TIDE_CONFIG_FILE" />
+
+      <!-- Install dialog sequence -->
+      <InstallUISequence>
+        <Show Dialog="WelcomeDlg" Before="ExecuteAction"
+              Condition="NOT Installed" />
+        <Show Dialog="ExitDlg" After="ExecuteAction"
+              Condition="NOT Installed" />
+      </InstallUISequence>
+
+      <!-- Text styles -->
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="10" Bold="yes" />
+    </UI>
+
     <InstallExecuteSequence>
       <!-- Write config on install -->
-      <Custom Action="CA_SetConfigData" After="InstallFiles"
+      <Custom Action="CA_SetWriteConfigData" After="InstallFiles"
               Condition="NOT Installed" />
-      <Custom Action="CA_WriteConfig" After="CA_SetConfigData"
+      <Custom Action="CA_WriteConfig" After="CA_SetWriteConfigData"
               Condition="NOT Installed" />
 
       <!-- Register on install -->
@@ -130,7 +227,6 @@
       <!-- Schedule reboot -->
       <ScheduleReboot After="InstallFinalize" />
     </InstallExecuteSequence>
-
 
   </Package>
 </Wix>
