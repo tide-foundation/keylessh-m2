@@ -103,12 +103,16 @@ async function autoApproveAndCommit(response: Response, token: string, operation
   // Strategy 1: Parse the response body for change-set info
   try {
     const responseBody = await response.text();
+    log(`[autoApproveAndCommit] Response status: ${response.status}, body length: ${responseBody?.length || 0}`);
     if (responseBody) {
+      log(`[autoApproveAndCommit] Response body: ${responseBody.substring(0, 500)}`);
       const csResponse = JSON.parse(responseBody);
+      log(`[autoApproveAndCommit] Parsed keys: ${Object.keys(csResponse).join(', ')}`);
 
       // Format A: changeSetRequests as a JSON string
       if (csResponse.changeSetRequests) {
         const parsed = JSON.parse(csResponse.changeSetRequests);
+        log(`[autoApproveAndCommit] changeSetRequests parsed: ${JSON.stringify(parsed).substring(0, 500)}`);
         if (Array.isArray(parsed)) {
           for (const cs of parsed) {
             changeSets.push({
@@ -129,17 +133,28 @@ async function autoApproveAndCommit(response: Response, token: string, operation
         });
       }
     }
-  } catch {
-    // Response might be empty or not JSON — fall through to strategy 2
+  } catch (parseErr) {
+    log(`[autoApproveAndCommit] Response parse failed: ${parseErr}`);
   }
+
+  log(`[autoApproveAndCommit] Change-sets from response: ${changeSets.length}`);
 
   // Strategy 2: Query pending change requests if response didn't yield any
   if (changeSets.length === 0) {
+    log(`[autoApproveAndCommit] Falling back to querying pending change requests...`);
     try {
       const [userRequests, roleRequests] = await Promise.all([
-        GetUserChangeRequests(token).catch(() => []),
-        GetRoleChangeRequests(token).catch(() => []),
+        GetUserChangeRequests(token).catch((e) => { log(`[autoApproveAndCommit] GetUserChangeRequests failed: ${e}`); return []; }),
+        GetRoleChangeRequests(token).catch((e) => { log(`[autoApproveAndCommit] GetRoleChangeRequests failed: ${e}`); return []; }),
       ]);
+
+      log(`[autoApproveAndCommit] Pending user requests: ${userRequests.length}, role requests: ${roleRequests.length}`);
+      for (const req of userRequests) {
+        log(`[autoApproveAndCommit] User request: ${JSON.stringify(req.retrievalInfo)}`);
+      }
+      for (const req of roleRequests) {
+        log(`[autoApproveAndCommit] Role request: ${JSON.stringify(req.retrievalInfo)}`);
+      }
 
       for (const req of [...userRequests, ...roleRequests]) {
         if (req.retrievalInfo?.changeSetId) {
@@ -147,20 +162,22 @@ async function autoApproveAndCommit(response: Response, token: string, operation
         }
       }
     } catch (queryError) {
-      log(`Could not query pending change-sets for ${operation}: ${queryError}`);
+      log(`[autoApproveAndCommit] Could not query pending change-sets: ${queryError}`);
     }
   }
+
+  log(`[autoApproveAndCommit] Total change-sets to process: ${changeSets.length}`);
 
   // Approve and commit each change-set
   for (const changeSet of changeSets) {
     try {
-      log(`Auto-approving change-set for ${operation}: ${changeSet.changeSetId}`);
+      log(`[autoApproveAndCommit] Approving: ${JSON.stringify(changeSet)}`);
       await AddApprovalToChangeRequest(changeSet, token);
-
-      log(`Auto-committing change-set for ${operation}: ${changeSet.changeSetId}`);
+      log(`[autoApproveAndCommit] Approved OK, now committing...`);
       await CommitChangeRequest(changeSet, token);
+      log(`[autoApproveAndCommit] Committed OK: ${changeSet.changeSetId}`);
     } catch (err) {
-      log(`Failed to auto-approve/commit change-set ${changeSet.changeSetId} for ${operation}: ${err}`);
+      log(`[autoApproveAndCommit] FAILED for ${changeSet.changeSetId}: ${err}`);
     }
   }
 }
