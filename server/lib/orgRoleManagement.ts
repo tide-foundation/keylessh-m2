@@ -12,6 +12,8 @@ import { RoleRepresentation, ChangeSetRequest } from "./auth/keycloakTypes";
 import {
   AddApprovalToChangeRequest,
   CommitChangeRequest,
+  GetUserChangeRequests,
+  GetRoleChangeRequests,
 } from "./tidecloakApi";
 
 interface OrgRole {
@@ -86,37 +88,80 @@ async function getClientUuid(token: string): Promise<string> {
 }
 
 /**
- * Parse a TideCloak response for change-set info and auto-approve+commit.
+ * Auto-approve and commit any pending TideCloak change-sets after an admin API call.
+ *
  * TideCloak intercepts standard Keycloak admin API calls and creates draft
  * change-sets that must be approved and committed before taking effect.
+ *
+ * Strategy:
+ * 1. Try to parse change-set info from the response body
+ * 2. If nothing found, query pending user & role change requests as fallback
  */
 async function autoApproveAndCommit(response: Response, token: string, operation: string): Promise<void> {
-  const responseBody = await response.text();
-  if (!responseBody) return;
+  const changeSets: ChangeSetRequest[] = [];
 
+  // Strategy 1: Parse the response body for change-set info
   try {
-    const csResponse = JSON.parse(responseBody);
-    const changeSetRequests = csResponse.changeSetRequests
-      ? JSON.parse(csResponse.changeSetRequests)
-      : null;
+    const responseBody = await response.text();
+    if (responseBody) {
+      const csResponse = JSON.parse(responseBody);
 
-    if (changeSetRequests && Array.isArray(changeSetRequests)) {
-      for (const cs of changeSetRequests) {
-        const changeSet: ChangeSetRequest = {
-          changeSetId: cs.draftRecordId || cs.changeSetId,
-          changeSetType: cs.changeSetType,
-          actionType: cs.actionType,
-        };
+      // Format A: changeSetRequests as a JSON string
+      if (csResponse.changeSetRequests) {
+        const parsed = JSON.parse(csResponse.changeSetRequests);
+        if (Array.isArray(parsed)) {
+          for (const cs of parsed) {
+            changeSets.push({
+              changeSetId: cs.draftRecordId || cs.changeSetId,
+              changeSetType: cs.changeSetType,
+              actionType: cs.actionType,
+            });
+          }
+        }
+      }
 
-        log(`Auto-approving change-set for ${operation}: ${changeSet.changeSetId}`);
-        await AddApprovalToChangeRequest(changeSet, token);
-
-        log(`Auto-committing change-set for ${operation}: ${changeSet.changeSetId}`);
-        await CommitChangeRequest(changeSet, token);
+      // Format B: top-level draftRecordId
+      if (changeSets.length === 0 && csResponse.draftRecordId) {
+        changeSets.push({
+          changeSetId: csResponse.draftRecordId,
+          changeSetType: csResponse.changeSetType,
+          actionType: csResponse.actionType,
+        });
       }
     }
-  } catch (parseError) {
-    log(`Note: Could not parse change-set response for ${operation}, may need manual approval: ${parseError}`);
+  } catch {
+    // Response might be empty or not JSON — fall through to strategy 2
+  }
+
+  // Strategy 2: Query pending change requests if response didn't yield any
+  if (changeSets.length === 0) {
+    try {
+      const [userRequests, roleRequests] = await Promise.all([
+        GetUserChangeRequests(token).catch(() => []),
+        GetRoleChangeRequests(token).catch(() => []),
+      ]);
+
+      for (const req of [...userRequests, ...roleRequests]) {
+        if (req.retrievalInfo?.changeSetId) {
+          changeSets.push(req.retrievalInfo);
+        }
+      }
+    } catch (queryError) {
+      log(`Could not query pending change-sets for ${operation}: ${queryError}`);
+    }
+  }
+
+  // Approve and commit each change-set
+  for (const changeSet of changeSets) {
+    try {
+      log(`Auto-approving change-set for ${operation}: ${changeSet.changeSetId}`);
+      await AddApprovalToChangeRequest(changeSet, token);
+
+      log(`Auto-committing change-set for ${operation}: ${changeSet.changeSetId}`);
+      await CommitChangeRequest(changeSet, token);
+    } catch (err) {
+      log(`Failed to auto-approve/commit change-set ${changeSet.changeSetId} for ${operation}: ${err}`);
+    }
   }
 }
 
