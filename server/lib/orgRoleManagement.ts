@@ -8,7 +8,11 @@
 
 import { log } from "../logger";
 import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
-import { RoleRepresentation } from "./auth/keycloakTypes";
+import { RoleRepresentation, ChangeSetRequest } from "./auth/keycloakTypes";
+import {
+  AddApprovalToChangeRequest,
+  CommitChangeRequest,
+} from "./tidecloakApi";
 
 interface OrgRole {
   id: string;
@@ -79,6 +83,41 @@ async function getClientUuid(token: string): Promise<string> {
   }
 
   return clients[0].id;
+}
+
+/**
+ * Parse a TideCloak response for change-set info and auto-approve+commit.
+ * TideCloak intercepts standard Keycloak admin API calls and creates draft
+ * change-sets that must be approved and committed before taking effect.
+ */
+async function autoApproveAndCommit(response: Response, token: string, operation: string): Promise<void> {
+  const responseBody = await response.text();
+  if (!responseBody) return;
+
+  try {
+    const csResponse = JSON.parse(responseBody);
+    const changeSetRequests = csResponse.changeSetRequests
+      ? JSON.parse(csResponse.changeSetRequests)
+      : null;
+
+    if (changeSetRequests && Array.isArray(changeSetRequests)) {
+      for (const cs of changeSetRequests) {
+        const changeSet: ChangeSetRequest = {
+          changeSetId: cs.draftRecordId || cs.changeSetId,
+          changeSetType: cs.changeSetType,
+          actionType: cs.actionType,
+        };
+
+        log(`Auto-approving change-set for ${operation}: ${changeSet.changeSetId}`);
+        await AddApprovalToChangeRequest(changeSet, token);
+
+        log(`Auto-committing change-set for ${operation}: ${changeSet.changeSetId}`);
+        await CommitChangeRequest(changeSet, token);
+      }
+    }
+  } catch (parseError) {
+    log(`Note: Could not parse change-set response for ${operation}, may need manual approval: ${parseError}`);
+  }
 }
 
 /**
@@ -185,6 +224,9 @@ export async function createOrgRole(name: string, description?: string): Promise
     throw new Error(`Failed to create role: ${response.status} ${text}`);
   }
 
+  // Auto-approve and commit the change-set so the role reaches the IAM
+  await autoApproveAndCommit(response, token, `role creation: ${name}`);
+
   log(`Created org role: ${name}`);
 
   // Fetch the created role to get its ID
@@ -238,6 +280,8 @@ export async function updateOrgRole(
     throw new Error(`Failed to update role: ${response.status} ${text}`);
   }
 
+  await autoApproveAndCommit(response, token, `role update: ${roleName}`);
+
   log(`Updated org role: ${roleName}`);
 
   return {
@@ -269,6 +313,8 @@ export async function deleteOrgRole(roleName: string): Promise<void> {
     const text = await response.text();
     throw new Error(`Failed to delete role: ${response.status} ${text}`);
   }
+
+  await autoApproveAndCommit(response, token, `role deletion: ${roleName}`);
 
   log(`Deleted org role: ${roleName}`);
 }
@@ -305,6 +351,8 @@ export async function grantOrgRoleToUser(userId: string, roleName: string): Prom
     throw new Error(`Failed to grant role to user: ${response.status} ${text}`);
   }
 
+  await autoApproveAndCommit(response, token, `grant role ${roleName} to user ${userId}`);
+
   log(`Granted role ${roleName} to user ${userId}`);
 }
 
@@ -339,6 +387,8 @@ export async function removeOrgRoleFromUser(userId: string, roleName: string): P
     const text = await response.text();
     throw new Error(`Failed to remove role from user: ${response.status} ${text}`);
   }
+
+  await autoApproveAndCommit(response, token, `remove role ${roleName} from user ${userId}`);
 
   log(`Removed role ${roleName} from user ${userId}`);
 }
