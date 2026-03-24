@@ -1236,7 +1236,7 @@ export async function registerRoutes(
           id: string;
           displayName: string;
           description: string;
-          backends: { name: string; protocol?: string }[];
+          backends: { name: string; protocol?: string; auth?: string }[];
           online: boolean;
           clientCount: number;
           signalServerId: string;
@@ -1257,7 +1257,7 @@ export async function registerRoutes(
               id: string;
               displayName: string;
               description: string;
-              backends: { name: string; protocol?: string }[];
+              backends: { name: string; protocol?: string; auth?: string }[];
               online: boolean;
               clientCount: number;
             }> };
@@ -1292,6 +1292,7 @@ export async function registerRoutes(
           const backends = (gw.backends.length > 0 ? gw.backends : [{ name: "Default" }]).map((b) => ({
             name: b.name,
             protocol: ("protocol" in b ? b.protocol : "http") || "http",
+            ...("auth" in b && b.auth ? { auth: b.auth } : {}),
             accessible: hasDestAccess(destPerms, gw.id, b.name),
           }));
           return { ...gw, backends };

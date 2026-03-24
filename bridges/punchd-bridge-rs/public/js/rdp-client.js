@@ -59,6 +59,33 @@
   var bulkEnabled = false;
   var rdpSession = null;
 
+  // ── Helpers ─────────────────────────────────────────────────────
+
+  // Extract RDP username from dest: roles in JWT payload.
+  // Looks for dest:<gateway>:<endpoint>:<username> format.
+  function extractRdpUsername(jwtPayload, endpoint) {
+    var allRoles = [];
+    if (jwtPayload.realm_access && jwtPayload.realm_access.roles) {
+      allRoles = allRoles.concat(jwtPayload.realm_access.roles);
+    }
+    if (jwtPayload.resource_access) {
+      for (var key in jwtPayload.resource_access) {
+        var res = jwtPayload.resource_access[key];
+        if (res && res.roles) allRoles = allRoles.concat(res.roles);
+      }
+    }
+    for (var i = 0; i < allRoles.length; i++) {
+      var r = allRoles[i];
+      if (typeof r !== "string" || r.indexOf("dest:") !== 0) continue;
+      var parts = r.substring(5).split(":");
+      // dest:<gateway>:<endpoint>:<username>
+      if (parts.length === 3 && parts[1].toLowerCase() === endpoint.toLowerCase()) {
+        return parts[2];
+      }
+    }
+    return null;
+  }
+
   // ── DCWebSocket shim ──────────────────────────────────────────
   //
   // Intercepts same-origin WebSocket connections and routes them
@@ -493,7 +520,8 @@
         try {
           var jwtParts = sessionToken.split(".");
           var jwtPayload = JSON.parse(atob(jwtParts[1].replace(/-/g, "+").replace(/_/g, "/")));
-          var jwtUsername = jwtPayload.preferred_username || jwtPayload.sub || "user";
+          // Extract RDP username from dest: role (dest:gw:endpoint:username)
+          var jwtUsername = extractRdpUsername(jwtPayload, backendName) || jwtPayload.preferred_username || jwtPayload.sub || "user";
           console.log("[RDP] EdDSA backend - auto-connecting as:", jwtUsername);
           startRdpSession(jwtUsername, "");
         } catch (e) {
