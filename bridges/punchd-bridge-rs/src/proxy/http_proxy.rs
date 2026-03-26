@@ -1792,10 +1792,26 @@ async fn handle_auth_callback(
         }
         Err(e) => {
             tracing::error!("Token exchange failed: {e}");
+            // Force a fresh TideCloak login (prompt=login) to avoid
+            // reusing a DPoP-bound session that this gateway can't exchange.
+            let callback_url = get_callback_url(host, state.use_tls);
+            let endpoints = state.get_browser_endpoints();
+            let (mut auth_url, state_param) =
+                build_auth_url(&endpoints, &state.client_id, &callback_url, &redirect_url);
+            auth_url.push_str("&prompt=login");
+            let (nonce, _) = parse_state(&state_param);
+
+            let secure = if state.use_tls { "; Secure" } else { "" };
+            let nonce_cookie = format!(
+                "oidc_nonce={nonce}; HttpOnly; Path=/auth/callback; Max-Age=600; SameSite=Lax{secure}"
+            );
             resp_headers.insert(
                 header::LOCATION,
-                HeaderValue::from_static("/auth/login?error=token_exchange"),
+                HeaderValue::from_str(&auth_url).unwrap(),
             );
+            if let Ok(v) = HeaderValue::from_str(&nonce_cookie) {
+                resp_headers.insert(header::SET_COOKIE, v);
+            }
             make_response(StatusCode::FOUND, resp_headers, "")
         }
     }
