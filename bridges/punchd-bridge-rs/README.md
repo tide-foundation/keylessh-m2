@@ -62,6 +62,7 @@ The gateway:
 ### Backend flags
 
 Append flags to backend URLs with `;`:
+- `;eddsa` — Tide JWT validation using the tide-ssp driver
 - `;noauth` — skip JWT validation (backend handles its own auth)
 - `;stripauth` — remove Authorization header before proxying
 
