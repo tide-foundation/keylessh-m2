@@ -18,6 +18,19 @@ const getNonAdminTcUrl = () => `${getKeycloakAuthServer()}/realms/${getRealm_()}
 
 const REALM_MGMT = "realm-management";
 
+// Simple in-memory cache for TideCloak API responses
+const cache = new Map<string, { data: unknown; expiry: number }>();
+
+export function invalidateCache(prefix?: string): void {
+  if (!prefix) {
+    cache.clear();
+    return;
+  }
+  cache.forEach((_, key) => {
+    if (key.startsWith(prefix)) cache.delete(key);
+  });
+}
+
 // Sync a committed policy to TideCloak's SSH policies table
 export const syncPolicyToTideCloak = async (
   token: string,
