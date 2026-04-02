@@ -161,6 +161,17 @@ async fn run_session(
                 // falling back to the stun client token if not available
                 let rec_token = opts.recording_token.clone().unwrap_or_else(|| req.proxy_auth.clone());
 
+                // Create audit session on keylessh
+                let sess_server_url = server_url.clone();
+                let sess_token = rec_token.clone();
+                let sess_backend = req.destination.clone();
+                let sess_gateway = opts.gateway_id.clone().unwrap_or_default();
+                tokio::spawn(async move {
+                    crate::recording::create_session(
+                        &sess_server_url, &sess_token, "rdp", &sess_backend, &sess_gateway,
+                    ).await;
+                });
+
                 opts.recording = Some(crate::recording::start_recording(
                     crate::recording::RecordingMeta {
                         server_url: server_url.clone(),
@@ -170,8 +181,6 @@ async fn run_session(
                         backend_name: req.destination.clone(),
                         gateway_id: opts.gateway_id.clone().unwrap_or_default(),
                         user_email,
-                        token_endpoint: None,
-                        target_client_id: None,
                     },
                 ));
                 tracing::info!("[Recording] RDP recording started for user {:?}", payload.sub);
