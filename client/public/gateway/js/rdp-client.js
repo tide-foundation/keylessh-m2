@@ -924,19 +924,19 @@
       disconnectBtn.classList.remove("hidden");
       console.log("[RDP] RDP session connected");
 
-      // Start recording if keylessh token is available
-      var keylesshToken = getCookie("keylessh_token");
-      var keylesshUrl = document.referrer ? new URL(document.referrer).origin : null;
+      // Start recording — use localStorage token when on keylessh, cookie otherwise
+      var keylesshToken = SIGNAL_BASE
+        ? localStorage.getItem("access_token")
+        : getCookie("keylessh_token");
+      var keylesshUrl = SIGNAL_BASE
+        ? window.location.origin
+        : (document.referrer ? new URL(document.referrer).origin : null);
       if (keylesshToken && keylesshUrl) {
-        var authServerUrl = config.authServerUrl || "";
-        var realm = config.realm || "";
-        var tokenEndpoint = authServerUrl && realm ? authServerUrl.replace(/\/+$/, "") + "/realms/" + realm + "/protocol/openid-connect/token" : null;
-        var clientId = config.keylesshClientId || null;
-        recorder = new RdpRecorder(keylesshUrl, keylesshToken, null, tokenEndpoint, clientId, backendName, config.targetGatewayId || "");
+        recorder = new RdpRecorder(keylesshUrl, keylesshToken, null, null, null, backendName, config.targetGatewayId || "");
         recorder.start();
         console.log("[Recording] Browser-side recording started, server:", keylesshUrl);
       } else {
-        console.log("[Recording] No keylessh token or referrer — skipping recording");
+        console.log("[Recording] No token available — skipping recording");
       }
 
       // Set up input handling
