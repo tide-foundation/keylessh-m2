@@ -3,7 +3,6 @@
 ///! Records the bidirectional byte stream between client and RDP server,
 ///! buffers events, and uploads batches to the keylessh server API.
 
-use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -45,56 +44,6 @@ pub struct RecordingMeta {
     pub backend_name: String,
     pub gateway_id: String,
     pub user_email: String,
-    /// TideCloak token endpoint for token exchange (e.g. https://login.example.com/realms/keylessh/protocol/openid-connect/token)
-    pub token_endpoint: Option<String>,
-    /// The target client ID to exchange the token for (e.g. "myclient")
-    pub target_client_id: Option<String>,
-}
-
-/// Exchange a token for a different client via OIDC token exchange.
-/// Returns the new access token, or the original if exchange fails.
-async fn exchange_token(
-    client: &reqwest::Client,
-    token_endpoint: &str,
-    subject_token: &str,
-    target_client_id: &str,
-) -> String {
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
-        .append_pair("client_id", target_client_id)
-        .append_pair("subject_token", subject_token)
-        .append_pair("requested_token_type", "urn:ietf:params:oauth:token-type:access_token")
-        .append_pair("audience", target_client_id)
-        .finish();
-
-    match client
-        .post(token_endpoint)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(body)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            if let Ok(data) = resp.json::<serde_json::Value>().await {
-                if let Some(token) = data["access_token"].as_str() {
-                    tracing::debug!("[Recording] Token exchanged for {target_client_id}");
-                    return token.to_string();
-                }
-            }
-            tracing::warn!("[Recording] Token exchange response missing access_token, using original");
-            subject_token.to_string()
-        }
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            tracing::warn!("[Recording] Token exchange failed ({status}): {body}");
-            subject_token.to_string()
-        }
-        Err(e) => {
-            tracing::warn!("[Recording] Token exchange request failed: {e}");
-            subject_token.to_string()
-        }
-    }
 }
 
 /// Lightweight handle for recording — clone and pass to relay tasks.
@@ -124,6 +73,79 @@ impl RecordingHandle {
             data: data.to_vec(),
         };
         let _ = self.tx.try_send(event);
+    }
+}
+
+// ── Session logging (create/end session on keylessh) ────────────
+
+/// Create a session entry on the keylessh server for audit logging.
+/// Returns the session ID if successful.
+pub async fn create_session(
+    server_url: &str,
+    token: &str,
+    session_type: &str,
+    backend_name: &str,
+    gateway_id: &str,
+) -> Option<String> {
+    let url = format!("{}/api/bridge/create-session", server_url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    match client
+        .post(&url)
+        .json(&serde_json::json!({
+            "token": token,
+            "sessionType": session_type,
+            "backendName": backend_name,
+            "gatewayId": gateway_id,
+        }))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(body) => {
+                    let sid = body["sessionId"].as_str().map(|s| s.to_string());
+                    tracing::info!("[Session] Created {session_type} session: {:?}", sid);
+                    sid
+                }
+                Err(e) => {
+                    tracing::warn!("[Session] Failed to parse create-session response: {e}");
+                    None
+                }
+            }
+        }
+        Ok(resp) => {
+            tracing::warn!("[Session] create-session returned {}", resp.status());
+            None
+        }
+        Err(e) => {
+            tracing::warn!("[Session] create-session request failed: {e}");
+            None
+        }
+    }
+}
+
+/// End a session on the keylessh server.
+pub async fn end_session(server_url: &str, token: &str, session_id: &str) {
+    let url = format!("{}/api/bridge/end-session", server_url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    match client
+        .post(&url)
+        .json(&serde_json::json!({
+            "token": token,
+            "sessionId": session_id,
+        }))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::info!("[Session] Ended session: {session_id}");
+        }
+        Ok(resp) => {
+            tracing::warn!("[Session] end-session returned {} for {session_id}", resp.status());
+        }
+        Err(e) => {
+            tracing::warn!("[Session] end-session request failed for {session_id}: {e}");
+        }
     }
 }
 
@@ -161,12 +183,7 @@ async fn recording_uploader(meta: RecordingMeta, mut rx: mpsc::Receiver<Recordin
 
     let server_url = meta.server_url.trim_end_matches('/');
 
-    // Exchange token for the keylessh app client if configured
-    let token = if let (Some(endpoint), Some(target)) = (&meta.token_endpoint, &meta.target_client_id) {
-        exchange_token(&client, endpoint, &meta.token, target).await
-    } else {
-        meta.token.clone()
-    };
+    let token = meta.token.clone();
 
     // Step 1: Start recording on the server
     let start_url = format!("{server_url}/api/bridge/start-rdp-recording");
