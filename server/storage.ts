@@ -2252,17 +2252,42 @@ export class RecordingStorage {
     `).run(eventData, Buffer.byteLength(eventData, 'utf8'), id);
   }
 
-  // Store video data (WebM) for RDP recordings
-  async appendVideoData(id: string, chunk: Buffer): Promise<void> {
-    sqlite.prepare(`
-      UPDATE recordings SET video_data = ?, file_size = ? WHERE id = ?
-    `).run(chunk, chunk.length, id);
+  // Video recordings storage path — files stored on disk, not in DB
+  // Set RECORDING_STORAGE_PATH env var to mount external storage (e.g. Azure Files)
+  private videoDir: string = process.env.RECORDING_STORAGE_PATH
+    || (typeof __dirname !== "undefined"
+      ? __dirname + "/../data/recordings"
+      : "./data/recordings");
+
+  private ensureVideoDir(): void {
+    const fs = require("fs");
+    if (!fs.existsSync(this.videoDir)) {
+      fs.mkdirSync(this.videoDir, { recursive: true });
+    }
   }
 
-  // Get video data for an RDP recording
+  // Store video data (WebM) for RDP recordings — writes to filesystem
+  async appendVideoData(id: string, chunk: Buffer): Promise<void> {
+    const fs = require("fs");
+    this.ensureVideoDir();
+    const filePath = `${this.videoDir}/${id}.webm`;
+    fs.writeFileSync(filePath, chunk);
+    sqlite.prepare(`
+      UPDATE recordings SET file_size = ? WHERE id = ?
+    `).run(chunk.length, id);
+  }
+
+  // Get video data for an RDP recording — reads from filesystem
   async getVideoData(id: string): Promise<Buffer | null> {
-    const row = sqlite.prepare(`SELECT video_data FROM recordings WHERE id = ?`).get(id) as any;
-    return row?.video_data || null;
+    const fs = require("fs");
+    const filePath = `${this.videoDir}/${id}.webm`;
+    try {
+      return fs.readFileSync(filePath);
+    } catch {
+      // Fallback: check DB for legacy recordings
+      const row = sqlite.prepare(`SELECT video_data FROM recordings WHERE id = ?`).get(id) as any;
+      return row?.video_data || null;
+    }
   }
 
   // Append text content for searchability

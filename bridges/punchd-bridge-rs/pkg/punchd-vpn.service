@@ -1,0 +1,29 @@
+[Unit]
+Description=Punchd VPN Service
+Documentation=https://keylessh.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/punchd-vpn --standalone
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=punchd_vpn=info,warn
+
+# Config location
+WorkingDirectory=/etc/punchd-vpn
+
+# Security hardening
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/dev/net/tun /etc/punchd-vpn
+PrivateTmp=yes
+
+# TUN device needs CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

@@ -18,11 +18,13 @@ const VPN_TUNNEL_MAGIC: u8 = 0x04;
 const VPN_MTU: u16 = 1400;
 
 /// A firewall rule parsed from a VPN role.
-/// Format: `vpn:<gateway>:<allow|deny>:<network>/<prefix>:<ports>:<priority>`
-/// Priority is optional (defaults to 0). Higher priority rules are evaluated first.
+/// Format: `vpn:<gateway>:<allow|deny>:<proto>:<network>/<prefix>:<ports>:<priority>`
+/// Protocol and priority are optional. Defaults: proto=any, priority=0.
+/// Backward compatible: old format without proto field is detected automatically.
 #[derive(Clone, Debug)]
 pub struct FirewallRule {
     pub action: FirewallAction,
+    pub protocol: ProtoMatch,
     pub network: Ipv4Addr,
     pub prefix: u8,
     pub ports: PortMatch,
@@ -35,6 +37,25 @@ pub enum FirewallAction {
     Deny,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProtoMatch {
+    Any,
+    Tcp,
+    Udp,
+    Icmp,
+}
+
+impl ProtoMatch {
+    fn matches(&self, ip_proto: u8) -> bool {
+        match self {
+            ProtoMatch::Any => true,
+            ProtoMatch::Tcp => ip_proto == 6,
+            ProtoMatch::Udp => ip_proto == 17,
+            ProtoMatch::Icmp => ip_proto == 1,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum PortMatch {
     Any,
@@ -42,14 +63,16 @@ pub enum PortMatch {
 }
 
 impl FirewallRule {
-    /// Parse from role string: `vpn:GatewayId:allow:192.168.0.0/24:80,443:10`
+    /// Parse from role string. Supports both formats:
+    ///   New: `vpn:GW:allow:tcp:192.168.0.0/24:80,443:10`
+    ///   Old: `vpn:GW:allow:192.168.0.0/24:80,443:10` (proto defaults to any)
     pub fn parse(role: &str, gateway_id: &str) -> Option<Self> {
         let prefix_str = format!("vpn:{gateway_id}:");
         if !role.starts_with(&prefix_str) {
             return None;
         }
         let rest = &role[prefix_str.len()..];
-        let parts: Vec<&str> = rest.splitn(4, ':').collect();
+        let parts: Vec<&str> = rest.splitn(5, ':').collect();
         if parts.len() < 2 {
             return None;
         }
@@ -60,16 +83,30 @@ impl FirewallRule {
             _ => return None,
         };
 
+        // Detect whether parts[1] is a protocol or a network address
+        let (protocol, net_idx) = match parts[1] {
+            "tcp" => (ProtoMatch::Tcp, 2),
+            "udp" => (ProtoMatch::Udp, 2),
+            "icmp" => (ProtoMatch::Icmp, 2),
+            "any" => (ProtoMatch::Any, 2),
+            _ => (ProtoMatch::Any, 1), // old format: no proto field
+        };
+
+        if parts.len() <= net_idx {
+            return None;
+        }
+
         // Parse network/prefix
-        let net_parts: Vec<&str> = parts[1].split('/').collect();
+        let net_parts: Vec<&str> = parts[net_idx].split('/').collect();
         let network: Ipv4Addr = net_parts[0].parse().ok()?;
         let prefix: u8 = net_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(32);
 
         // Parse ports
-        let ports = if parts.len() < 3 || parts[2] == "*" {
+        let port_idx = net_idx + 1;
+        let ports = if parts.len() <= port_idx || parts[port_idx] == "*" {
             PortMatch::Any
         } else {
-            let port_list: Vec<u16> = parts[2]
+            let port_list: Vec<u16> = parts[port_idx]
                 .split(',')
                 .filter_map(|p| p.trim().parse().ok())
                 .collect();
@@ -81,14 +118,16 @@ impl FirewallRule {
         };
 
         // Parse priority (optional, defaults to 0)
-        let priority = if parts.len() >= 4 {
-            parts[3].parse::<i32>().unwrap_or(0)
+        let prio_idx = port_idx + 1;
+        let priority = if parts.len() > prio_idx {
+            parts[prio_idx].parse::<i32>().unwrap_or(0)
         } else {
             0
         };
 
         Some(FirewallRule {
             action,
+            protocol,
             network,
             prefix,
             ports,
@@ -96,8 +135,11 @@ impl FirewallRule {
         })
     }
 
-    /// Check if a destination IP and port match this rule.
-    pub fn matches(&self, dst_ip: Ipv4Addr, dst_port: u16) -> bool {
+    /// Check if a destination IP, port, and protocol match this rule.
+    pub fn matches(&self, dst_ip: Ipv4Addr, dst_port: u16, ip_proto: u8) -> bool {
+        if !self.protocol.matches(ip_proto) {
+            return false;
+        }
         let mask = if self.prefix == 0 { 0u32 } else { !0u32 << (32 - self.prefix) };
         let net = u32::from(self.network) & mask;
         let dst = u32::from(dst_ip) & mask;
@@ -118,8 +160,8 @@ impl FirewallRule {
 #[derive(Clone, Debug)]
 pub struct SessionFirewall {
     pub rules: Vec<FirewallRule>,
-    /// Cache of recent firewall decisions: (ip_u32, port) -> allowed
-    decision_cache: std::collections::HashMap<(u32, u16), bool>,
+    /// Cache of recent firewall decisions: (ip_u32, port, proto) -> allowed
+    decision_cache: std::collections::HashMap<(u32, u16, u8), bool>,
     /// Tracks recently blocked destinations to avoid spamming notifications.
     blocked_cache: std::collections::HashSet<String>,
     /// Channel to send block notifications to the client via control channel.
@@ -128,8 +170,8 @@ pub struct SessionFirewall {
 
 impl SessionFirewall {
     pub fn new(mut rules: Vec<FirewallRule>) -> Self {
-        // Sort by priority descending — highest priority evaluated first
-        rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        // Sort by priority ascending — lowest number evaluated first
+        rules.sort_by(|a, b| a.priority.cmp(&b.priority));
         Self {
             rules,
             decision_cache: std::collections::HashMap::with_capacity(64),
@@ -140,20 +182,20 @@ impl SessionFirewall {
 
     /// Check if a packet to dst_ip:dst_port is allowed.
     /// Uses a cache for O(1) lookups on repeated destinations.
-    /// Rules are evaluated highest-priority-first. First matching rule wins.
-    /// If no rules exist, all traffic is allowed.
+    /// Rules are evaluated lowest-priority-first (priority 1 before 10).
+    /// First matching rule wins. If no rules exist, all traffic is allowed.
     /// If rules exist but none match, default is deny.
-    pub fn is_allowed(&mut self, dst_ip: Ipv4Addr, dst_port: u16) -> bool {
+    pub fn is_allowed(&mut self, dst_ip: Ipv4Addr, dst_port: u16, ip_proto: u8) -> bool {
         if self.rules.is_empty() {
             return true;
         }
 
-        let key = (u32::from(dst_ip), dst_port);
+        let key = (u32::from(dst_ip), dst_port, ip_proto);
         if let Some(&cached) = self.decision_cache.get(&key) {
             return cached;
         }
 
-        let result = self.evaluate(dst_ip, dst_port);
+        let result = self.evaluate(dst_ip, dst_port, ip_proto);
 
         // Cap cache size to prevent unbounded growth
         if self.decision_cache.len() >= 4096 {
@@ -164,9 +206,9 @@ impl SessionFirewall {
         result
     }
 
-    fn evaluate(&self, dst_ip: Ipv4Addr, dst_port: u16) -> bool {
+    fn evaluate(&self, dst_ip: Ipv4Addr, dst_port: u16, ip_proto: u8) -> bool {
         for rule in &self.rules {
-            if rule.matches(dst_ip, dst_port) {
+            if rule.matches(dst_ip, dst_port, ip_proto) {
                 return rule.action == FirewallAction::Allow;
             }
         }
@@ -436,8 +478,9 @@ pub async fn handle_vpn_open(
                                 // Only parse headers and check firewall if rules exist
                                 if !firewall.rules.is_empty() {
                                     let dst = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
+                                    let ip_proto = data[9];
                                     let dst_port = extract_dst_port(&data);
-                                    if !firewall.is_allowed(dst, dst_port) {
+                                    if !firewall.is_allowed(dst, dst_port, ip_proto) {
                                         firewall.log_blocked(dst, dst_port);
                                         continue;
                                     }
@@ -744,6 +787,13 @@ pub fn enable_forwarding() {
             .args(["-t", "nat", "-A", "POSTROUTING", "-s", "10.66.0.0/24", "-j", "MASQUERADE"])
             .status();
     }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("sysctl").args(["-w", "net.inet.ip.forwarding=1"]).status();
+        let _ = std::process::Command::new("sh").args(["-c",
+            "echo 'nat on en0 from 10.66.0.0/24 to any -> (en0)' | pfctl -ef -"
+        ]).status();
+    }
     #[cfg(target_os = "windows")]
     {
         let _ = std::process::Command::new("reg")
@@ -760,6 +810,11 @@ pub fn disable_forwarding() {
         let _ = std::process::Command::new("iptables")
             .args(["-t", "nat", "-D", "POSTROUTING", "-s", "10.66.0.0/24", "-j", "MASQUERADE"])
             .status();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("sysctl").args(["-w", "net.inet.ip.forwarding=0"]).status();
+        let _ = std::process::Command::new("pfctl").args(["-d"]).status();
     }
     #[cfg(target_os = "windows")]
     {
@@ -826,7 +881,29 @@ fn setup_ip_forwarding(_tun_name: &str, gateway_ip: Ipv4Addr, netmask: Ipv4Addr)
         let _ = subnet; // suppress unused warning
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    {
+        // Enable IP forwarding
+        match std::process::Command::new("sysctl")
+            .args(["-w", "net.inet.ip.forwarding=1"])
+            .status()
+        {
+            Ok(s) if s.success() => tracing::info!("[VPN] IP forwarding enabled"),
+            _ => tracing::warn!("[VPN] Could not enable IP forwarding. Run: sudo sysctl -w net.inet.ip.forwarding=1"),
+        }
+
+        // Add pf NAT rule
+        let pf_rule = format!("nat on en0 from {subnet} to any -> (en0)");
+        let result = std::process::Command::new("sh")
+            .args(["-c", &format!("echo '{pf_rule}' | pfctl -ef -")])
+            .status();
+        match result {
+            Ok(s) if s.success() => tracing::info!("[VPN] NAT rule added via pf for {subnet}"),
+            _ => tracing::warn!("[VPN] Could not add pf NAT rule. Run manually: echo '{pf_rule}' | sudo pfctl -ef -"),
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         let _ = subnet;
         tracing::warn!("[VPN] Auto IP forwarding not implemented for this platform");
