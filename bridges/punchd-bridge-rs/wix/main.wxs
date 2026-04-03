@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Punchd VPN"
+    Manufacturer="KeyleSSH"
+    Version="1.0.0"
+    UpgradeCode="8B5E2F3A-4C1D-4A7E-9F2B-1D3E5A7C9B0F">
+
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Punchd VPN is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Install to Program Files -->
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="Punchd VPN">
+        <Component Id="MainExecutable" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+          <File Id="PunchdVpnExe" Source="$(var.ExePath)" KeyPath="yes" />
+
+          <!-- Install the Windows Service -->
+          <ServiceInstall
+            Id="PunchdVpnService"
+            Name="punchd-vpn"
+            DisplayName="Punchd VPN Service"
+            Description="VPN client that tunnels IP traffic through punchd-bridge gateways. Connects automatically on boot."
+            Type="ownProcess"
+            Start="auto"
+            ErrorControl="normal"
+            Arguments="--service" />
+
+          <!-- Start/stop control -->
+          <ServiceControl
+            Id="PunchdVpnServiceControl"
+            Name="punchd-vpn"
+            Start="install"
+            Stop="both"
+            Remove="uninstall"
+            Wait="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- ProgramData config directory -->
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="PunchdVpnDataDir" Name="punchd-vpn">
+        <Component Id="ConfigDirectory" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+          <CreateFolder />
+          <RemoveFolder Id="RemoveDataDir" On="uninstall" />
+          <RegistryValue
+            Root="HKLM"
+            Key="Software\KeyleSSH\PunchdVPN"
+            Name="ConfigDir"
+            Type="string"
+            Value="[PunchdVpnDataDir]"
+            KeyPath="yes" />
+        </Component>
+
+        <!-- If user provides a config file during install, copy it -->
+        <Component Id="ConfigFile" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012"
+                   NeverOverwrite="yes" Permanent="yes">
+          <File Id="VpnConfigToml" Source="$(var.ConfigPath)" Name="vpn-config.toml"
+                KeyPath="yes" />
+          <Condition>VPNCONFIGSOURCE</Condition>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Add/Remove Programs icon -->
+    <Property Id="ARPPRODUCTICON" Value="PunchdVpnExe" />
+
+    <!-- Custom property for config file path (set by UI or command line) -->
+    <Property Id="VPNCONFIGSOURCE" Secure="yes" />
+
+    <Feature Id="ProductFeature" Title="Punchd VPN" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="ConfigDirectory" />
+      <ComponentRef Id="ConfigFile" />
+    </Feature>
+
+    <!-- UI: ask for config file -->
+    <UI>
+      <UIRef Id="WixUI_Minimal" />
+    </UI>
+  </Package>
+</Wix>
