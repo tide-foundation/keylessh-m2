@@ -106,6 +106,7 @@ export default function AdminRoles() {
   const [vpnGatewayId, setVpnGatewayId] = useState<string>("");
   const [vpnFirewallRules, setVpnFirewallRules] = useState<Array<{
     action: "allow" | "deny";
+    protocol: "any" | "tcp" | "udp" | "icmp";
     network: string;
     prefix: string;
     ports: string;
@@ -440,14 +441,15 @@ export default function AdminRoles() {
         name = `vpn:${vpnGatewayId}`;
         // Create additional firewall rule roles
         for (const rule of vpnFirewallRules) {
+          const proto = rule.protocol || "any";
           const network = rule.network.trim() || "0.0.0.0";
           const prefix = rule.prefix.trim() || "0";
           const ports = rule.ports.trim() || "*";
           const priority = rule.priority?.trim() || "0";
-          const fwRoleName = `vpn:${vpnGatewayId}:${rule.action}:${network}/${prefix}:${ports}:${priority}`;
+          const fwRoleName = `vpn:${vpnGatewayId}:${rule.action}:${proto}:${network}/${prefix}:${ports}:${priority}`;
           // Create each firewall rule as a separate role
           try {
-            await api.admin.roles.create({ name: fwRoleName, description: `VPN firewall: ${rule.action} ${network}/${prefix} ports ${ports} (priority ${priority})` });
+            await api.admin.roles.create({ name: fwRoleName, description: `VPN firewall: ${rule.action} ${proto} ${network}/${prefix} ports ${ports} (priority ${priority})` });
           } catch {
             // Role may already exist, that's fine
           }
@@ -1158,7 +1160,7 @@ export default function AdminRoles() {
                           type="button"
                           size="sm"
                           variant="outline"
-                          onClick={() => setVpnFirewallRules([...vpnFirewallRules, { action: "allow", network: "", prefix: "24", ports: "*", priority: "0" }])}
+                          onClick={() => setVpnFirewallRules([...vpnFirewallRules, { action: "allow", protocol: "any", network: "", prefix: "24", ports: "*", priority: "0" }])}
                         >
                           <Plus className="h-3 w-3 mr-1" /> Add Rule
                         </Button>
@@ -1200,6 +1202,26 @@ export default function AdminRoles() {
                               <SelectContent>
                                 <SelectItem value="allow">Allow</SelectItem>
                                 <SelectItem value="deny">Deny</SelectItem>
+                              </SelectContent>
+                            </Select>
+
+                            <Label className="text-xs">Protocol</Label>
+                            <Select
+                              value={rule.protocol}
+                              onValueChange={(v) => {
+                                const updated = [...vpnFirewallRules];
+                                updated[idx] = { ...rule, protocol: v as "any" | "tcp" | "udp" | "icmp" };
+                                setVpnFirewallRules(updated);
+                              }}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="any">Any</SelectItem>
+                                <SelectItem value="tcp">TCP</SelectItem>
+                                <SelectItem value="udp">UDP</SelectItem>
+                                <SelectItem value="icmp">ICMP</SelectItem>
                               </SelectContent>
                             </Select>
 
@@ -1255,7 +1277,7 @@ export default function AdminRoles() {
 
                       {vpnFirewallRules.length > 0 && (
                         <p className="text-xs text-muted-foreground">
-                          Rules are evaluated highest priority first. First matching rule wins. If rules exist but none match, traffic is blocked by default.
+                          Rules are evaluated in priority order (lowest number first). First matching rule wins. If rules exist but none match, traffic is blocked by default.
                         </p>
                       )}
                     </div>

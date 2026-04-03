@@ -57,6 +57,42 @@ mod platform {
     }
 }
 
+// ── macOS implementation (utun via tun crate) ──────────────────────
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::*;
+    use tun::AsyncDevice;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    pub struct TunDevice {
+        dev: AsyncDevice,
+    }
+
+    impl TunDevice {
+        pub fn create(config: &TunConfig) -> io::Result<Self> {
+            let mut tun_config = tun::Configuration::default();
+            // macOS uses utun — name is auto-assigned (utun0, utun1, etc.)
+            tun_config
+                .address(config.address)
+                .netmask(config.netmask)
+                .mtu(config.mtu as i32)
+                .up();
+            let dev = tun::create_as_async(&tun_config)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            Ok(Self { dev })
+        }
+
+        pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.dev.read(buf).await
+        }
+
+        pub async fn write(&mut self, packet: &[u8]) -> io::Result<usize> {
+            self.dev.write(packet).await
+        }
+    }
+}
+
 // ── Windows implementation ──────────────────────────────────────────
 
 #[cfg(target_os = "windows")]

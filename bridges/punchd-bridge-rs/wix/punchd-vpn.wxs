@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="Punchd VPN"
+           Manufacturer="KeyleSSH"
+           Version="1.0.0"
+           UpgradeCode="8B5E2F3A-4C1D-4A7E-9F2B-1D3E5A7C9B0F"
+           Language="1033">
+
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine"
+             Description="Punchd VPN — WebRTC VPN client for punchd-bridge gateways"
+             Manufacturer="KeyleSSH" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Punchd VPN is already installed." />
+
+    <Media Id="1" Cabinet="punchd.cab" EmbedCab="yes" />
+
+    <!-- Install to Program Files\Punchd VPN -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Punchd VPN">
+          <Component Id="MainExecutable" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890" Win64="yes">
+            <File Id="PunchdVpnExe" Name="punchd-vpn.exe" Source="punchd-vpn.exe" KeyPath="yes" />
+
+            <ServiceInstall Id="PunchdVpnService"
+                            Name="punchd-vpn"
+                            DisplayName="Punchd VPN Service"
+                            Description="VPN client that tunnels IP traffic through punchd-bridge gateways. Connects automatically on boot."
+                            Type="ownProcess"
+                            Start="auto"
+                            ErrorControl="normal"
+                            Arguments="--service" />
+
+            <ServiceControl Id="PunchdVpnServiceControl"
+                            Name="punchd-vpn"
+                            Start="install"
+                            Stop="both"
+                            Remove="uninstall"
+                            Wait="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+
+      <!-- ProgramData config directory -->
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="PunchdVpnDataDir" Name="punchd-vpn">
+          <Component Id="ConfigDirectory" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+            <CreateFolder />
+            <RemoveFolder Id="RemoveDataDir" On="uninstall" />
+            <RegistryValue Root="HKLM"
+                           Key="Software\KeyleSSH\PunchdVPN"
+                           Name="Installed"
+                           Type="integer"
+                           Value="1"
+                           KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="ProductFeature" Title="Punchd VPN" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="ConfigDirectory" />
+    </Feature>
+
+    <Property Id="ARPPRODUCTICON" Value="PunchdVpnExe" />
+  </Product>
+</Wix>
