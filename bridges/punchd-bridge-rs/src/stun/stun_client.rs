@@ -84,7 +84,7 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
                 options.stun_server_url
             );
 
-            match connect_and_run(&options, &mut shutdown_rx).await {
+            match connect_and_run(&options, &mut shutdown_rx, &mut re_register_rx).await {
                 ConnectionResult::Shutdown => {
                     tracing::info!("[STUN-Reg] Shutdown — exiting");
                     break;
@@ -133,6 +133,7 @@ fn is_streaming_content_type(ct: &str) -> bool {
 async fn connect_and_run(
     options: &Arc<StunRegistrationOptions>,
     shutdown_rx: &mut mpsc::Receiver<()>,
+    re_register_rx: &mut mpsc::UnboundedReceiver<serde_json::Value>,
 ) -> ConnectionResult {
     // Connect to the STUN signaling server
     let connect_result = if options.stun_server_url.starts_with("wss://") {

@@ -130,10 +130,16 @@ fn config_file_path() -> std::path::PathBuf {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("vpn-config.toml")))
-            .unwrap_or_else(|| std::path::PathBuf::from("vpn-config.toml"))
+        let etc_path = std::path::PathBuf::from("/etc/punchd-vpn/vpn-config.toml");
+        if etc_path.exists() || etc_path.parent().map(|p| p.exists()).unwrap_or(false) {
+            etc_path
+        } else {
+            // Fallback: next to the exe (development/portable mode)
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("vpn-config.toml")))
+                .unwrap_or_else(|| std::path::PathBuf::from("vpn-config.toml"))
+        }
     }
 }
 
@@ -558,23 +564,17 @@ mod win_service {
 
     /// Check if we're running with admin privileges
     pub fn is_elevated() -> bool {
-        use std::ptr;
-        unsafe {
-            let mut token = ptr::null_mut();
-            if windows_service::service_manager::ServiceManager::local_computer(
-                None::<&str>,
-                windows_service::service_manager::ServiceManagerAccess::CONNECT,
-            ).is_ok() {
-                return true;
-            }
-            false
-        }
+        windows_service::service_manager::ServiceManager::local_computer(
+            None::<&str>,
+            windows_service::service_manager::ServiceManagerAccess::CONNECT,
+        ).is_ok()
     }
 
     /// Re-launch ourselves as admin (UAC prompt)
     pub fn elevate_and_install() -> ! {
         use std::os::windows::ffi::OsStrExt;
         use std::ffi::OsStr;
+        use std::ptr;
 
         let exe = std::env::current_exe().expect("Failed to get exe path");
         let exe_wide: Vec<u16> = OsStr::new(&exe).encode_wide().chain(std::iter::once(0)).collect();
@@ -602,7 +602,7 @@ mod win_service {
             h_process: *mut std::ffi::c_void,
         }
 
-        extern "system" {
+        unsafe extern "system" {
             fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
         }
 

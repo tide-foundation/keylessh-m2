@@ -11,6 +11,15 @@ data/
 *.db-wal
 *.db-shm
 
+# Video recordings
+data/recordings/
+
+# Rust build artifacts
+bridges/punchd-bridge-rs/target/
+bridges/punchd-bridge-rs/wix/*.msi
+bridges/punchd-bridge-rs/wix/punchd-vpn.exe
+bridges/punchd-bridge-rs/dist/
+
 # Environment (keep .env.example, ignore local .env)
 .env
 .env.local

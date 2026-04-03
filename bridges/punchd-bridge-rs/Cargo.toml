@@ -51,6 +51,9 @@ ipnet = "2"
 [target.'cfg(target_os = "linux")'.dependencies]
 tun = { version = "0.7", features = ["async"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+tun = { version = "0.7", features = ["async"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 wintun = "0.5"
 windows-service = "0.7"
@@ -67,6 +70,21 @@ path = "src/bin/punchd_vpn.rs"
 
 [build-dependencies]
 winresource = "0.1"
+
+[package.metadata.deb]
+name = "punchd-vpn"
+maintainer = "KeyleSSH <support@keylessh.com>"
+copyright = "2026 KeyleSSH"
+depends = "$auto, iproute2"
+section = "net"
+priority = "optional"
+assets = [
+    ["target/release/punchd-vpn", "usr/bin/", "755"],
+    ["pkg/punchd-vpn.service", "etc/systemd/system/", "644"],
+]
+conf-files = ["/etc/punchd-vpn/vpn-config.toml"]
+maintainer-scripts = "pkg/deb"
+systemd-units = { unit-name = "punchd-vpn", enable = true, start = false }
 
 [profile.release]
 strip = true
