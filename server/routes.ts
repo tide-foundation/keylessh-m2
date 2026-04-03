@@ -1685,6 +1685,10 @@ export async function registerRoutes(
 
         await Promise.all(fetches);
 
+        // Load gateway configs for directUrl
+        const allGwConfigs = await gatewayConfigStorage.list();
+        const gwConfigMap = new Map(allGwConfigs.map(c => [c.gatewayId, c]));
+
         // Annotate backends with access info based on dest: roles.
         // Every user (including admins) must have an explicit
         // dest:<gatewayId>:<backendName> role to access a backend.
@@ -1721,7 +1725,12 @@ export async function registerRoutes(
               ...(usernames.length > 0 && isSsh ? { sshUsernames: usernames } : {}),
             };
           });
-          return { ...gw, backends };
+          const gwConfig = gwConfigMap.get(gw.id);
+          return {
+            ...gw,
+            backends,
+            directUrl: gwConfig?.directUrl || null,
+          };
         });
 
         res.json(annotated);
