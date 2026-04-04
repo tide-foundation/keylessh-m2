@@ -158,6 +158,7 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                         let from = parsed["fromId"].as_str()
                             .or_else(|| registered_id.as_deref())
                             .unwrap_or("unknown");
+                        tracing::info!("[Signal] {msg_type} from {from} to {target}");
                         if !target.is_empty() {
                             let msg = serde_json::json!({
                                 "type": msg_type,
@@ -296,10 +297,11 @@ fn auto_pair_client(state: &AppState, client_id: &str) {
 }
 
 fn forward_to_peer(state: &AppState, target_id: &str, msg: &serde_json::Value) {
+    let msg_type = msg["type"].as_str().unwrap_or("unknown");
     let text = serde_json::to_string(msg).unwrap_or_default();
     let sent = state.registry.send_to_gateway(target_id, Message::Text(text.clone().into()))
         || state.registry.send_to_client(target_id, Message::Text(text.into()));
     if !sent {
-        tracing::warn!("[Signal] Target {target_id} not found for forwarding");
+        tracing::warn!("[Signal] Target {target_id} not found for {msg_type}");
     }
 }
