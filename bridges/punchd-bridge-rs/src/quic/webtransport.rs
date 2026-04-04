@@ -46,7 +46,9 @@ impl WebTransportServer {
     }
 
     /// Start the WebTransport server. Returns the cert hash for signaling.
-    pub async fn run(mut self) -> Result<String, String> {
+    /// If `socket` is provided, uses that pre-bound UDP socket (for STUN hole-punching).
+    /// Otherwise binds to 0.0.0.0:{port}.
+    pub async fn run(mut self, socket: Option<std::net::UdpSocket>) -> Result<String, String> {
         let identity = Identity::self_signed(["punchd-gateway", "localhost"])
             .map_err(|e| format!("Failed to generate identity: {e}"))?;
 
@@ -60,13 +62,23 @@ impl WebTransportServer {
             .ok_or("No certificate in chain")?;
         self.cert_hash = cert_hash.clone();
 
-        let config = ServerConfig::builder()
-            .with_bind_default(self.options.port)
-            .with_identity(identity)
-            .max_idle_timeout(Some(Duration::from_secs(30)))
-            .map_err(|e| format!("Failed to build ServerConfig: {e}"))?
-            .keep_alive_interval(Some(Duration::from_secs(10)))
-            .build();
+        let config = if let Some(sock) = socket {
+            ServerConfig::builder()
+                .with_bind_socket(sock)
+                .with_identity(identity)
+                .max_idle_timeout(Some(Duration::from_secs(30)))
+                .map_err(|e| format!("Failed to build ServerConfig: {e}"))?
+                .keep_alive_interval(Some(Duration::from_secs(10)))
+                .build()
+        } else {
+            ServerConfig::builder()
+                .with_bind_default(self.options.port)
+                .with_identity(identity)
+                .max_idle_timeout(Some(Duration::from_secs(30)))
+                .map_err(|e| format!("Failed to build ServerConfig: {e}"))?
+                .keep_alive_interval(Some(Duration::from_secs(10)))
+                .build()
+        };
 
         let endpoint = Endpoint::server(config)
             .map_err(|e| format!("Failed to create WebTransport endpoint: {e}"))?;

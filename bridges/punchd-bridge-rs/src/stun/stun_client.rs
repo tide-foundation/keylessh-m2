@@ -73,8 +73,35 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
     tokio::spawn(async move {
         let mut reconnect_delay_ms: u64 = 1000;
 
-        // Start WebTransport server ONCE (survives reconnects)
+        // Bind UDP socket for QUIC/WebTransport, do STUN resolution, then start server
         let quic_port = options.quic_port;
+        let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{quic_port}").parse().unwrap();
+        let std_socket = std::net::UdpSocket::bind(bind_addr)
+            .expect(&format!("Failed to bind UDP socket on port {quic_port}"));
+        std_socket.set_nonblocking(true).expect("Failed to set nonblocking");
+
+        // STUN resolution: discover our public (reflexive) address
+        let stun_server = options.ice_servers.first().cloned().unwrap_or_default();
+        let quic_public_addr = if !stun_server.is_empty() {
+            let tokio_socket = tokio::net::UdpSocket::from_std(std_socket.try_clone()
+                .expect("Failed to clone UDP socket"))
+                .expect("Failed to convert to tokio socket");
+            match crate::quic::transport::stun_resolve(&tokio_socket, &stun_server).await {
+                Ok(addr) => {
+                    tracing::info!("[STUN] Reflexive address: {addr}");
+                    Some(addr)
+                }
+                Err(e) => {
+                    tracing::warn!("[STUN] Resolution failed: {e} — using PUBLIC_URL fallback");
+                    None
+                }
+            }
+        } else {
+            tracing::info!("[STUN] No ICE servers configured — skipping STUN resolution");
+            None
+        };
+
+        // Start WebTransport server on the same socket (preserves NAT pinhole)
         let wt_server = crate::quic::webtransport::WebTransportServer::new(
             crate::quic::webtransport::WebTransportServerOptions {
                 port: quic_port,
@@ -86,7 +113,7 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
                 vpn_state: options.vpn_state.clone(),
             },
         );
-        let quic_cert_hash = match wt_server.run().await {
+        let quic_cert_hash = match wt_server.run(Some(std_socket)).await {
             Ok(hash) => hash,
             Err(e) => {
                 tracing::error!("[WT] Failed to start WebTransport server: {e}");
@@ -107,7 +134,7 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
                 options.stun_server_url
             );
 
-            match connect_and_run(&options, &mut shutdown_rx, &mut re_register_rx, quic_port, &quic_cert_hash).await {
+            match connect_and_run(&options, &mut shutdown_rx, &mut re_register_rx, quic_port, &quic_public_addr, &quic_cert_hash).await {
                 ConnectionResult::Shutdown => {
                     tracing::info!("[STUN-Reg] Shutdown — exiting");
                     break;
@@ -160,6 +187,7 @@ async fn connect_and_run(
     shutdown_rx: &mut mpsc::Receiver<()>,
     re_register_rx: &mut mpsc::UnboundedReceiver<serde_json::Value>,
     quic_port: u16,
+    quic_public_addr: &Option<std::net::SocketAddr>,
     quic_cert_hash: &str,
 ) -> ConnectionResult {
     // Connect to the STUN signaling server
@@ -299,12 +327,17 @@ async fn connect_and_run(
                                     let _client_token = client["token"].as_str().unwrap_or("").to_string();
                                     tracing::info!("[STUN-Reg] Paired with client: {}", client_id);
 
-                                    // Send our fixed QUIC address + cert hash to the client
+                                    // Send QUIC address: use STUN reflexive address if available,
+                                    // otherwise 0.0.0.0 (signal server replaces with PUBLIC_URL or source IP)
+                                    let quic_addr = match &quic_public_addr {
+                                        Some(addr) => addr.to_string(),
+                                        None => format!("0.0.0.0:{quic_port}"),
+                                    };
                                     let _ = signaling_tx.send(serde_json::json!({
                                         "type": "quic_address",
                                         "targetId": client_id,
                                         "fromId": options.gateway_id,
-                                        "address": format!("0.0.0.0:{quic_port}"),
+                                        "address": quic_addr,
                                         "certHash": quic_cert_hash,
                                     }));
                                 }
