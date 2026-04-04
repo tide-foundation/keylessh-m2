@@ -9,6 +9,7 @@ export interface GatewayMetadata {
   description?: string;
   backends?: { name: string; protocol?: string; auth?: string }[];
   realm?: string;
+  publicUrl?: string;
 }
 
 export interface RegisteredGateway {

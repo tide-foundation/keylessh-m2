@@ -743,9 +743,11 @@ async function handleRegister(ws: WebSocket, msg: SignalMessage, clientIp: strin
 
     registry.registerGateway(msg.id, msg.addresses || [], ws, msg.metadata);
     gatewayWebSockets.add(ws);
-    // Store the gateway's public IP for QUIC address resolution
-    // Strip IPv6-mapped IPv4 prefix (::ffff:1.2.3.4 → 1.2.3.4)
-    (ws as any)._publicIp = clientIp.replace(/^::ffff:/, "");
+    // Store the gateway's public IP/URL for SSH proxy and QUIC address resolution
+    // Prefer explicit publicUrl from metadata (ACI outbound IP ≠ inbound IP),
+    // fall back to connection source IP
+    const explicitUrl = msg.metadata?.publicUrl as string | undefined;
+    (ws as any)._publicIp = explicitUrl || clientIp.replace(/^::ffff:/, "");
     safeSend(ws, { type: "registered", role: "gateway", id: msg.id });
   } else if (msg.role === "client") {
     // Signal server is a dumb relay — gateway handles auth.
