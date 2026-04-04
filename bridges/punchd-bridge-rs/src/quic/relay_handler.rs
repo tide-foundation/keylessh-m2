@@ -141,8 +141,7 @@ async fn handle_relayed_stream(
             // TODO: implement relayed HTTP
         }
         stream_type::WEBSOCKET => {
-            tracing::info!("[Relay] WS stream (session {session_id}, stream {stream_id})");
-            // TODO: implement relayed WebSocket (RDP)
+            handle_ws_relay(session_id, stream_id, remaining, &mut rx, options, ws_sink).await;
         }
         other => {
             tracing::warn!("[Relay] Unknown stream type 0x{other:02x}");
@@ -294,6 +293,97 @@ async fn handle_ssh_relay(
     }
 
     tracing::info!("[Relay] SSH session ended (session {session_id})");
+}
+
+/// WebSocket tunnel relay — proxy to the local WebSocket endpoint (RDP, tcp-forward).
+/// Protocol: [path_len:u16][path] then bidirectional bridge.
+async fn handle_ws_relay(
+    session_id: String,
+    stream_id: u32,
+    initial_data: &[u8],
+    rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
+    options: Arc<StunRegistrationOptions>,
+    ws_sink: WsSink,
+) {
+    // Read WS path (length-prefixed)
+    let mut buf = initial_data.to_vec();
+    while buf.len() < 2 {
+        if let Some(data) = rx.recv().await { buf.extend(data); } else { return; }
+    }
+    let path_len = ((buf[0] as usize) << 8) | (buf[1] as usize);
+    while buf.len() < 2 + path_len {
+        if let Some(data) = rx.recv().await { buf.extend(data); } else { return; }
+    }
+    let path = String::from_utf8_lossy(&buf[2..2+path_len]).to_string();
+
+    tracing::info!("[Relay] WS relay: {path} (session {session_id})");
+
+    // Connect to local WebSocket endpoint
+    let scheme = if options.use_tls { "wss" } else { "ws" };
+    let ws_url = format!("{scheme}://127.0.0.1:{}{path}", options.listen_port);
+
+    let connector = tokio_tungstenite::Connector::NativeTls(
+        native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap(),
+    );
+
+    let ws_result = tokio_tungstenite::connect_async_tls_with_config(
+        &ws_url, None, false, Some(connector),
+    ).await;
+
+    let (local_ws, _) = match ws_result {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("[Relay] Local WS connect failed: {e}");
+            return;
+        }
+    };
+
+    tracing::info!("[Relay] WS connected to local: {ws_url}");
+
+    let (mut ws_sink_local, mut ws_stream_local) = futures_util::StreamExt::split(local_ws);
+
+    // Bridge: relay rx → local WS, local WS → relay tx
+    loop {
+        tokio::select! {
+            // Relay → local WS (browser data → local server)
+            data = rx.recv() => {
+                match data {
+                    Some(data) => {
+                        use futures_util::SinkExt;
+                        if ws_sink_local.send(tokio_tungstenite::tungstenite::Message::Binary(data.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            // Local WS → relay (local server response → browser)
+            // Prefix: 0x00 = binary, 0x01 = text (so browser can reconstruct message type)
+            msg = futures_util::StreamExt::next(&mut ws_stream_local) => {
+                match msg {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
+                        let mut framed = Vec::with_capacity(1 + data.len());
+                        framed.push(0x00);
+                        framed.extend_from_slice(&data);
+                        send_relay_response(&ws_sink, &session_id, stream_id, &framed).await;
+                    }
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                        let mut framed = Vec::with_capacity(1 + text.len());
+                        framed.push(0x01);
+                        framed.extend_from_slice(text.as_bytes());
+                        send_relay_response(&ws_sink, &session_id, stream_id, &framed).await;
+                    }
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    tracing::info!("[Relay] WS session ended: {path} (session {session_id})");
 }
 
 /// Send a relay response frame back through the signal server WebSocket
