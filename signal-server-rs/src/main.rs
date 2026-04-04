@@ -23,6 +23,9 @@ async fn main() {
         )
         .init();
 
+    // Load .env file if present (same as Node.js deploy.sh generates)
+    dotenvy::dotenv().ok();
+
     let config = Config::from_env();
     let use_tls = config.use_tls();
     let port = config.port;
