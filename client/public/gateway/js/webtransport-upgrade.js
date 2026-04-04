@@ -132,13 +132,13 @@
         break;
 
       case "quic_address":
-        // Gateway sent its QUIC address + cert hash
+        // Gateway sent its QUIC address + cert hash + relay URL
         if (msg.address && msg.certHash) {
           console.log("[QUIC] Gateway QUIC address:", msg.address, "cert:", msg.certHash.slice(0, 16) + "...");
-          connectWebTransport(msg.address, msg.certHash);
+          connectWebTransport(msg.address, msg.certHash, msg.relayUrl);
         } else if (msg.address) {
           console.log("[QUIC] Gateway QUIC address:", msg.address, "(no cert hash — trying direct)");
-          connectWebTransport(msg.address, null);
+          connectWebTransport(msg.address, null, msg.relayUrl);
         }
         break;
 
@@ -150,27 +150,65 @@
 
   // ── WebTransport Connection ────────────────────────────────────
 
-  async function connectWebTransport(address, certHash) {
+  async function connectWebTransport(address, certHash, relayUrl) {
     cleanup();
 
-    // Build URL — WebTransport needs https://
-    const url = "https://" + address;
-    console.log("[QUIC] Connecting WebTransport to", url);
-
-    const options = {};
+    const directUrl = "https://" + address;
+    const directOptions = {};
     if (certHash) {
-      // Pin the self-signed cert hash so browser accepts it
       const hashBytes = hexToBytes(certHash);
-      options.serverCertificateHashes = [{
+      directOptions.serverCertificateHashes = [{
         algorithm: "sha-256",
         value: hashBytes.buffer,
       }];
     }
 
+    // Step 1: Connect to relay to trigger coordinated hole-punch
+    let relayTransport = null;
+    if (relayUrl) {
+      try {
+        console.log("[QUIC] Connecting to relay for hole-punch:", relayUrl);
+        relayTransport = new WebTransport("https://" + relayUrl);
+        await Promise.race([
+          relayTransport.ready,
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+        ]);
+        console.log("[QUIC] Relay connected — hole-punch triggered, waiting 2s...");
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      } catch (relayErr) {
+        console.warn("[QUIC] Relay connect failed:", relayErr);
+        relayTransport = null;
+      }
+    }
+
+    // Step 2: Try direct QUIC (NAT pinhole should be open)
     try {
-      transport = new WebTransport(url, options);
-      await transport.ready;
-      console.log("[QUIC] WebTransport connected!");
+      console.log("[QUIC] Trying direct WebTransport:", directUrl);
+      const directTransport = new WebTransport(directUrl, directOptions);
+      await Promise.race([
+        directTransport.ready,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+      ]);
+      transport = directTransport;
+      console.log("[QUIC] Direct WebTransport connected (P2P)!");
+      if (relayTransport) { try { relayTransport.close(); } catch {} }
+    } catch (directErr) {
+      console.warn("[QUIC] Direct WebTransport failed:", directErr);
+
+      // Step 3: Fall back to relay (already connected)
+      if (relayTransport) {
+        transport = relayTransport;
+        console.log("[QUIC] Using relay as fallback");
+      } else {
+        console.log("[QUIC] No relay, falling back to WebRTC...");
+        window.__quicActive = false;
+        window.__quicFailed = true;
+        cleanup();
+        return;
+      }
+    }
+
+    try {
       reconnectAttempts = 0;
       window.__quicActive = true;
 
@@ -184,8 +222,7 @@
       installWebSocketShim();
 
     } catch (e) {
-      console.error("[QUIC] WebTransport failed:", e);
-      console.log("[QUIC] Falling back to WebRTC...");
+      console.error("[QUIC] Post-connect setup failed:", e);
       window.__quicActive = false;
       window.__quicFailed = true;
       cleanup();

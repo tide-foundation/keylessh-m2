@@ -80,6 +80,10 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
             .expect(&format!("Failed to bind UDP socket on port {quic_port}"));
         std_socket.set_nonblocking(true).expect("Failed to set nonblocking");
 
+        // Keep a clone for sending UDP punch packets (NAT hole-punching)
+        let punch_socket = std_socket.try_clone()
+            .expect("Failed to clone UDP socket for hole-punching");
+
         // STUN resolution: discover our public (reflexive) address
         let stun_server = options.ice_servers.first().cloned().unwrap_or_default();
         let quic_public_addr = if !stun_server.is_empty() {
@@ -134,7 +138,7 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
                 options.stun_server_url
             );
 
-            match connect_and_run(&options, &mut shutdown_rx, &mut re_register_rx, quic_port, &quic_public_addr, &quic_cert_hash).await {
+            match connect_and_run(&options, &mut shutdown_rx, &mut re_register_rx, quic_port, &quic_public_addr, &quic_cert_hash, &punch_socket).await {
                 ConnectionResult::Shutdown => {
                     tracing::info!("[STUN-Reg] Shutdown — exiting");
                     break;
@@ -189,6 +193,7 @@ async fn connect_and_run(
     quic_port: u16,
     quic_public_addr: &Option<std::net::SocketAddr>,
     quic_cert_hash: &str,
+    punch_socket: &std::net::UdpSocket,
 ) -> ConnectionResult {
     // Connect to the STUN signaling server
     let connect_result = if options.stun_server_url.starts_with("wss://") {
@@ -325,7 +330,33 @@ async fn connect_and_run(
                                 if let Some(client) = parsed.get("client") {
                                     let client_id = client["id"].as_str().unwrap_or("unknown").to_string();
                                     let _client_token = client["token"].as_str().unwrap_or("").to_string();
-                                    tracing::info!("[STUN-Reg] Paired with client: {}", client_id);
+                                    let client_reflexive = client["reflexiveAddress"].as_str().unwrap_or("").to_string();
+                                    tracing::info!("[STUN-Reg] Paired with client: {} (reflexive: {})", client_id, client_reflexive);
+
+                                    // UDP hole-punch: send packets to client's reflexive address
+                                    // to open NAT pinhole before client tries WebTransport
+                                    if !client_reflexive.is_empty() {
+                                        if let Ok(client_addr) = client_reflexive.parse::<std::net::SocketAddr>() {
+                                            tracing::info!("[STUN] Sending UDP punch to {client_addr}");
+                                            // Send a few packets to open the NAT pinhole
+                                            for _ in 0..3 {
+                                                let _ = punch_socket.send_to(b"punch", client_addr);
+                                            }
+                                        } else {
+                                            // reflexiveAddress might be just an IP without port — use a dummy port
+                                            let addr_with_port = if client_reflexive.contains(':') {
+                                                client_reflexive.clone()
+                                            } else {
+                                                format!("{}:1", client_reflexive)
+                                            };
+                                            if let Ok(client_addr) = addr_with_port.parse::<std::net::SocketAddr>() {
+                                                tracing::info!("[STUN] Sending UDP punch to {client_addr} (IP only)");
+                                                for _ in 0..3 {
+                                                    let _ = punch_socket.send_to(b"punch", client_addr);
+                                                }
+                                            }
+                                        }
+                                    }
 
                                     // Send QUIC address: use STUN reflexive address if available,
                                     // otherwise 0.0.0.0 (signal server replaces with PUBLIC_URL or source IP)
@@ -364,8 +395,21 @@ async fn connect_and_run(
                                     (parsed["fromId"].as_str(), parsed["address"].as_str())
                                 {
                                     tracing::info!("[QUIC] Client {from_id} QUIC address: {addr}");
-                                    // The QUIC endpoint is already listening —
-                                    // client will connect to our address, we accept
+                                }
+                            }
+                            "punch" => {
+                                // Signal server requests UDP hole-punch to a browser's address
+                                // (coordinated via the QUIC relay sidecar)
+                                if let Some(target) = parsed["targetAddress"].as_str() {
+                                    let target = target.replace("::ffff:", "");
+                                    if let Ok(addr) = target.parse::<std::net::SocketAddr>() {
+                                        tracing::info!("[STUN] Coordinated punch to {addr}");
+                                        for _ in 0..5 {
+                                            let _ = punch_socket.send_to(b"punch", addr);
+                                        }
+                                    } else {
+                                        tracing::warn!("[STUN] Invalid punch target: {target}");
+                                    }
                                 }
                             }
                             "sdp_offer" => {

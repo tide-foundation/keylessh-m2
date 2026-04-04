@@ -434,25 +434,66 @@
     return bytes;
   }
 
-  async function connectQuicForRdp(address, certHash) {
-    var url = "https://" + address;
-    console.log("[RDP] Connecting WebTransport to", url);
-
-    var options = {};
+  async function connectQuicForRdp(address, certHash, relayUrl) {
+    // Coordinated hole-punch: connect relay first, trigger punch, then try direct
+    var directUrl = "https://" + address;
+    var directOptions = {};
     if (certHash) {
       var hashBytes = hexToBytes(certHash);
-      options.serverCertificateHashes = [{
+      directOptions.serverCertificateHashes = [{
         algorithm: "sha-256",
         value: hashBytes.buffer,
       }];
     }
 
-    try {
-      quicTransport = new WebTransport(url, options);
-      await quicTransport.ready;
-      console.log("[RDP] WebTransport connected!");
+    // Step 1: Connect to relay to trigger hole-punch
+    var relayTransport = null;
+    if (relayUrl) {
+      try {
+        console.log("[RDP] Connecting to relay for hole-punch:", relayUrl);
+        relayTransport = new WebTransport("https://" + relayUrl);
+        await Promise.race([
+          relayTransport.ready,
+          new Promise(function (_, reject) { setTimeout(function () { reject(new Error("timeout")); }, 5000); }),
+        ]);
+        console.log("[RDP] Relay connected — hole-punch triggered, waiting 2s...");
+        await new Promise(function (resolve) { setTimeout(resolve, 2000); });
+      } catch (relayErr) {
+        console.warn("[RDP] Relay connect failed:", relayErr);
+        relayTransport = null;
+      }
+    }
 
-      // Authenticate
+    // Step 2: Try direct QUIC (NAT pinhole should be open)
+    try {
+      console.log("[RDP] Trying direct QUIC:", directUrl);
+      var directTransport = new WebTransport(directUrl, directOptions);
+      await Promise.race([
+        directTransport.ready,
+        new Promise(function (_, reject) { setTimeout(function () { reject(new Error("timeout")); }, 5000); }),
+      ]);
+      quicTransport = directTransport;
+      console.log("[RDP] Direct QUIC connected (P2P)!");
+      // Close relay — not needed
+      if (relayTransport) { try { relayTransport.close(); } catch (e) {} }
+    } catch (directErr) {
+      console.warn("[RDP] Direct QUIC failed:", directErr);
+
+      // Step 3: Fall back to relay (already connected)
+      if (relayTransport) {
+        quicTransport = relayTransport;
+        console.log("[RDP] Using QUIC relay as fallback");
+      } else {
+        // No relay, fall back to WebRTC
+        quicTransport = null;
+        quicActive = false;
+        startWebRTC();
+        return;
+      }
+    }
+
+    // Authenticate on whichever transport connected
+    try {
       var authStream = await quicTransport.createBidirectionalStream();
       var authWriter = authStream.writable.getWriter();
       var authReader = authStream.readable.getReader();
@@ -478,12 +519,11 @@
       quicActive = true;
       installQuicWebSocketShim();
       setStatus("connecting", "QUIC connected — ready for RDP");
-
-      // Show connect form / auto-connect
       showConnectForm();
 
-    } catch (e) {
-      console.warn("[RDP] QUIC failed, falling back to WebRTC:", e);
+    } catch (authErr) {
+      console.warn("[RDP] QUIC auth failed, falling back to WebRTC:", authErr);
+      if (quicTransport) { try { quicTransport.close(); } catch (e) {} }
       quicTransport = null;
       quicActive = false;
       startWebRTC();
@@ -806,7 +846,7 @@
         if (msg.address && msg.certHash) {
           console.log("[RDP] QUIC address:", msg.address, "cert:", msg.certHash.slice(0, 16) + "...");
           if (quicTimeout) { clearTimeout(quicTimeout); quicTimeout = null; }
-          connectQuicForRdp(msg.address, msg.certHash);
+          connectQuicForRdp(msg.address, msg.certHash, msg.relayUrl);
         }
         break;
 

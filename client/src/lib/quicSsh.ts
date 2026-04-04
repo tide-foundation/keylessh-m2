@@ -37,7 +37,7 @@ export async function connectQuicSsh(options: QuicSshOptions): Promise<WebSocket
   const sigWs = new WebSocket(signalingUrl);
 
   // Step 2: Register and wait for quic_address
-  const gatewayInfo = await new Promise<{ address: string; certHash?: string }>((resolve, reject) => {
+  const gatewayInfo = await new Promise<{ address: string; certHash?: string; relayUrl?: string }>((resolve, reject) => {
     const timeout = setTimeout(() => {
       sigWs.close();
       reject(new Error("Timeout waiting for gateway QUIC address"));
@@ -58,7 +58,7 @@ export async function connectQuicSsh(options: QuicSshOptions): Promise<WebSocket
         const msg = JSON.parse(event.data);
         if (msg.type === "quic_address" && msg.address) {
           clearTimeout(timeout);
-          resolve({ address: msg.address, certHash: msg.certHash });
+          resolve({ address: msg.address, certHash: msg.certHash, relayUrl: msg.relayUrl });
         } else if (msg.type === "error") {
           clearTimeout(timeout);
           reject(new Error(msg.message || "Signaling error"));
@@ -74,19 +74,63 @@ export async function connectQuicSsh(options: QuicSshOptions): Promise<WebSocket
 
   sigWs.close();
 
-  // Step 3: Open WebTransport to gateway
-  const url = `https://${gatewayInfo.address}`;
-  const transportOptions: any = {};
+  // Step 3: Coordinated hole-punch then direct QUIC, relay as fallback
+  let transport: WebTransport;
+
+  const directUrl = `https://${gatewayInfo.address}`;
+  const directOptions: any = {};
   if (gatewayInfo.certHash) {
     const hashBytes = hexToBytes(gatewayInfo.certHash);
-    transportOptions.serverCertificateHashes = [{
+    directOptions.serverCertificateHashes = [{
       algorithm: "sha-256",
       value: hashBytes.buffer,
     }];
   }
 
-  const transport = new WebTransport(url, transportOptions);
-  await transport.ready;
+  // Connect to relay first to trigger coordinated hole-punch
+  let relayTransport: WebTransport | null = null;
+  if (gatewayInfo.relayUrl) {
+    try {
+      console.log("[SSH] Connecting to relay for hole-punch:", gatewayInfo.relayUrl);
+      relayTransport = new WebTransport(`https://${gatewayInfo.relayUrl}`);
+      await Promise.race([
+        relayTransport.ready,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Relay timeout")), 5000)),
+      ]);
+      console.log("[SSH] Relay connected — hole-punch triggered, waiting 2s...");
+      // Wait for gateway to send punch packets through NAT
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    } catch (relayErr) {
+      console.warn("[SSH] Relay connect failed:", relayErr);
+      relayTransport = null;
+    }
+  }
+
+  // Now try direct QUIC (NAT pinhole should be open)
+  try {
+    console.log("[SSH] Trying direct QUIC:", gatewayInfo.address);
+    const directTransport = new WebTransport(directUrl, directOptions);
+    await Promise.race([
+      directTransport.ready,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Direct QUIC timeout")), 5000)),
+    ]);
+    transport = directTransport;
+    console.log("[SSH] Direct QUIC connected (P2P)!");
+    // Close relay — not needed
+    if (relayTransport) {
+      try { relayTransport.close(); } catch {}
+    }
+  } catch (directErr) {
+    console.warn("[SSH] Direct QUIC failed:", directErr);
+
+    // Fall back to relay (already connected)
+    if (relayTransport) {
+      transport = relayTransport;
+      console.log("[SSH] Using QUIC relay as fallback");
+    } else {
+      throw directErr; // No relay available, fall back to WebSocket
+    }
+  }
 
   // Step 4: Auth stream
   const authStream = await transport.createBidirectionalStream();
