@@ -446,69 +446,90 @@
       }];
     }
 
-    // Step 1: Connect to relay, pre-authenticate, trigger hole-punch
+    // Step 1: Connect to relay to trigger hole-punch (discovers browser port)
+    var relayFullUrl = relayUrl ? "https://" + relayUrl + "?gateway=" + encodeURIComponent(gatewayId || "") : null;
     var relayTransport = null;
     var relayAuthenticated = false;
+
     if (relayUrl) {
       try {
-        console.log("[RDP] Connecting to relay for hole-punch:", relayUrl);
-        var relayFullUrl = "https://" + relayUrl + "?gateway=" + encodeURIComponent(gatewayId || "");
+        console.log("[RDP] Step 1: Connecting to relay to trigger hole-punch...");
         relayTransport = new WebTransport(relayFullUrl);
         await Promise.race([
           relayTransport.ready,
           new Promise(function (_, reject) { setTimeout(function () { reject(new Error("timeout")); }, 5000); }),
         ]);
-        console.log("[RDP] Relay connected — pre-authenticating...");
-
-        // Pre-authenticate on relay so it's ready to use as fallback
-        var relayAuthStream = await relayTransport.createBidirectionalStream();
-        var relayAuthWriter = relayAuthStream.writable.getWriter();
-        var relayAuthReader = relayAuthStream.readable.getReader();
-        var tokenBytes = new TextEncoder().encode(sessionToken);
-        var authHeader = new Uint8Array(1 + 2 + tokenBytes.length);
-        authHeader[0] = STREAM_AUTH;
-        authHeader[1] = (tokenBytes.length >> 8) & 0xff;
-        authHeader[2] = tokenBytes.length & 0xff;
-        authHeader.set(tokenBytes, 3);
-        await relayAuthWriter.write(authHeader);
-        await relayAuthWriter.close();
-        var relayAuthResp = await relayAuthReader.read();
-        var relayResp = new TextDecoder().decode(relayAuthResp.value);
-        relayAuthReader.releaseLock();
-        if (relayResp === "OK") {
-          relayAuthenticated = true;
-          console.log("[RDP] Relay pre-authenticated! Waiting 2s for hole-punch...");
-        } else {
-          console.warn("[RDP] Relay auth failed:", relayResp);
-        }
+        console.log("[RDP] Relay connected — waiting 2s for gateway to punch...");
+        // Wait for: relay → signal server → gateway → punch packets sent
         await new Promise(function (resolve) { setTimeout(resolve, 2000); });
+
+        // Step 2: Close relay to free the UDP port, then immediately try direct
+        console.log("[RDP] Step 2: Closing relay to free port, trying direct QUIC...");
+        try { relayTransport.close(); } catch (e) {}
+        relayTransport = null;
+
+        // Small delay to let OS release the port
+        await new Promise(function (resolve) { setTimeout(resolve, 100); });
       } catch (relayErr) {
-        console.warn("[RDP] Relay connect/auth failed:", relayErr);
+        console.warn("[RDP] Relay connect failed:", relayErr);
         relayTransport = null;
       }
     }
 
-    // Step 2: Try direct QUIC (NAT pinhole should be open)
+    // Step 3: Try direct QUIC (port may be reused, NAT pinhole open)
     try {
-      console.log("[RDP] Trying direct QUIC:", directUrl);
+      console.log("[RDP] Step 3: Trying direct QUIC:", directUrl);
       var directTransport = new WebTransport(directUrl, directOptions);
       await Promise.race([
         directTransport.ready,
-        new Promise(function (_, reject) { setTimeout(function () { reject(new Error("timeout")); }, 5000); }),
+        new Promise(function (_, reject) { setTimeout(function () { reject(new Error("timeout")); }, 4000); }),
       ]);
       quicTransport = directTransport;
       console.log("[RDP] Direct QUIC connected (P2P)!");
-      // Close relay — not needed
-      if (relayTransport) { try { relayTransport.close(); } catch (e) {} }
     } catch (directErr) {
       console.warn("[RDP] Direct QUIC failed:", directErr);
 
-      // Step 3: Fall back to relay (already connected)
-      if (relayTransport) {
-        quicTransport = relayTransport;
-        console.log("[RDP] Using QUIC relay as fallback");
-      } else {
-        // No relay, fall back to WebRTC
+      // Step 4: Reconnect relay as fallback and pre-authenticate
+      if (relayFullUrl) {
+        try {
+          console.log("[RDP] Step 4: Reconnecting relay as fallback...");
+          relayTransport = new WebTransport(relayFullUrl);
+          await Promise.race([
+            relayTransport.ready,
+            new Promise(function (_, reject) { setTimeout(function () { reject(new Error("timeout")); }, 5000); }),
+          ]);
+          // Pre-authenticate
+          var relayAuthStream = await relayTransport.createBidirectionalStream();
+          var relayAuthWriter = relayAuthStream.writable.getWriter();
+          var relayAuthReader = relayAuthStream.readable.getReader();
+          var tokenBytes = new TextEncoder().encode(sessionToken);
+          var authHeader = new Uint8Array(1 + 2 + tokenBytes.length);
+          authHeader[0] = STREAM_AUTH;
+          authHeader[1] = (tokenBytes.length >> 8) & 0xff;
+          authHeader[2] = tokenBytes.length & 0xff;
+          authHeader.set(tokenBytes, 3);
+          await relayAuthWriter.write(authHeader);
+          await relayAuthWriter.close();
+          var relayAuthResp = await relayAuthReader.read();
+          var relayResp = new TextDecoder().decode(relayAuthResp.value);
+          relayAuthReader.releaseLock();
+          if (relayResp === "OK") {
+            relayAuthenticated = true;
+            quicTransport = relayTransport;
+            console.log("[RDP] Relay authenticated — using as fallback");
+          } else {
+            console.warn("[RDP] Relay auth failed:", relayResp);
+            try { relayTransport.close(); } catch (e) {}
+            relayTransport = null;
+          }
+        } catch (relayErr) {
+          console.warn("[RDP] Relay reconnect failed:", relayErr);
+          relayTransport = null;
+        }
+      }
+
+      if (!quicTransport) {
+        // No QUIC path works, fall back to WebRTC
         quicTransport = null;
         quicActive = false;
         startWebRTC();
