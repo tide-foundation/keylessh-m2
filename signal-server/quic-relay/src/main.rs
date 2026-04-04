@@ -187,11 +187,16 @@ async fn handle_session(
                     let flags = data[4];
                     let payload = data[5..].to_vec();
 
+                    tracing::info!("[Relay] GW→Browser: stream={stream_id} flags=0x{flags:02x} payload={}b", payload.len());
+
                     let sess = session_for_gw.lock().await;
                     match flags {
                         FLAG_DATA => {
                             if let Some(tx) = sess.streams.get(&stream_id) {
-                                let _ = tx.send(payload);
+                                let _ = tx.send(payload.clone());
+                                tracing::info!("[Relay] Forwarded {}b to stream {stream_id}", payload.len());
+                            } else {
+                                tracing::warn!("[Relay] No stream {stream_id} found (streams: {:?})", sess.streams.keys().collect::<Vec<_>>());
                             }
                         }
                         FLAG_FIN => {
