@@ -326,10 +326,10 @@ async fn relay_stream(
         }
     };
 
-    tokio::select! {
-        _ = browser_to_gw => {}
-        _ = gw_to_browser => {}
-    }
+    // Run both directions — don't cancel one when the other ends.
+    // browser_to_gw may finish first (e.g. auth: browser closes writer after sending token)
+    // but gw_to_browser still needs to deliver the response.
+    tokio::join!(browser_to_gw, gw_to_browser);
 
     {
         let mut sess = session.lock().await;
