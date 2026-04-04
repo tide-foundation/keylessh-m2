@@ -134,6 +134,7 @@ async fn handle_session(
 
     // Accept bidi streams from browser
     let mut next_stream_id: u32 = 0;
+    tracing::info!("[Relay] Session {session_id} waiting for streams from browser...");
 
     loop {
         match connection.accept_bi().await {
