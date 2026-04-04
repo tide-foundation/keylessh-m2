@@ -526,8 +526,20 @@ relayWss.on("connection", (ws: WebSocket, req) => {
 
   console.log(`[Relay] Sidecar connected: session=${sessionId} clientAddr=${clientAddr}`);
 
-  const session: RelaySession = { sidecarWs: ws, clientAddr };
+  // Find the target gateway — use gatewayId from sidecar query param
+  const targetGatewayId = url.searchParams.get("gateway") || "";
+  const gateway = targetGatewayId
+    ? registry.getGateway(targetGatewayId)
+    : registry.getAvailableGateway();
+  if (!gateway) {
+    console.log(`[Relay] No gateway available for session ${sessionId}`);
+    ws.close(4004, "No gateway available");
+    return;
+  }
+
+  const session: RelaySession = { sidecarWs: ws, clientAddr, gatewayId: gateway.id };
   relaySessions.set(sessionId, session);
+  console.log(`[Relay] Session ${sessionId} → gateway ${gateway.id}`);
 
   ws.on("message", (data, isBinary) => {
     if (!isBinary) {
@@ -538,31 +550,35 @@ relayWss.on("connection", (ws: WebSocket, req) => {
           session.clientAddr = msg.address;
           console.log(`[Relay] Browser address for session ${sessionId}: ${msg.address}`);
 
-          // Find which gateway this session targets and trigger hole-punch
-          // For now, tell ALL gateways to punch (the right one will respond)
-          for (const gw of registry.getAllGateways()) {
-            safeSend(gw.ws, {
-              type: "punch",
-              targetAddress: msg.address,
-              sessionId,
-            });
-          }
+          // Tell the target gateway to punch
+          safeSend(gateway.ws, {
+            type: "punch",
+            targetAddress: msg.address,
+            sessionId,
+          });
         }
       } catch {}
       return;
     }
 
-    // Binary frame: forward to gateway's relay WebSocket
-    if (session.gatewayWs?.readyState === ws.OPEN) {
-      session.gatewayWs.send(data);
+    // Binary frame from sidecar (browser → gateway): forward via gateway signaling WS
+    // Wrap as a relay_data message with session ID prefix
+    const sessionIdBuf = Buffer.from(sessionId);
+    const frame = Buffer.concat([
+      Buffer.from([0x52]), // 'R' magic byte for relay frames
+      Buffer.from([(sessionIdBuf.length >> 8) & 0xff, sessionIdBuf.length & 0xff]),
+      sessionIdBuf,
+      Buffer.from(data as ArrayBuffer),
+    ]);
+    if (gateway.ws.readyState === gateway.ws.OPEN) {
+      gateway.ws.send(frame);
     }
   });
 
   ws.on("close", () => {
     relaySessions.delete(sessionId);
-    if (session.gatewayWs?.readyState === ws.OPEN) {
-      session.gatewayWs.close();
-    }
+    // Tell gateway session ended
+    safeSend(gateway.ws, { type: "relay_close", sessionId });
     console.log(`[Relay] Session ${sessionId} sidecar disconnected`);
   });
 });
@@ -690,6 +706,20 @@ signalWss.on("connection", (ws: WebSocket, req) => {
         ws.close(1008, "Rate limit exceeded");
         return;
       }
+    }
+
+    // Check for binary relay frames from gateway (magic byte 0x52 = 'R')
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+    if (buf.length > 3 && buf[0] === 0x52) {
+      // Relay frame: [0x52][sessionId_len:u16][sessionId][stream frame data]
+      const sidLen = (buf[1] << 8) | buf[2];
+      const sid = buf.subarray(3, 3 + sidLen).toString();
+      const frameData = buf.subarray(3 + sidLen);
+      const session = relaySessions.get(sid);
+      if (session?.sidecarWs?.readyState === ws.OPEN) {
+        session.sidecarWs.send(frameData);
+      }
+      return;
     }
 
     let msg: SignalMessage;
@@ -873,7 +903,7 @@ function handleQuicAddress(ws: WebSocket, msg: SignalMessage): void {
   // Forward the full quic_address message to the target peer
   const target = registry.getClient(msg.targetId) || registry.getGateway(msg.targetId);
   if (target) {
-    // Include relay URL so browser can fall back to relayed QUIC
+    // Include relay URL with gatewayId so relay routes to correct gateway
     const relayHost = process.env.RELAY_HOST || "punchd.keylessh.com";
     const relayPort = process.env.RELAY_PORT || "7893";
     safeSend(target.ws, {
@@ -882,6 +912,7 @@ function handleQuicAddress(ws: WebSocket, msg: SignalMessage): void {
       address,
       certHash: (msg as any).certHash,
       relayUrl: `${relayHost}:${relayPort}`,
+      gatewayId: fromId,
     });
   }
 }

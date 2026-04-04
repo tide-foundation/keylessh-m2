@@ -113,21 +113,38 @@ async fn handle_session(
 ) -> Result<(), String> {
     let request = incoming.await.map_err(|e| format!("Connect error: {e}"))?;
     let authority = request.authority().to_string();
-    tracing::info!("[Relay] Incoming session from {authority}");
+    let path = request.path().to_string();
+    tracing::info!("[Relay] Incoming session from {authority} path={path}");
+
+    // Extract gatewayId from query string (e.g. /?gateway=Sashas-Gateway)
+    let gateway_id = path.split("gateway=")
+        .nth(1)
+        .and_then(|s| s.split('&').next())
+        .map(|s| urlencoding::decode(s).unwrap_or_default().to_string())
+        .unwrap_or_default();
 
     let connection = request.accept().await.map_err(|e| format!("Accept error: {e}"))?;
 
     // Get browser's real source IP:port (for hole-punching)
     let client_addr = connection.remote_address();
     let session_id = uuid_v4();
-    tracing::info!("[Relay] Session {session_id} — browser at {client_addr}");
+    tracing::info!("[Relay] Session {session_id} — browser at {client_addr}, gateway={gateway_id}");
 
     // Connect to signal server relay endpoint
     let relay_ws_url = format!(
-        "{}/ws/quic-relay?session={}&clientAddr={}",
-        signal_url, session_id, client_addr
+        "{}/ws/quic-relay?session={}&clientAddr={}&gateway={}",
+        signal_url, session_id, client_addr, gateway_id
     );
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&relay_ws_url)
+    // Connect with TLS verification disabled (relay runs on same machine as signal server)
+    let connector = tokio_tungstenite::Connector::NativeTls(
+        native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap(),
+    );
+    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+        &relay_ws_url, None, false, Some(connector),
+    )
         .await
         .map_err(|e| format!("Signal server connect failed: {e}"))?;
 
