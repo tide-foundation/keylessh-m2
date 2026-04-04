@@ -631,9 +631,23 @@
       while (this.readyState === 1) {
         var result = await this._reader.read();
         if (result.done) break;
-        var payload = this.binaryType === "arraybuffer"
-          ? result.value.buffer.slice(result.value.byteOffset, result.value.byteOffset + result.value.byteLength)
-          : new Blob([result.value]);
+        var raw = result.value;
+        if (raw.length === 0) continue;
+
+        // Relay WS frames are prefixed: 0x00 = binary, 0x01 = text
+        var typePrefix = raw[0];
+        var content = raw.subarray(1);
+
+        var payload;
+        if (typePrefix === 0x01) {
+          // Text message (e.g. JSON from tcp-forward handler)
+          payload = new TextDecoder().decode(content);
+        } else {
+          // Binary message (RDP data)
+          payload = this.binaryType === "arraybuffer"
+            ? content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength)
+            : new Blob([content]);
+        }
         this._dispatch("message", new MessageEvent("message", { data: payload }));
       }
     } catch (e) {

@@ -361,13 +361,20 @@ async fn handle_ws_relay(
                 }
             }
             // Local WS → relay (local server response → browser)
+            // Prefix: 0x00 = binary, 0x01 = text (so browser can reconstruct message type)
             msg = futures_util::StreamExt::next(&mut ws_stream_local) => {
                 match msg {
                     Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
-                        send_relay_response(&ws_sink, &session_id, stream_id, &data).await;
+                        let mut framed = Vec::with_capacity(1 + data.len());
+                        framed.push(0x00);
+                        framed.extend_from_slice(&data);
+                        send_relay_response(&ws_sink, &session_id, stream_id, &framed).await;
                     }
                     Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
-                        send_relay_response(&ws_sink, &session_id, stream_id, text.as_bytes()).await;
+                        let mut framed = Vec::with_capacity(1 + text.len());
+                        framed.push(0x01);
+                        framed.extend_from_slice(text.as_bytes());
+                        send_relay_response(&ws_sink, &session_id, stream_id, &framed).await;
                     }
                     Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => break,
                     _ => {}
