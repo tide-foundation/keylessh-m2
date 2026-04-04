@@ -455,9 +455,10 @@ async fn connect_and_run(
                     Some(Ok(Message::Binary(data))) => {
                         // Binary relay frame: [0x52][sessionId_len:u16][sessionId][stream frame]
                         // Stream frame: [stream_id:u32][flags:u8][payload]
-                        if data.len() > 3 && data[0] == 0x52 {
+                        tracing::info!("[Relay] Binary frame received: {} bytes, first byte: 0x{:02x}", data.len(), data.first().copied().unwrap_or(0));
+                        if data.len() >= 4 && data[0] == 0x52 {
                             let sid_len = ((data[1] as usize) << 8) | (data[2] as usize);
-                            if data.len() > 3 + sid_len + 5 {
+                            if data.len() >= 3 + sid_len + 5 {
                                 let session_id = String::from_utf8_lossy(&data[3..3+sid_len]).to_string();
                                 let frame = &data[3+sid_len..];
                                 let stream_id = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
