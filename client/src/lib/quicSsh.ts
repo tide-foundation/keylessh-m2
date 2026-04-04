@@ -87,71 +87,52 @@ export async function connectQuicSsh(options: QuicSshOptions): Promise<WebSocket
     }];
   }
 
-  // Connect to relay first, pre-authenticate, trigger hole-punch
-  let relayTransport: WebTransport | null = null;
-  let relayAuthenticated = false;
-  if (gatewayInfo.relayUrl) {
+  // Step 1: Connect to relay to trigger hole-punch (discovers browser's port)
+  const relayGwParam = gatewayId ? `?gateway=${encodeURIComponent(gatewayId)}` : "";
+  const relayFullUrl = gatewayInfo.relayUrl ? `https://${gatewayInfo.relayUrl}${relayGwParam}` : null;
+
+  if (relayFullUrl) {
     try {
-      console.log("[SSH] Connecting to relay for hole-punch:", gatewayInfo.relayUrl);
-      const relayGwParam = gatewayId ? `?gateway=${encodeURIComponent(gatewayId)}` : "";
-      relayTransport = new WebTransport(`https://${gatewayInfo.relayUrl}${relayGwParam}`);
+      console.log("[SSH] Step 1: Connecting to relay to trigger hole-punch...");
+      const relayConn = new WebTransport(relayFullUrl);
       await Promise.race([
-        relayTransport.ready,
+        relayConn.ready,
         new Promise((_, reject) => setTimeout(() => reject(new Error("Relay timeout")), 5000)),
       ]);
-      console.log("[SSH] Relay connected — pre-authenticating...");
-
-      // Pre-authenticate on relay to keep it alive and ready as fallback
-      const relayAuthStream = await relayTransport.createBidirectionalStream();
-      const relayAuthWriter = relayAuthStream.writable.getWriter();
-      const relayAuthReader = relayAuthStream.readable.getReader();
-      const relayTokenBytes = new TextEncoder().encode(token);
-      const relayAuthHeader = new Uint8Array(1 + 2 + relayTokenBytes.length);
-      relayAuthHeader[0] = STREAM_AUTH;
-      relayAuthHeader[1] = (relayTokenBytes.length >> 8) & 0xff;
-      relayAuthHeader[2] = relayTokenBytes.length & 0xff;
-      relayAuthHeader.set(relayTokenBytes, 3);
-      await relayAuthWriter.write(relayAuthHeader);
-      await relayAuthWriter.close();
-      const { value: relayAuthResp } = await relayAuthReader.read();
-      const relayResp = new TextDecoder().decode(relayAuthResp);
-      relayAuthReader.releaseLock();
-      if (relayResp === "OK") {
-        relayAuthenticated = true;
-        console.log("[SSH] Relay pre-authenticated! Waiting 2s for hole-punch...");
-      } else {
-        console.warn("[SSH] Relay auth failed:", relayResp);
-      }
+      console.log("[SSH] Relay connected — waiting 2s for gateway to punch...");
       await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Step 2: Close relay to free the UDP port
+      console.log("[SSH] Step 2: Closing relay to free port...");
+      try { relayConn.close(); } catch {}
+      await new Promise(resolve => setTimeout(resolve, 100));
     } catch (relayErr) {
-      console.warn("[SSH] Relay connect/auth failed:", relayErr);
-      relayTransport = null;
+      console.warn("[SSH] Relay connect failed:", relayErr);
     }
   }
 
-  // Now try direct QUIC (NAT pinhole should be open)
+  // Step 3: Try direct QUIC (port may be reused, NAT pinhole open)
   try {
-    console.log("[SSH] Trying direct QUIC:", gatewayInfo.address);
+    console.log("[SSH] Step 3: Trying direct QUIC:", gatewayInfo.address);
     const directTransport = new WebTransport(directUrl, directOptions);
     await Promise.race([
       directTransport.ready,
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Direct QUIC timeout")), 5000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Direct QUIC timeout")), 4000)),
     ]);
     transport = directTransport;
     console.log("[SSH] Direct QUIC connected (P2P)!");
-    // Close relay — not needed
-    if (relayTransport) {
-      try { relayTransport.close(); } catch {}
-    }
   } catch (directErr) {
     console.warn("[SSH] Direct QUIC failed:", directErr);
 
-    // Fall back to relay (already connected)
-    if (relayTransport) {
+    // Step 4: Reconnect relay as fallback
+    if (relayFullUrl) {
+      console.log("[SSH] Step 4: Reconnecting relay as fallback...");
+      const relayTransport = new WebTransport(relayFullUrl);
+      await relayTransport.ready;
       transport = relayTransport;
       console.log("[SSH] Using QUIC relay as fallback");
     } else {
-      throw directErr; // No relay available, fall back to WebSocket
+      throw directErr;
     }
   }
 
