@@ -103,6 +103,8 @@ properties:
             value: "7893"
           - name: HTTPS
             value: "false"
+          - name: PUBLIC_URL
+            value: "${DNS_LABEL}.${LOCATION}.azurecontainer.io"
 YAML
 
 echo "[Deploy] Creating ACI..."

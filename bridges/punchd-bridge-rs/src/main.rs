@@ -137,6 +137,9 @@ async fn main() {
             if hosts_tc_locally {
                 meta["realm"] = serde_json::json!(tc_config.realm);
             }
+            if let Ok(public_url) = std::env::var("PUBLIC_URL") {
+                meta["publicUrl"] = serde_json::json!(public_url);
+            }
             meta
         },
         backends: config.backends.clone(),
