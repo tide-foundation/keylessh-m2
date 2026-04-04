@@ -127,7 +127,16 @@ async fn handle_session(
         "{}/ws/quic-relay?session={}&clientAddr={}",
         signal_url, session_id, client_addr
     );
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&relay_ws_url)
+    // Connect with TLS verification disabled (relay runs on same machine as signal server)
+    let connector = tokio_tungstenite::Connector::NativeTls(
+        native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap(),
+    );
+    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+        &relay_ws_url, None, false, Some(connector),
+    )
         .await
         .map_err(|e| format!("Signal server connect failed: {e}"))?;
 

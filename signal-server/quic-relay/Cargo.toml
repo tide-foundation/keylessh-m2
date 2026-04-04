@@ -7,6 +7,7 @@ edition = "2021"
 wtransport = { version = "0.7", features = ["self-signed"] }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+native-tls = "0.2"
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -965,6 +965,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "futures-util",
+ "native-tls",
  "serde",
  "serde_json",
  "tokio",
