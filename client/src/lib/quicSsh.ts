@@ -74,10 +74,9 @@ export async function connectQuicSsh(options: QuicSshOptions): Promise<WebSocket
 
   sigWs.close();
 
-  // Step 3: Try direct QUIC to gateway, fall back to relay
+  // Step 3: Coordinated hole-punch then direct QUIC, relay as fallback
   let transport: WebTransport;
 
-  // Try direct first (with cert hash pinning for self-signed cert)
   const directUrl = `https://${gatewayInfo.address}`;
   const directOptions: any = {};
   if (gatewayInfo.certHash) {
@@ -88,24 +87,46 @@ export async function connectQuicSsh(options: QuicSshOptions): Promise<WebSocket
     }];
   }
 
+  // Connect to relay first to trigger coordinated hole-punch
+  let relayTransport: WebTransport | null = null;
+  if (gatewayInfo.relayUrl) {
+    try {
+      console.log("[SSH] Connecting to relay for hole-punch:", gatewayInfo.relayUrl);
+      relayTransport = new WebTransport(`https://${gatewayInfo.relayUrl}`);
+      await Promise.race([
+        relayTransport.ready,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Relay timeout")), 5000)),
+      ]);
+      console.log("[SSH] Relay connected — hole-punch triggered, waiting 2s...");
+      // Wait for gateway to send punch packets through NAT
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    } catch (relayErr) {
+      console.warn("[SSH] Relay connect failed:", relayErr);
+      relayTransport = null;
+    }
+  }
+
+  // Now try direct QUIC (NAT pinhole should be open)
   try {
+    console.log("[SSH] Trying direct QUIC:", gatewayInfo.address);
     const directTransport = new WebTransport(directUrl, directOptions);
     await Promise.race([
       directTransport.ready,
       new Promise((_, reject) => setTimeout(() => reject(new Error("Direct QUIC timeout")), 5000)),
     ]);
     transport = directTransport;
-    console.log("[SSH] Direct QUIC connected to", gatewayInfo.address);
+    console.log("[SSH] Direct QUIC connected (P2P)!");
+    // Close relay — not needed
+    if (relayTransport) {
+      try { relayTransport.close(); } catch {}
+    }
   } catch (directErr) {
     console.warn("[SSH] Direct QUIC failed:", directErr);
 
-    // Fall back to relay (trusted LE cert, no hash pinning needed)
-    if (gatewayInfo.relayUrl) {
-      console.log("[SSH] Trying QUIC relay:", gatewayInfo.relayUrl);
-      const relayTransport = new WebTransport(`https://${gatewayInfo.relayUrl}`);
-      await relayTransport.ready;
+    // Fall back to relay (already connected)
+    if (relayTransport) {
       transport = relayTransport;
-      console.log("[SSH] Connected via QUIC relay");
+      console.log("[SSH] Using QUIC relay as fallback");
     } else {
       throw directErr; // No relay available, fall back to WebSocket
     }

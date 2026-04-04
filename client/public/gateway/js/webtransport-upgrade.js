@@ -153,10 +153,7 @@
   async function connectWebTransport(address, certHash, relayUrl) {
     cleanup();
 
-    // Try direct QUIC first
     const directUrl = "https://" + address;
-    console.log("[QUIC] Trying direct WebTransport:", directUrl);
-
     const directOptions = {};
     if (certHash) {
       const hashBytes = hexToBytes(certHash);
@@ -166,34 +163,44 @@
       }];
     }
 
+    // Step 1: Connect to relay to trigger coordinated hole-punch
+    let relayTransport = null;
+    if (relayUrl) {
+      try {
+        console.log("[QUIC] Connecting to relay for hole-punch:", relayUrl);
+        relayTransport = new WebTransport("https://" + relayUrl);
+        await Promise.race([
+          relayTransport.ready,
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+        ]);
+        console.log("[QUIC] Relay connected — hole-punch triggered, waiting 2s...");
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      } catch (relayErr) {
+        console.warn("[QUIC] Relay connect failed:", relayErr);
+        relayTransport = null;
+      }
+    }
+
+    // Step 2: Try direct QUIC (NAT pinhole should be open)
     try {
+      console.log("[QUIC] Trying direct WebTransport:", directUrl);
       const directTransport = new WebTransport(directUrl, directOptions);
       await Promise.race([
         directTransport.ready,
         new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
       ]);
       transport = directTransport;
-      console.log("[QUIC] Direct WebTransport connected!");
+      console.log("[QUIC] Direct WebTransport connected (P2P)!");
+      if (relayTransport) { try { relayTransport.close(); } catch {} }
     } catch (directErr) {
       console.warn("[QUIC] Direct WebTransport failed:", directErr);
 
-      // Try relay (trusted LE cert)
-      if (relayUrl) {
-        try {
-          console.log("[QUIC] Trying relay:", relayUrl);
-          const relayTransport = new WebTransport("https://" + relayUrl);
-          await relayTransport.ready;
-          transport = relayTransport;
-          console.log("[QUIC] Connected via relay!");
-        } catch (relayErr) {
-          console.warn("[QUIC] Relay also failed:", relayErr);
-          window.__quicActive = false;
-          window.__quicFailed = true;
-          cleanup();
-          return;
-        }
+      // Step 3: Fall back to relay (already connected)
+      if (relayTransport) {
+        transport = relayTransport;
+        console.log("[QUIC] Using relay as fallback");
       } else {
-        console.log("[QUIC] No relay available, falling back to WebRTC...");
+        console.log("[QUIC] No relay, falling back to WebRTC...");
         window.__quicActive = false;
         window.__quicFailed = true;
         cleanup();
