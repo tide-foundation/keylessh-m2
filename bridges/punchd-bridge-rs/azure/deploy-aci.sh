@@ -24,6 +24,7 @@ fi
 : "${SERVER_URL:=https://demo.keylessh.com}"
 : "${ICE_SERVERS:=stun:${EXTERNAL_IP:-localhost}:3478}"
 : "${TURN_SERVER:=turn:${EXTERNAL_IP:-localhost}:3478}"
+: "${GATEWAY_DISPLAY_NAME:=${GATEWAY_ID}}"
 
 RG="${RESOURCE_GROUP:-KeyleSSH}"
 LOCATION="${LOCATION:-australiaeast}"
@@ -105,6 +106,8 @@ properties:
             value: "false"
           - name: PUBLIC_URL
             value: "${DNS_LABEL}.${LOCATION}.azurecontainer.io"
+          - name: GATEWAY_DISPLAY_NAME
+            value: "${GATEWAY_DISPLAY_NAME}"
 YAML
 
 echo "[Deploy] Creating ACI..."
