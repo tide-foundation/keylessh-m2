@@ -1234,7 +1234,7 @@ async fn oidc_login(_tc: &TcConfig) -> Result<String, String> {
     let app_url = std::env::var("SERVER_URL")
         .unwrap_or_else(|_| "https://demo.keylessh.com".to_string());
     let login_url = format!(
-        "{}/gateway/vpn-auth.html?callback=http://localhost:{}/token",
+        "{}/vpn-auth.html?callback=http://localhost:{}/token",
         app_url.trim_end_matches('/'),
         CALLBACK_PORT,
     );
