@@ -1,6 +1,6 @@
 import { useAuth } from "@/contexts/AuthContext";
 import { useIsFetching, useQuery } from "@tanstack/react-query";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -165,11 +165,12 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
   const sshUsernames = (backend as any).sshUsernames || [];
   const [selectedSshUser, setSelectedSshUser] = useState<string>(sshUsernames[0] || "");
   const isDisabled = !accessible || !endpoint.online || (isSsh && !selectedSshUser);
+  const [, setLocation] = useLocation();
   const handleConnect = () => {
     if (isSsh) {
       // SSH: open console with gateway routing + selected username
       const baseUrl = endpoint.directUrl || endpoint.signalServerUrl.replace(/\/$/, "");
-      window.location.href = `/app/console?gatewayUrl=${encodeURIComponent(baseUrl)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(endpoint.id)}&user=${encodeURIComponent(selectedSshUser)}`;
+      setLocation(`/app/console?gatewayUrl=${encodeURIComponent(baseUrl)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(endpoint.id)}&user=${encodeURIComponent(selectedSshUser)}`);
     } else {
       // Web endpoint: open via signal server relay
       const url = endpoint.signalServerUrl.replace(/\/$/, "");
