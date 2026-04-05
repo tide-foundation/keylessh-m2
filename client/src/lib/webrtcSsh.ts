@@ -62,6 +62,7 @@ export async function connectWebRtcSsh(options: WebRtcSshOptions): Promise<WebSo
     sigWs.onmessage = async (event) => {
       try {
         const msg = JSON.parse(event.data);
+        console.log("[SSH-WebRTC] Received:", msg.type, msg.fromId || "");
 
         switch (msg.type) {
           case "paired": {
@@ -81,6 +82,11 @@ export async function connectWebRtcSsh(options: WebRtcSshOptions): Promise<WebSo
             }
 
             pc = new RTCPeerConnection({ iceServers });
+            console.log("[SSH-WebRTC] ICE servers:", iceServers.length);
+
+            pc.onconnectionstatechange = () => {
+              console.log("[SSH-WebRTC] Connection state:", pc!.connectionState);
+            };
 
             // Create DataChannels
             const control = pc.createDataChannel("http-tunnel", { ordered: true });
