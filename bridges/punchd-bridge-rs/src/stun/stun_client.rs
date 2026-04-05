@@ -127,10 +127,40 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
         };
 
         // Start a separate quinn endpoint for native VPN clients (ALPN: "punchd")
+        // Bind socket first, STUN resolve, then pass to quinn (same pattern as wtransport)
         let vpn_quic_port = quic_port + 1; // 7894
-        let vpn_bind: std::net::SocketAddr = format!("0.0.0.0:{vpn_quic_port}").parse().unwrap();
-        match crate::quic::transport::create_server_endpoint(vpn_bind) {
-            Ok((endpoint, _vpn_cert_hash)) => {
+        let vpn_std_socket = std::net::UdpSocket::bind(format!("0.0.0.0:{vpn_quic_port}"))
+            .expect(&format!("Failed to bind VPN QUIC port {vpn_quic_port}"));
+        vpn_std_socket.set_nonblocking(true).expect("Nonblocking error");
+
+        // STUN resolve on this socket to get reflexive address
+        let vpn_public_addr = if !stun_server.is_empty() {
+            let stun_clone = vpn_std_socket.try_clone().expect("Clone error");
+            let tokio_sock = tokio::net::UdpSocket::from_std(stun_clone).expect("Tokio socket error");
+            match crate::quic::transport::stun_resolve(&tokio_sock, &stun_server).await {
+                Ok(addr) => {
+                    tracing::info!("[STUN] Native VPN reflexive address: {addr}");
+                    Some(addr)
+                }
+                Err(e) => {
+                    tracing::warn!("[STUN] VPN STUN failed: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Create quinn endpoint on the SAME socket (preserves STUN NAT pinhole)
+        let (vpn_server_config, _vpn_cert_hash) = crate::quic::transport::make_server_config();
+        let vpn_runtime = quinn::default_runtime().expect("No runtime");
+        match quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            Some(vpn_server_config),
+            vpn_runtime.wrap_udp_socket(vpn_std_socket).expect("Wrap error"),
+            vpn_runtime,
+        ) {
+            Ok(endpoint) => {
                 tracing::info!("[QUIC] Native VPN endpoint listening on 0.0.0.0:{vpn_quic_port}");
                 let opts = options.clone();
                 tokio::spawn(async move {
@@ -182,7 +212,7 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
                 options.stun_server_url
             );
 
-            match connect_and_run(&options, &mut shutdown_rx, &mut re_register_rx, quic_port, &quic_public_addr, &quic_cert_hash, &punch_socket).await {
+            match connect_and_run(&options, &mut shutdown_rx, &mut re_register_rx, quic_port, &quic_public_addr, &vpn_public_addr, &quic_cert_hash, &punch_socket).await {
                 ConnectionResult::Shutdown => {
                     tracing::info!("[STUN-Reg] Shutdown — exiting");
                     break;
@@ -236,6 +266,7 @@ async fn connect_and_run(
     re_register_rx: &mut mpsc::UnboundedReceiver<serde_json::Value>,
     quic_port: u16,
     quic_public_addr: &Option<std::net::SocketAddr>,
+    vpn_public_addr: &Option<std::net::SocketAddr>,
     quic_cert_hash: &str,
     punch_socket: &std::net::UdpSocket,
 ) -> ConnectionResult {
@@ -408,12 +439,18 @@ async fn connect_and_run(
                                         Some(addr) => addr.to_string(),
                                         None => format!("0.0.0.0:{quic_port}"),
                                     };
+                                    // Include native VPN QUIC address for VPN clients
+                                    let vpn_addr = match &vpn_public_addr {
+                                        Some(addr) => addr.to_string(),
+                                        None => format!("0.0.0.0:{}", quic_port + 1),
+                                    };
                                     let _ = signaling_tx.send(serde_json::json!({
                                         "type": "quic_address",
                                         "targetId": client_id,
                                         "fromId": options.gateway_id,
                                         "address": quic_addr,
                                         "certHash": quic_cert_hash,
+                                        "nativeAddress": vpn_addr,
                                     }));
                                 }
                             }
