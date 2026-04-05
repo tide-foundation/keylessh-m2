@@ -556,14 +556,67 @@ async fn handle_vpn_stream(
     tracing::info!("[QUIC] VPN control: {req_type} from {client_id}");
 
     if req_type == "vpn_open" {
-        // Allocate IP from pool
-        let (client_ip, server_ip) = if let Some(ref vpn_state) = options.vpn_state {
+        // Allocate IP from pool and register route for return traffic
+        let client_ip_addr: std::net::Ipv4Addr;
+        let server_ip = "10.66.0.1";
+
+        if let Some(ref vpn_state) = options.vpn_state {
             let mut vs = vpn_state.lock().await;
-            let ip = vs.pool.allocate().unwrap_or("10.66.0.2".parse().unwrap());
-            (ip.to_string(), "10.66.0.1".to_string())
+            client_ip_addr = vs.pool.allocate().unwrap_or("10.66.0.2".parse().unwrap());
+
+            // Ensure TUN device is started
+            if !vs.tun_started() {
+                let vpn_clone = options.vpn_state.clone().unwrap();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::vpn::vpn_handler::ensure_tun_started(vpn_clone).await {
+                        tracing::error!("[VPN] TUN start error: {e}");
+                    }
+                });
+            }
+
+            // Register a route: TUN reads for this client_ip → send as QUIC datagram
+            let (route_tx, mut route_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            vs.routes.insert(client_ip_addr, route_tx);
+
+            // Spawn task to forward TUN → QUIC datagrams
+            let conn = {
+                let ps = peer_state.lock().await;
+                ps.connection.clone()
+            };
+            tokio::spawn(async move {
+                while let Some(packet) = route_rx.recv().await {
+                    // packet has VPN_TUNNEL_MAGIC prefix from TUN reader — strip it
+                    let ip_data = if !packet.is_empty() && packet[0] == 0x04 {
+                        &packet[1..]
+                    } else {
+                        &packet
+                    };
+                    if let Err(e) = conn.send_datagram(bytes::Bytes::copy_from_slice(ip_data)) {
+                        tracing::debug!("[QUIC] VPN datagram send error: {e}");
+                        break;
+                    }
+                }
+            });
         } else {
-            ("10.66.0.2".to_string(), "10.66.0.1".to_string())
-        };
+            client_ip_addr = "10.66.0.2".parse().unwrap();
+        }
+
+        let client_ip = client_ip_addr.to_string();
+
+        // Set VPN session on peer state (for firewall in datagram handler)
+        {
+            let (tun_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let mut ps = peer_state.lock().await;
+            ps.vpn_session = Some(VpnSession {
+                id: client_id.clone(),
+                client_ip: client_ip_addr,
+                tun_tx,
+                route_rx: None,
+                shutdown: None,
+                firewall: crate::vpn::vpn_handler::SessionFirewall::new(vec![]),
+                block_rx: None,
+            });
+        }
 
         // Send vpn_opened response
         let resp = serde_json::json!({
@@ -586,6 +639,17 @@ async fn handle_vpn_stream(
                 Ok(Some(_n)) => { /* control messages */ }
                 Ok(None) => break,
             }
+        }
+
+        // Cleanup: remove route and release IP
+        if let Some(ref vpn_state) = options.vpn_state {
+            let mut vs = vpn_state.lock().await;
+            vs.routes.remove(&client_ip_addr);
+            vs.pool.release(client_ip_addr);
+        }
+        {
+            let mut ps = peer_state.lock().await;
+            ps.vpn_session = None;
         }
 
         tracing::info!("[QUIC] VPN session closed for {client_id}");
