@@ -1225,21 +1225,33 @@ fn generate_dpop_proof_with_nonce(method: &str, url: &str, nonce: &str) -> Resul
 }
 
 async fn oidc_login(tc: &TcConfig) -> Result<String, String> {
-    // Open the KeyleSSH web app for auth — it handles TideCloak DPoP through Heimdall.
-    // After login, the web app redirects to localhost with the access token.
-    let app_url = std::env::var("SERVER_URL")
-        .unwrap_or_else(|_| "https://demo.keylessh.com".to_string());
-    let login_url = format!(
-        "{}/app/vpn-auth?callback=http://localhost:{}/token",
-        app_url.trim_end_matches('/'),
-        CALLBACK_PORT,
-    );
+    let base = tc.auth_server_url.trim_end_matches('/');
+    let realm_path = format!("{base}/realms/{}/protocol/openid-connect", tc.realm);
+    let auth_url = format!("{realm_path}/auth");
+    let redirect_uri = format!("http://localhost:{CALLBACK_PORT}/callback");
+
+    let state: String = (0..16)
+        .map(|_| format!("{:02x}", rand::Rng::random::<u8>(&mut rand::rng())))
+        .collect();
+    let nonce: String = (0..16)
+        .map(|_| format!("{:02x}", rand::Rng::random::<u8>(&mut rand::rng())))
+        .collect();
+
+    // Use implicit flow — token returned directly in URL fragment (no server-side exchange)
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("client_id", &tc.resource)
+        .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("response_type", "token")
+        .append_pair("scope", "openid")
+        .append_pair("state", &state)
+        .append_pair("nonce", &nonce)
+        .finish();
+    let login_url = format!("{auth_url}?{query}");
 
     tracing::info!("Opening browser for login...");
     tracing::info!("If the browser doesn't open, visit:");
     tracing::info!("  {}", login_url);
 
-    // Open browser
     open_browser(&login_url);
 
     // Start local HTTP server to receive the callback
@@ -1250,9 +1262,9 @@ async fn oidc_login(tc: &TcConfig) -> Result<String, String> {
     tracing::info!("Waiting for login callback on port {CALLBACK_PORT}...");
 
     // Accept one connection
-    // Wait for the browser to send the token back
-    // The web app authenticates via TideCloak/Heimdall and POSTs the token to us
-    // Accept requests: GET /token?token=... or POST /token with body token=...
+    // Handle callback requests:
+    // 1. GET /callback#access_token=... → serve HTML that extracts fragment and POSTs token
+    // 2. POST /token with body = access_token → receive the token
     loop {
         let (stream, _) = tokio::time::timeout(Duration::from_secs(120), listener.accept())
             .await
@@ -1265,61 +1277,60 @@ async fn oidc_login(tc: &TcConfig) -> Result<String, String> {
             .await
             .map_err(|e| format!("Read error: {e}"))?;
         let request = String::from_utf8_lossy(&buf[..n]).to_string();
-
         let first_line = request.lines().next().unwrap_or("");
         let path = first_line.split_whitespace().nth(1).unwrap_or("");
 
-        // CORS preflight
-        if first_line.starts_with("OPTIONS") {
-            let resp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        if path.starts_with("/callback") {
+            // TideCloak redirected here with token in URL fragment
+            // Serve a page that extracts the fragment and POSTs it back
+            let html = r#"<html><body><h2>Authenticating...</h2><script>
+var hash = window.location.hash.substring(1);
+var params = new URLSearchParams(hash);
+var token = params.get("access_token");
+if (token) {
+  fetch("/token", { method: "POST", body: token }).then(function() {
+    document.body.innerHTML = "<h2>VPN Login Successful!</h2><p>You can close this tab.</p>";
+    setTimeout(function() { window.close(); }, 1000);
+  });
+} else {
+  document.body.innerHTML = "<h2>Login failed</h2><p>No token received. " + window.location.hash + "</p>";
+}
+</script></body></html>"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+                html.len()
+            );
             let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
             continue;
         }
 
-        // Extract token from query string or POST body
-        let mut token = None;
-
-        // Try query string: /token?token=...
-        if let Some(query) = path.split('?').nth(1) {
-            for pair in query.split('&') {
-                if let Some(val) = pair.strip_prefix("token=") {
-                    token = Some(urldecoded(val));
-                }
-            }
-        }
-
-        // Try POST body: token=...
-        if token.is_none() {
+        if path.starts_with("/token") {
+            // Receive the token from the browser's fetch POST
+            let mut token = None;
             if let Some(body_start) = request.find("\r\n\r\n") {
-                let body = &request[body_start + 4..];
-                // Could be form-encoded or plain token
-                if body.contains("token=") {
-                    for pair in body.split('&') {
-                        if let Some(val) = pair.strip_prefix("token=") {
-                            token = Some(urldecoded(val.trim()));
-                        }
-                    }
-                } else if !body.is_empty() {
-                    // Plain token in body
-                    token = Some(body.trim().to_string());
+                let body = request[body_start + 4..].trim();
+                if !body.is_empty() {
+                    token = Some(body.to_string());
                 }
             }
-        }
 
-        // Send response
-        let html = "<html><body><h2>VPN Login Successful!</h2><p>You can close this tab.</p><script>window.close()</script></body></html>";
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
-            html.len()
-        );
-        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
+            let html = "OK";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+                html.len()
+            );
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
 
-        if let Some(t) = token {
-            if !t.is_empty() {
+            if let Some(t) = token {
                 tracing::info!("Token received from browser!");
                 return Ok(t);
             }
+            continue;
         }
+
+        // Unknown path — send 404
+        let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
     }
 }
 
