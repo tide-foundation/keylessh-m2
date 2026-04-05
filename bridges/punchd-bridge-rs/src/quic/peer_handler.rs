@@ -39,6 +39,8 @@ struct PeerState {
     client_id: String,
     connection: Connection,
     vpn_session: Option<VpnSession>,
+    /// JWT token from auth stream — kept for VPN role checking
+    token: Option<String>,
 }
 
 pub struct QuicPeerHandler {
@@ -143,11 +145,12 @@ impl QuicPeerHandler {
             let _ = send.finish();
         }
 
-        // Store peer state
+        // Store peer state (keep token for VPN role checking)
         let peer_state = Arc::new(Mutex::new(PeerState {
             client_id: client_id.clone(),
             connection: conn.clone(),
             vpn_session: None,
+            token: Some(token),
         }));
 
         {
@@ -556,36 +559,72 @@ async fn handle_vpn_stream(
     tracing::info!("[QUIC] VPN control: {req_type} from {client_id}");
 
     if req_type == "vpn_open" {
-        // Allocate IP from pool and register route for return traffic
-        let client_ip_addr: std::net::Ipv4Addr;
-        let server_ip = "10.66.0.1";
+        // Get stored JWT token for role verification
+        let token = {
+            let ps = peer_state.lock().await;
+            ps.token.clone()
+        };
 
-        if let Some(ref vpn_state) = options.vpn_state {
-            let mut vs = vpn_state.lock().await;
-            client_ip_addr = vs.pool.allocate().unwrap_or("10.66.0.2".parse().unwrap());
+        let vpn_state = match options.vpn_state {
+            Some(ref vs) => vs.clone(),
+            None => {
+                let err = serde_json::json!({"type": "vpn_error", "message": "VPN not configured on this gateway"});
+                let err_bytes = err.to_string();
+                let _ = send.write_all(&(err_bytes.len() as u32).to_be_bytes()).await;
+                let _ = send.write_all(err_bytes.as_bytes()).await;
+                return;
+            }
+        };
 
-            // Ensure TUN device is started
+        // Use handle_vpn_open which verifies JWT roles and builds firewall rules
+        let mut session = match crate::vpn::vpn_handler::handle_vpn_open(
+            vpn_state.clone(),
+            client_id.clone(),
+            token.as_deref(),
+            options.auth.as_ref(),
+            &options.gateway_id,
+        ).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("[QUIC] VPN access denied for {client_id}: {e}");
+                let err = serde_json::json!({"type": "vpn_error", "message": e});
+                let err_bytes = err.to_string();
+                let _ = send.write_all(&(err_bytes.len() as u32).to_be_bytes()).await;
+                let _ = send.write_all(err_bytes.as_bytes()).await;
+                return;
+            }
+        };
+
+        let client_ip_addr = session.client_ip;
+        let client_ip = client_ip_addr.to_string();
+
+        // Ensure TUN device is started
+        {
+            let vs = vpn_state.lock().await;
             if !vs.tun_started() {
-                let vpn_clone = options.vpn_state.clone().unwrap();
+                let vpn_clone = vpn_state.clone();
                 tokio::spawn(async move {
                     if let Err(e) = crate::vpn::vpn_handler::ensure_tun_started(vpn_clone).await {
                         tracing::error!("[VPN] TUN start error: {e}");
                     }
                 });
             }
+        }
 
-            // Register a route: TUN reads for this client_ip → send as QUIC datagram
+        // Register route: TUN reads for this client_ip → send as QUIC datagram
+        {
             let (route_tx, mut route_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-            vs.routes.insert(client_ip_addr, route_tx);
+            {
+                let mut vs = vpn_state.lock().await;
+                vs.routes.insert(client_ip_addr, route_tx);
+            }
 
-            // Spawn task to forward TUN → QUIC datagrams
             let conn = {
                 let ps = peer_state.lock().await;
                 ps.connection.clone()
             };
             tokio::spawn(async move {
                 while let Some(packet) = route_rx.recv().await {
-                    // packet has VPN_TUNNEL_MAGIC prefix from TUN reader — strip it
                     let ip_data = if !packet.is_empty() && packet[0] == 0x04 {
                         &packet[1..]
                     } else {
@@ -597,39 +636,38 @@ async fn handle_vpn_stream(
                     }
                 }
             });
-        } else {
-            client_ip_addr = "10.66.0.2".parse().unwrap();
         }
 
-        let client_ip = client_ip_addr.to_string();
-
-        // Set VPN session on peer state (for firewall in datagram handler)
-        {
-            let (tun_tx, _) = tokio::sync::mpsc::unbounded_channel();
-            let mut ps = peer_state.lock().await;
-            ps.vpn_session = Some(VpnSession {
-                id: client_id.clone(),
-                client_ip: client_ip_addr,
-                tun_tx,
-                route_rx: None,
-                shutdown: None,
-                firewall: crate::vpn::vpn_handler::SessionFirewall::new(vec![]),
-                block_rx: None,
+        // Drain firewall block notifications (log only — can't send back on QUIC control stream from here)
+        if let Some(mut block_rx) = session.block_rx.take() {
+            tokio::spawn(async move {
+                while let Some((dst_ip, dst_port)) = block_rx.recv().await {
+                    tracing::debug!("[QUIC] VPN blocked: {}:{}", dst_ip, dst_port);
+                }
             });
         }
 
-        // Send vpn_opened response
-        let resp = serde_json::json!({
-            "type": "vpn_opened",
-            "clientIp": client_ip,
-            "serverIp": server_ip,
-            "mtu": 1400,
-        });
+        // Set VPN session on peer state (with firewall from JWT roles)
+        {
+            let mut ps = peer_state.lock().await;
+            ps.vpn_session = Some(session);
+        }
+
+        // Send vpn_opened response (with LAN routes for client-side route installation)
+        let resp = {
+            let vs = vpn_state.lock().await;
+            let ps = peer_state.lock().await;
+            crate::vpn::vpn_handler::vpn_opened_response(
+                ps.vpn_session.as_ref().unwrap(),
+                vs.pool.gateway_ip,
+                vs.pool.netmask,
+            )
+        };
         let resp_bytes = resp.to_string();
         let _ = send.write_all(&(resp_bytes.len() as u32).to_be_bytes()).await;
         let _ = send.write_all(resp_bytes.as_bytes()).await;
 
-        tracing::info!("[QUIC] VPN session opened for {client_id}: client={client_ip} server={server_ip}");
+        tracing::info!("[QUIC] VPN session opened for {client_id}: client={client_ip}");
 
         // Keep control stream alive
         let mut ctrl_buf = [0u8; 4096];

@@ -176,17 +176,6 @@ mod platform {
                 .args(["interface", "ipv4", "set", "subinterface", &config.name, &format!("mtu={mtu_str}"), "store=active"])
                 .status();
 
-            // Wait for Windows to register the adapter before configuring it
-            std::thread::sleep(std::time::Duration::from_secs(2));
-
-            // Set network profile to Private (retry once if adapter not ready)
-            let _ = std::process::Command::new("powershell")
-                .args(["-c", &format!(
-                    "try {{ Set-NetConnectionProfile -InterfaceAlias '{}' -NetworkCategory Private }} catch {{ Start-Sleep 2; Set-NetConnectionProfile -InterfaceAlias '{}' -NetworkCategory Private }}",
-                    config.name, config.name
-                )])
-                .status();
-
             // Enable forwarding on all interfaces (VPN + LAN)
             let iface_output = std::process::Command::new("netsh")
                 .args(["interface", "ipv4", "show", "interfaces"])

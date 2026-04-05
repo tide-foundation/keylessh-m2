@@ -813,7 +813,7 @@ async fn main() {
             tracing::info!("  STUN server: {}", stun_server);
             tracing::info!("  Gateway: {}", gateway_id);
 
-            let resolved = ResolvedConfig {
+            let mut resolved = ResolvedConfig {
                 stun_server,
                 gateway_id,
                 tc_path,
@@ -827,12 +827,34 @@ async fn main() {
             };
 
             if args.standalone {
-                // Standalone: single attempt, exit on failure
-                if let Err(e) = run_vpn(resolved).await {
-                    tracing::error!("VPN error: {}", e);
-                    eprintln!("\nPress Enter to exit...");
-                    let _ = std::io::Read::read(&mut std::io::stdin(), &mut [0u8]);
-                    std::process::exit(1);
+                // Standalone: auto-reconnect with backoff
+                let mut backoff_secs: u64 = 2;
+                loop {
+                    match run_vpn(resolved.clone()).await {
+                        Ok(()) => {
+                            tracing::info!("VPN disconnected cleanly");
+                            backoff_secs = 2;
+                        }
+                        Err(e) if e.contains("access denied") || e.contains("Access denied") => {
+                            tracing::error!("VPN access denied: {e}");
+                            eprintln!("\n*** VPN ACCESS DENIED ***");
+                            eprintln!("Your account does not have the required VPN role.");
+                            eprintln!("Ask your admin to assign the role, then re-login.");
+                            eprintln!("Re-opening browser login in 60s (or press Ctrl+C to exit)...\n");
+                            // Wait longer — role change requires a fresh token
+                            tokio::time::sleep(Duration::from_secs(60)).await;
+                            // Clear cached token so next attempt re-authenticates
+                            resolved.token = None;
+                            backoff_secs = 2;
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!("VPN error: {e}");
+                        }
+                    }
+                    tracing::info!("Reconnecting in {backoff_secs}s...");
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(30);
                 }
             } else {
                 // Agent mode: auto-reconnect with exponential backoff
@@ -1502,6 +1524,8 @@ async fn run_vpn(cfg: ResolvedConfig) -> Result<(), String> {
                         "vpn_error" => {
                             let message = parsed["message"].as_str().unwrap_or("unknown");
                             tracing::error!("VPN error from gateway: {}", message);
+                            eprintln!("\n*** VPN ACCESS DENIED: {} ***\n", message);
+                            vpn_ready.notify_one(); // unblock main task so it can see no config = error
                         }
                         "vpn_blocked" => {
                             let dst = parsed["destination"].as_str().unwrap_or("?");
@@ -1678,7 +1702,10 @@ async fn run_vpn(cfg: ResolvedConfig) -> Result<(), String> {
         }
     }
 
-    let vpn_cfg = vpn_config.lock().await.clone().unwrap();
+    let vpn_cfg = match vpn_config.lock().await.clone() {
+        Some(cfg) => cfg,
+        None => return Err("VPN access denied by gateway".into()),
+    };
 
     // Create TUN device
     tracing::info!("Creating TUN device: {} ({})", cfg.tun_name, vpn_cfg.client_ip);
@@ -2282,7 +2309,10 @@ async fn run_vpn_with_token(
                             *cfg = Some(VpnConfig { client_ip, server_ip, netmask, mtu, routes });
                             vpn_ready.notify_one();
                         }
-                        "vpn_error" => { agent_log(&format!("VPN error: {}", parsed["message"].as_str().unwrap_or("unknown"))); }
+                        "vpn_error" => {
+                            agent_log(&format!("VPN ACCESS DENIED: {}", parsed["message"].as_str().unwrap_or("unknown")));
+                            vpn_ready.notify_one();
+                        }
                         "vpn_blocked" => {
                             let dst = parsed["destination"].as_str().unwrap_or("?");
                             let port = parsed["port"].as_u64().unwrap_or(0);
@@ -2390,7 +2420,10 @@ async fn run_vpn_with_token(
         }
     }
 
-    let vpn_cfg = vpn_config.lock().await.clone().unwrap();
+    let vpn_cfg = match vpn_config.lock().await.clone() {
+        Some(cfg) => cfg,
+        None => return Err("VPN access denied by gateway".into()),
+    };
     agent_log(&format!("VPN connected: {} -> {} routes={:?}", vpn_cfg.client_ip, vpn_cfg.server_ip, vpn_cfg.routes));
 
     // Agent info is updated by the caller via the AgentState
