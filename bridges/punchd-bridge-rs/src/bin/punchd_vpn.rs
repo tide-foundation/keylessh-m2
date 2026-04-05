@@ -1900,9 +1900,8 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
                             let _ = sink.send(Message::Text(msg.to_string())).await;
                         }
                         "quic_address" => {
-                            // Gateway sent its QUIC address — use nativeAddress for VPN
-                            let addr_str = parsed["nativeAddress"].as_str()
-                                .or_else(|| parsed["address"].as_str());
+                            // Gateway sent its QUIC address
+                            let addr_str = parsed["address"].as_str();
                             if let Some(addr_str) = addr_str {
                                 if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
                                     tracing::info!("[QUIC-VPN] Gateway native QUIC address: {addr}");

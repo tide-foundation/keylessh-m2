@@ -73,95 +73,50 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
     tokio::spawn(async move {
         let mut reconnect_delay_ms: u64 = 1000;
 
-        // Bind UDP socket for QUIC/WebTransport, do STUN resolution, then start server
+        // Bind ONE UDP socket for STUN + QUIC (native quinn, no wtransport)
+        // Browsers use WebRTC, so wtransport is not needed.
         let quic_port = options.quic_port;
-        let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{quic_port}").parse().unwrap();
-        let std_socket = std::net::UdpSocket::bind(bind_addr)
-            .expect(&format!("Failed to bind UDP socket on port {quic_port}"));
+        let std_socket = std::net::UdpSocket::bind(format!("0.0.0.0:{quic_port}"))
+            .expect(&format!("Failed to bind QUIC port {quic_port}"));
         std_socket.set_nonblocking(true).expect("Failed to set nonblocking");
 
-        // Keep a clone for sending UDP punch packets (NAT hole-punching)
+        // Keep a clone for sending UDP punch packets
         let punch_socket = std_socket.try_clone()
             .expect("Failed to clone UDP socket for hole-punching");
 
-        // STUN resolution: discover our public (reflexive) address
+        // STUN resolution on the same socket
         let stun_server = options.ice_servers.first().cloned().unwrap_or_default();
         let quic_public_addr = if !stun_server.is_empty() {
-            let tokio_socket = tokio::net::UdpSocket::from_std(std_socket.try_clone()
-                .expect("Failed to clone UDP socket"))
-                .expect("Failed to convert to tokio socket");
-            match crate::quic::transport::stun_resolve(&tokio_socket, &stun_server).await {
+            let stun_clone = std_socket.try_clone().expect("Clone error");
+            let tokio_sock = tokio::net::UdpSocket::from_std(stun_clone).expect("Tokio socket error");
+            match crate::quic::transport::stun_resolve(&tokio_sock, &stun_server).await {
                 Ok(addr) => {
                     tracing::info!("[STUN] Reflexive address: {addr}");
                     Some(addr)
                 }
                 Err(e) => {
-                    tracing::warn!("[STUN] Resolution failed: {e} — using PUBLIC_URL fallback");
-                    None
-                }
-            }
-        } else {
-            tracing::info!("[STUN] No ICE servers configured — skipping STUN resolution");
-            None
-        };
-
-        // Start WebTransport server on the same socket (preserves NAT pinhole)
-        let wt_server = crate::quic::webtransport::WebTransportServer::new(
-            crate::quic::webtransport::WebTransportServerOptions {
-                port: quic_port,
-                listen_port: options.listen_port,
-                use_tls: options.use_tls,
-                gateway_id: options.gateway_id.clone(),
-                backends: options.backends.clone(),
-                auth: options.auth.clone(),
-                vpn_state: options.vpn_state.clone(),
-            },
-        );
-        let quic_cert_hash = match wt_server.run(Some(std_socket)).await {
-            Ok(hash) => hash,
-            Err(e) => {
-                tracing::error!("[WT] Failed to start WebTransport server: {e}");
-                tracing::warn!("[WT] WebTransport disabled — WebSocket relay only");
-                String::new()
-            }
-        };
-
-        // Start a separate quinn endpoint for native VPN clients (ALPN: "punchd")
-        // Bind socket first, STUN resolve, then pass to quinn (same pattern as wtransport)
-        let vpn_quic_port = quic_port + 1; // 7894
-        let vpn_std_socket = std::net::UdpSocket::bind(format!("0.0.0.0:{vpn_quic_port}"))
-            .expect(&format!("Failed to bind VPN QUIC port {vpn_quic_port}"));
-        vpn_std_socket.set_nonblocking(true).expect("Nonblocking error");
-
-        // STUN resolve on this socket to get reflexive address
-        let vpn_public_addr = if !stun_server.is_empty() {
-            let stun_clone = vpn_std_socket.try_clone().expect("Clone error");
-            let tokio_sock = tokio::net::UdpSocket::from_std(stun_clone).expect("Tokio socket error");
-            match crate::quic::transport::stun_resolve(&tokio_sock, &stun_server).await {
-                Ok(addr) => {
-                    tracing::info!("[STUN] Native VPN reflexive address: {addr}");
-                    Some(addr)
-                }
-                Err(e) => {
-                    tracing::warn!("[STUN] VPN STUN failed: {e}");
+                    tracing::warn!("[STUN] Resolution failed: {e}");
                     None
                 }
             }
         } else {
             None
         };
+        // VPN and browser QUIC share the same address now
+        let vpn_public_addr = quic_public_addr;
 
         // Create quinn endpoint on the SAME socket (preserves STUN NAT pinhole)
-        let (vpn_server_config, _vpn_cert_hash) = crate::quic::transport::make_server_config();
-        let vpn_runtime = quinn::default_runtime().expect("No runtime");
+        let (server_config, quic_cert_hash_raw) = crate::quic::transport::make_server_config();
+        let quic_cert_hash = quic_cert_hash_raw;
+        let runtime = quinn::default_runtime().expect("No runtime");
         match quinn::Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
-            Some(vpn_server_config),
-            vpn_runtime.wrap_udp_socket(vpn_std_socket).expect("Wrap error"),
-            vpn_runtime,
+            Some(server_config),
+            runtime.wrap_udp_socket(std_socket).expect("Wrap error"),
+            runtime,
         ) {
             Ok(endpoint) => {
-                tracing::info!("[QUIC] Native VPN endpoint listening on 0.0.0.0:{vpn_quic_port}");
+                tracing::info!("[QUIC] Native QUIC endpoint listening on 0.0.0.0:{quic_port}");
                 let opts = options.clone();
                 tokio::spawn(async move {
                     loop {
@@ -196,7 +151,7 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
                 });
             }
             Err(e) => {
-                tracing::error!("[QUIC] Failed to start VPN endpoint on port {vpn_quic_port}: {e}");
+                tracing::error!("[QUIC] Failed to start QUIC endpoint on port {quic_port}: {e}");
             }
         }
 
@@ -439,18 +394,12 @@ async fn connect_and_run(
                                         Some(addr) => addr.to_string(),
                                         None => format!("0.0.0.0:{quic_port}"),
                                     };
-                                    // Include native VPN QUIC address for VPN clients
-                                    let vpn_addr = match &vpn_public_addr {
-                                        Some(addr) => addr.to_string(),
-                                        None => format!("0.0.0.0:{}", quic_port + 1),
-                                    };
                                     let _ = signaling_tx.send(serde_json::json!({
                                         "type": "quic_address",
                                         "targetId": client_id,
                                         "fromId": options.gateway_id,
                                         "address": quic_addr,
                                         "certHash": quic_cert_hash,
-                                        "nativeAddress": vpn_addr,
                                     }));
                                 }
                             }
