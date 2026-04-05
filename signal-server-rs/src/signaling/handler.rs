@@ -140,17 +140,44 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                         }
                     }
                     "candidate" => {
-                        let target = parsed["targetId"].as_str().unwrap_or("");
+                        let mut target = parsed["targetId"].as_str().unwrap_or("").to_string();
                         let from = parsed["fromId"].as_str()
                             .or_else(|| registered_id.as_deref())
-                            .unwrap_or("unknown");
+                            .unwrap_or("unknown")
+                            .to_string();
+                        tracing::info!("[Signal] candidate from {from} targetId={target} is_gateway={is_gateway}");
+
+                        // If no targetId, resolve from pairing
+                        if target.is_empty() {
+                            if is_gateway {
+                                // Gateway sending candidate → find the paired client
+                                // Try to find any client paired with this gateway
+                                if let Some(id) = registered_id.as_deref() {
+                                    if let Some(gw) = state.registry.get_gateway(id) {
+                                        if let Some(client_id) = gw.paired_clients.iter().next() {
+                                            target = client_id.clone();
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Client sending candidate → find the paired gateway
+                                if let Some(id) = registered_id.as_deref() {
+                                    if let Some(client) = state.registry.get_client(id) {
+                                        if let Some(ref gw_id) = client.paired_gateway_id {
+                                            target = gw_id.clone();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         if !target.is_empty() {
                             let msg = serde_json::json!({
                                 "type": "candidate",
                                 "fromId": from,
                                 "candidate": parsed["candidate"],
                             });
-                            forward_to_peer(&state, target, &msg);
+                            forward_to_peer(&state, &target, &msg);
                         }
                     }
                     "sdp_offer" | "sdp_answer" => {
@@ -158,6 +185,7 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                         let from = parsed["fromId"].as_str()
                             .or_else(|| registered_id.as_deref())
                             .unwrap_or("unknown");
+                        tracing::info!("[Signal] {msg_type} from {from} to {target}");
                         if !target.is_empty() {
                             let msg = serde_json::json!({
                                 "type": msg_type,
@@ -296,10 +324,11 @@ fn auto_pair_client(state: &AppState, client_id: &str) {
 }
 
 fn forward_to_peer(state: &AppState, target_id: &str, msg: &serde_json::Value) {
+    let msg_type = msg["type"].as_str().unwrap_or("unknown");
     let text = serde_json::to_string(msg).unwrap_or_default();
     let sent = state.registry.send_to_gateway(target_id, Message::Text(text.clone().into()))
         || state.registry.send_to_client(target_id, Message::Text(text.into()));
     if !sent {
-        tracing::warn!("[Signal] Target {target_id} not found for forwarding");
+        tracing::warn!("[Signal] Target {target_id} not found for {msg_type}");
     }
 }
