@@ -473,6 +473,7 @@ mod win_service {
                         turn_secret,
                         tun_name: "punchd-vpn0".to_string(),
                         default_route,
+                        token: args.token.clone(),
                     };
 
                     let resolved = Arc::new(resolved);
@@ -819,6 +820,7 @@ async fn main() {
                 turn_secret,
                 tun_name: args.tun_name.clone(),
                 default_route,
+                token: args.token.clone(),
             };
 
             if args.standalone {
@@ -1006,6 +1008,7 @@ async fn run_agent() -> Result<(), String> {
                                             turn_secret,
                                             tun_name: tun_clone,
                                             default_route: false,
+                                            token: Some(token.clone()),
                                         };
 
                                         match run_vpn_with_token(cfg, token, shutdown_rx).await {
@@ -1105,6 +1108,7 @@ struct ResolvedConfig {
     turn_secret: Option<String>,
     tun_name: String,
     default_route: bool,
+    token: Option<String>,
 }
 
 // ── OIDC browser login ──────────────────────────────────────────────
@@ -1221,25 +1225,15 @@ fn generate_dpop_proof_with_nonce(method: &str, url: &str, nonce: &str) -> Resul
 }
 
 async fn oidc_login(tc: &TcConfig) -> Result<String, String> {
-    let base = tc.auth_server_url.trim_end_matches('/');
-    let realm_path = format!("{base}/realms/{}/protocol/openid-connect", tc.realm);
-    let auth_url = format!("{realm_path}/auth");
-    let token_url = format!("{realm_path}/token");
-    let redirect_uri = format!("http://localhost:{CALLBACK_PORT}/callback");
-
-    // Generate state for CSRF protection
-    let state: String = (0..16)
-        .map(|_| format!("{:02x}", rand::Rng::random::<u8>(&mut rand::rng())))
-        .collect();
-
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("client_id", &tc.resource)
-        .append_pair("redirect_uri", &redirect_uri)
-        .append_pair("response_type", "code")
-        .append_pair("scope", "openid")
-        .append_pair("state", &state)
-        .finish();
-    let login_url = format!("{auth_url}?{query}");
+    // Open the KeyleSSH web app for auth — it handles TideCloak DPoP through Heimdall.
+    // After login, the web app redirects to localhost with the access token.
+    let app_url = std::env::var("SERVER_URL")
+        .unwrap_or_else(|_| "https://demo.keylessh.com".to_string());
+    let login_url = format!(
+        "{}/app/vpn-auth?callback=http://localhost:{}/token",
+        app_url.trim_end_matches('/'),
+        CALLBACK_PORT,
+    );
 
     tracing::info!("Opening browser for login...");
     tracing::info!("If the browser doesn't open, visit:");
@@ -1256,124 +1250,77 @@ async fn oidc_login(tc: &TcConfig) -> Result<String, String> {
     tracing::info!("Waiting for login callback on port {CALLBACK_PORT}...");
 
     // Accept one connection
-    let (stream, _) = tokio::time::timeout(Duration::from_secs(120), listener.accept())
-        .await
-        .map_err(|_| "Login timeout (120s)".to_string())?
-        .map_err(|e| format!("Accept error: {e}"))?;
+    // Wait for the browser to send the token back
+    // The web app authenticates via TideCloak/Heimdall and POSTs the token to us
+    // Accept requests: GET /token?token=... or POST /token with body token=...
+    loop {
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(120), listener.accept())
+            .await
+            .map_err(|_| "Login timeout (120s)".to_string())?
+            .map_err(|e| format!("Accept error: {e}"))?;
 
-    // Read the HTTP request
-    let mut stream = stream;
-    let mut buf = vec![0u8; 4096];
-    let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
-        .await
-        .map_err(|e| format!("Read error: {e}"))?;
-    let request = String::from_utf8_lossy(&buf[..n]);
+        let mut stream = stream;
+        let mut buf = vec![0u8; 16384];
+        let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
+            .await
+            .map_err(|e| format!("Read error: {e}"))?;
+        let request = String::from_utf8_lossy(&buf[..n]).to_string();
 
-    // Extract the code from GET /callback?code=...&state=...
-    let first_line = request.lines().next().unwrap_or("");
-    let path = first_line.split_whitespace().nth(1).unwrap_or("");
-    let query = path.split('?').nth(1).unwrap_or("");
+        let first_line = request.lines().next().unwrap_or("");
+        let path = first_line.split_whitespace().nth(1).unwrap_or("");
 
-    let mut code = None;
-    let mut recv_state = None;
-    for pair in query.split('&') {
-        let mut kv = pair.splitn(2, '=');
-        match (kv.next(), kv.next()) {
-            (Some("code"), Some(v)) => code = Some(urldecoded(v)),
-            (Some("state"), Some(v)) => recv_state = Some(urldecoded(v)),
-            _ => {}
+        // CORS preflight
+        if first_line.starts_with("OPTIONS") {
+            let resp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
+            continue;
         }
-    }
 
-    // Send success response to browser
-    let html = "<html><body><h2>Login successful!</h2><p>You can close this tab and return to the terminal.</p><script>window.close()</script></body></html>";
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
-        html.len()
-    );
-    let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
+        // Extract token from query string or POST body
+        let mut token = None;
 
-    // Validate state
-    if recv_state.as_deref() != Some(&state) {
-        return Err("OIDC state mismatch — possible CSRF attack".into());
-    }
-
-    let code = code.ok_or("No authorization code in callback")?;
-    tracing::info!("Authorization code received, exchanging for token...");
-
-    // Generate DPoP proof (required by TideCloak)
-    let dpop_proof = generate_dpop_proof("POST", &token_url)?;
-
-    // Exchange code for tokens
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("grant_type", "authorization_code")
-        .append_pair("client_id", &tc.resource)
-        .append_pair("code", &code)
-        .append_pair("redirect_uri", &redirect_uri)
-        .finish();
-
-    let resp = client
-        .post(&token_url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("DPoP", &dpop_proof)
-        .body(body.clone())
-        .send()
-        .await
-        .map_err(|e| format!("Token exchange error: {e}"))?;
-
-    let status = resp.status();
-
-    // Check for DPoP-Nonce header (server may require nonce on retry)
-    let dpop_nonce = resp.headers().get("dpop-nonce")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let text = resp.text().await.map_err(|e| format!("Read error: {e}"))?;
-
-    if !status.is_success() {
-        if let Some(nonce) = dpop_nonce {
-            // Retry with nonce
-            tracing::info!("[QUIC-VPN] Retrying token exchange with DPoP nonce");
-            let dpop_proof2 = generate_dpop_proof_with_nonce("POST", &token_url, &nonce)?;
-            let resp2 = client
-                .post(&token_url)
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .header("DPoP", &dpop_proof2)
-                .body(body)
-                .send()
-                .await
-                .map_err(|e| format!("Token exchange retry error: {e}"))?;
-
-            let status2 = resp2.status();
-            let text2 = resp2.text().await.map_err(|e| format!("Read error: {e}"))?;
-            if !status2.is_success() {
-                return Err(format!("Token exchange retry failed ({status2}): {text2}"));
+        // Try query string: /token?token=...
+        if let Some(query) = path.split('?').nth(1) {
+            for pair in query.split('&') {
+                if let Some(val) = pair.strip_prefix("token=") {
+                    token = Some(urldecoded(val));
+                }
             }
-            // Parse from retry response
-            #[derive(Deserialize)]
-            struct TokenResp2 { access_token: String }
-            let tokens: TokenResp2 = serde_json::from_str(&text2)
-                .map_err(|e| format!("Invalid token response: {e}"))?;
-            return Ok(tokens.access_token);
         }
-        tracing::error!("[QUIC-VPN] Token exchange failed: {text}");
-        return Err(format!("Token exchange failed ({status}): {text}"));
-    }
 
-    #[derive(Deserialize)]
-    struct TokenResp {
-        access_token: String,
-    }
-    let tokens: TokenResp =
-        serde_json::from_str(&text).map_err(|e| format!("Invalid token response: {e}"))?;
+        // Try POST body: token=...
+        if token.is_none() {
+            if let Some(body_start) = request.find("\r\n\r\n") {
+                let body = &request[body_start + 4..];
+                // Could be form-encoded or plain token
+                if body.contains("token=") {
+                    for pair in body.split('&') {
+                        if let Some(val) = pair.strip_prefix("token=") {
+                            token = Some(urldecoded(val.trim()));
+                        }
+                    }
+                } else if !body.is_empty() {
+                    // Plain token in body
+                    token = Some(body.trim().to_string());
+                }
+            }
+        }
 
-    tracing::info!("Login successful!");
-    Ok(tokens.access_token)
+        // Send response
+        let html = "<html><body><h2>VPN Login Successful!</h2><p>You can close this tab.</p><script>window.close()</script></body></html>";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+            html.len()
+        );
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
+
+        if let Some(t) = token {
+            if !t.is_empty() {
+                tracing::info!("Token received from browser!");
+                return Ok(t);
+            }
+        }
+    }
 }
 
 fn urldecoded(s: &str) -> String {
@@ -1870,7 +1817,12 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
     let tc = load_tc_config(&cfg.tc_path, &cfg.tc_b64)?;
     tracing::info!("[QUIC-VPN] TideCloak: realm={}, auth={}", tc.realm, tc.auth_server_url);
 
-    let token = oidc_login(&tc).await?;
+    let token = if let Some(ref t) = cfg.token {
+        tracing::info!("[QUIC-VPN] Using provided access token");
+        t.clone()
+    } else {
+        oidc_login(&tc).await?
+    };
 
     // Connect to signaling server
     tracing::info!("[QUIC-VPN] Connecting to signaling server...");

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Punchd VPN - Authentication</title>
+  <style>
+    body { font-family: system-ui; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #1a1a2e; color: #eee; }
+    .card { background: #16213e; padding: 2rem; border-radius: 12px; text-align: center; max-width: 400px; }
+    .spinner { border: 3px solid #333; border-top: 3px solid #4fc3f7; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 1rem auto; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .success { color: #4caf50; }
+    .error { color: #f44336; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Punchd VPN</h2>
+    <div id="status">
+      <div class="spinner"></div>
+      <p>Sending token to VPN client...</p>
+    </div>
+  </div>
+  <script>
+    (async function() {
+      const params = new URLSearchParams(window.location.search);
+      const callback = params.get("callback");
+      const status = document.getElementById("status");
+
+      if (!callback) {
+        status.innerHTML = '<p class="error">No callback URL specified.</p>';
+        return;
+      }
+
+      // Get token from localStorage (set by TideCloak auth)
+      const token = localStorage.getItem("access_token");
+      if (!token) {
+        status.innerHTML = '<p class="error">Not logged in. Please log in first.</p><p><a href="/app" style="color:#4fc3f7">Go to Dashboard</a></p>';
+        return;
+      }
+
+      try {
+        // Post token to VPN client's local server
+        await fetch(callback, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: token,
+          mode: "no-cors",
+        });
+        status.innerHTML = '<p class="success">Token sent to VPN client!</p><p>You can close this tab.</p>';
+        setTimeout(() => window.close(), 2000);
+      } catch (e) {
+        status.innerHTML = '<p class="error">Failed to send token: ' + e.message + '</p><p>Make sure the VPN client is running.</p>';
+      }
+    })();
+  </script>
+</body>
+</html>
