@@ -88,15 +88,20 @@ export async function connectWebRtcSsh(options: WebRtcSshOptions): Promise<WebSo
 
             pc.onicecandidate = (e) => {
               if (e.candidate) {
-                sigWs.send(JSON.stringify({
-                  type: "candidate",
-                  targetId: msg.gateway?.id,
-                  fromId: clientId,
-                  candidate: {
-                    candidate: e.candidate.candidate,
-                    mid: e.candidate.sdpMid || "",
-                  },
-                }));
+                console.log("[SSH-WebRTC] Sending ICE candidate, WS state:", sigWs.readyState);
+                if (sigWs.readyState === WebSocket.OPEN) {
+                  sigWs.send(JSON.stringify({
+                    type: "candidate",
+                    targetId: msg.gateway?.id,
+                    fromId: clientId,
+                    candidate: {
+                      candidate: e.candidate.candidate,
+                      mid: e.candidate.sdpMid || "",
+                    },
+                  }));
+                } else {
+                  console.warn("[SSH-WebRTC] Cannot send candidate — WS not open:", sigWs.readyState);
+                }
               }
             };
 
