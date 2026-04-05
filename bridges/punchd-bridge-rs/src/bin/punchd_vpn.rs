@@ -87,6 +87,10 @@ struct Args {
     /// Uninstall the Windows Service
     #[arg(long, default_value_t = false)]
     uninstall_service: bool,
+
+    /// Pre-authenticated access token (skip OIDC login)
+    #[arg(long)]
+    token: Option<String>,
 }
 
 /// Saved config file (vpn-config.toml next to the exe)
@@ -1184,6 +1188,38 @@ fn generate_dpop_proof(method: &str, url: &str) -> Result<String, String> {
     Ok(format!("{signing_input}.{sig_b64}"))
 }
 
+fn generate_dpop_proof_with_nonce(method: &str, url: &str, nonce: &str) -> Result<String, String> {
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use base64::Engine;
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
+        .map_err(|e| format!("Key gen error: {e}"))?;
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+        .map_err(|e| format!("Key load error: {e}"))?;
+    let pub_key_bytes = key_pair.public_key().as_ref();
+    let x = b64url.encode(pub_key_bytes);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+
+    let header = serde_json::json!({
+        "typ": "dpop+jwt", "alg": "EdDSA",
+        "jwk": { "kty": "OKP", "crv": "Ed25519", "x": x }
+    });
+    let payload = serde_json::json!({
+        "jti": uuid::Uuid::new_v4().to_string(),
+        "htm": method, "htu": url, "iat": now, "nonce": nonce,
+    });
+
+    let header_b64 = b64url.encode(serde_json::to_string(&header).unwrap().as_bytes());
+    let payload_b64 = b64url.encode(serde_json::to_string(&payload).unwrap().as_bytes());
+    let signing_input = format!("{header_b64}.{payload_b64}");
+    let signature = key_pair.sign(signing_input.as_bytes());
+    let sig_b64 = b64url.encode(signature.as_ref());
+    Ok(format!("{signing_input}.{sig_b64}"))
+}
+
 async fn oidc_login(tc: &TcConfig) -> Result<String, String> {
     let base = tc.auth_server_url.trim_end_matches('/');
     let realm_path = format!("{base}/realms/{}/protocol/openid-connect", tc.realm);
@@ -1285,15 +1321,47 @@ async fn oidc_login(tc: &TcConfig) -> Result<String, String> {
         .post(&token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("DPoP", &dpop_proof)
-        .body(body)
+        .body(body.clone())
         .send()
         .await
         .map_err(|e| format!("Token exchange error: {e}"))?;
 
     let status = resp.status();
+
+    // Check for DPoP-Nonce header (server may require nonce on retry)
+    let dpop_nonce = resp.headers().get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     let text = resp.text().await.map_err(|e| format!("Read error: {e}"))?;
 
     if !status.is_success() {
+        if let Some(nonce) = dpop_nonce {
+            // Retry with nonce
+            tracing::info!("[QUIC-VPN] Retrying token exchange with DPoP nonce");
+            let dpop_proof2 = generate_dpop_proof_with_nonce("POST", &token_url, &nonce)?;
+            let resp2 = client
+                .post(&token_url)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("DPoP", &dpop_proof2)
+                .body(body)
+                .send()
+                .await
+                .map_err(|e| format!("Token exchange retry error: {e}"))?;
+
+            let status2 = resp2.status();
+            let text2 = resp2.text().await.map_err(|e| format!("Read error: {e}"))?;
+            if !status2.is_success() {
+                return Err(format!("Token exchange retry failed ({status2}): {text2}"));
+            }
+            // Parse from retry response
+            #[derive(Deserialize)]
+            struct TokenResp2 { access_token: String }
+            let tokens: TokenResp2 = serde_json::from_str(&text2)
+                .map_err(|e| format!("Invalid token response: {e}"))?;
+            return Ok(tokens.access_token);
+        }
+        tracing::error!("[QUIC-VPN] Token exchange failed: {text}");
         return Err(format!("Token exchange failed ({status}): {text}"));
     }
 
