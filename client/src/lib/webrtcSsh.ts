@@ -116,6 +116,7 @@ export async function connectWebRtcSsh(options: WebRtcSshOptions): Promise<WebSo
             // Listen for ALL messages on control channel
             control.onmessage = (msgEvent) => {
               try {
+                console.log("[SSH-WebRTC] DC message:", typeof msgEvent.data === "string" ? msgEvent.data.substring(0, 100) : "binary");
                 const data = JSON.parse(msgEvent.data);
 
                 // Gateway sends capabilities first — ignore
