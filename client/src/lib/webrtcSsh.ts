@@ -243,7 +243,16 @@ function createDCWebSocket(
   const prevHandler = control.onmessage;
   control.onmessage = (event) => {
     try {
-      const msg = JSON.parse(event.data);
+      // Decode binary to text (gateway sends binary ArrayBuffers)
+      let text: string;
+      if (typeof event.data === "string") {
+        text = event.data;
+      } else if (event.data instanceof ArrayBuffer) {
+        text = new TextDecoder().decode(event.data);
+      } else {
+        return;
+      }
+      const msg = JSON.parse(text);
       if (msg.id !== tunnelId) {
         if (prevHandler) prevHandler.call(control, event);
         return;
