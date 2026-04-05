@@ -2108,9 +2108,16 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
 }
 
 /// Try TURN relay when direct QUIC connection fails.
+///
+/// Architecture: quinn can't speak TURN natively, so we:
+/// 1. Allocate a relay on the TURN server (with ChannelBind)
+/// 2. Start a local UDP proxy (localhost) that wraps/unwraps ChannelData
+/// 3. Create a new quinn endpoint that connects through the proxy
+///
+/// quinn -> localhost:proxy -> TURN server -> gateway
 async fn try_turn_relay(
     cfg: &ResolvedConfig,
-    quic_endpoint: &quinn::Endpoint,
+    _quic_endpoint: &quinn::Endpoint, // unused — we create a new endpoint for TURN
     gateway_addr: std::net::SocketAddr,
     peer_id: &str,
 ) -> Result<quinn::Connection, String> {
@@ -2123,12 +2130,13 @@ async fn try_turn_relay(
 
     let (username, credential) = turn_client::generate_credentials(turn_secret, peer_id);
 
-    // Separate socket for TURN since quinn owns its socket
+    // Separate UDP socket for TURN control
     let turn_socket = Arc::new(
         tokio::net::UdpSocket::bind("0.0.0.0:0").await
             .map_err(|e| format!("TURN socket bind: {e}"))?
     );
 
+    // Allocate relay + bind channel for the gateway peer
     let allocation = turn_client::allocate(
         turn_socket.clone(),
         turn_server,
@@ -2139,12 +2147,20 @@ async fn try_turn_relay(
 
     let relay_addr = allocation.relay_addr();
     tracing::info!("[QUIC-VPN] TURN relay allocated: {relay_addr}");
-    tracing::info!("[QUIC-VPN] Connecting QUIC through TURN relay...");
 
-    // Connect QUIC to the gateway through TURN
-    // The gateway sees the connection coming from the TURN relay address
-    let conn = quic_endpoint
-        .connect(gateway_addr, "punchd-gateway")
+    // Start local UDP proxy: quinn <-> ChannelData <-> TURN server
+    let (proxy_addr, _shutdown_tx) = turn_client::start_turn_proxy(allocation).await?;
+
+    tracing::info!("[QUIC-VPN] Connecting QUIC through TURN proxy {proxy_addr}...");
+
+    // Create a new quinn endpoint that sends to the proxy
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap())
+        .map_err(|e| format!("QUIC TURN endpoint: {e}"))?;
+    endpoint.set_default_client_config(quic_transport::make_client_config());
+
+    // Connect to the proxy address — proxy forwards to TURN -> gateway
+    let conn = endpoint
+        .connect(proxy_addr, "punchd-gateway")
         .map_err(|e| format!("QUIC connect via TURN: {e}"))?
         .await
         .map_err(|e| format!("QUIC via TURN failed: {e}"))?;
