@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Punchd VPN - Authentication</title>
+  <style>
+    body { font-family: system-ui; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #1a1a2e; color: #eee; }
+    .card { background: #16213e; padding: 2rem; border-radius: 12px; text-align: center; max-width: 400px; }
+    .spinner { border: 3px solid #333; border-top: 3px solid #4fc3f7; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 1rem auto; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .success { color: #4caf50; }
+    .error { color: #f44336; }
+    a { color: #4fc3f7; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Punchd VPN</h2>
+    <div id="status">
+      <div class="spinner"></div>
+      <p>Checking authentication...</p>
+    </div>
+  </div>
+  <script>
+    (async function() {
+      const params = new URLSearchParams(window.location.search);
+      const callback = params.get("callback");
+      const status = document.getElementById("status");
+
+      if (!callback) {
+        status.innerHTML = '<p class="error">No callback URL. Run the VPN client first.</p>';
+        return;
+      }
+
+      // Check if already logged in
+      let token = localStorage.getItem("access_token");
+
+      if (!token) {
+        // Not logged in — open the app in a popup/redirect for login
+        status.innerHTML = '<div class="spinner"></div><p>Please log in...</p><p>A login window will open.</p>';
+
+        // Open the app login page
+        const loginWindow = window.open("/app", "vpn-login", "width=500,height=700");
+
+        // Poll for token (the app stores it in localStorage after login)
+        let attempts = 0;
+        const maxAttempts = 120; // 2 minutes
+        while (!token && attempts < maxAttempts) {
+          await new Promise(r => setTimeout(r, 1000));
+          token = localStorage.getItem("access_token");
+          attempts++;
+        }
+
+        if (loginWindow) loginWindow.close();
+
+        if (!token) {
+          status.innerHTML = '<p class="error">Login timed out.</p><p><a href="javascript:location.reload()">Try again</a></p>';
+          return;
+        }
+      }
+
+      // Send token to VPN client
+      status.innerHTML = '<div class="spinner"></div><p>Sending token to VPN client...</p>';
+
+      try {
+        await fetch(callback, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: token,
+          mode: "no-cors",
+        });
+        status.innerHTML = '<p class="success">VPN authenticated!</p><p>You can close this tab.</p>';
+        setTimeout(() => window.close(), 2000);
+      } catch (e) {
+        status.innerHTML = '<p class="error">Failed to send token to VPN client.</p><p>Make sure the VPN client is running.</p><p><a href="javascript:location.reload()">Retry</a></p>';
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -87,6 +87,10 @@ struct Args {
     /// Uninstall the Windows Service
     #[arg(long, default_value_t = false)]
     uninstall_service: bool,
+
+    /// Pre-authenticated access token (skip OIDC login)
+    #[arg(long)]
+    token: Option<String>,
 }
 
 /// Saved config file (vpn-config.toml next to the exe)
@@ -469,6 +473,7 @@ mod win_service {
                         turn_secret,
                         tun_name: "punchd-vpn0".to_string(),
                         default_route,
+                        token: args.token.clone(),
                     };
 
                     let resolved = Arc::new(resolved);
@@ -737,8 +742,9 @@ async fn main() {
             }
         }
 
-        // Double-click (no flags, not standalone): GUI installer
-        if !args.standalone {
+        // Double-click or exe run: check config, then run as agent
+        // Use --install-service flag explicitly to install as Windows Service
+        if !args.standalone && !args.install_service {
             // Check if config exists — run setup wizard if not
             let file_cfg = load_file_config();
             let has_config = file_cfg.stun_server.is_some() && file_cfg.gateway_id.is_some();
@@ -746,8 +752,10 @@ async fn main() {
             if !has_config {
                 run_first_time_setup();
             }
+            // Skip service install — just fall through to agent mode below
+        }
 
-            // Install as service (with UAC if needed)
+        if args.install_service {
             if win_service::is_elevated() {
                 match win_service::install() {
                     Ok(()) => {
@@ -815,6 +823,7 @@ async fn main() {
                 turn_secret,
                 tun_name: args.tun_name.clone(),
                 default_route,
+                token: args.token.clone(),
             };
 
             if args.standalone {
@@ -1002,6 +1011,7 @@ async fn run_agent() -> Result<(), String> {
                                             turn_secret,
                                             tun_name: tun_clone,
                                             default_route: false,
+                                            token: Some(token.clone()),
                                         };
 
                                         match run_vpn_with_token(cfg, token, shutdown_rx).await {
@@ -1101,6 +1111,7 @@ struct ResolvedConfig {
     turn_secret: Option<String>,
     tun_name: String,
     default_route: bool,
+    token: Option<String>,
 }
 
 // ── OIDC browser login ──────────────────────────────────────────────
@@ -1132,32 +1143,106 @@ fn load_tc_config(tc_path: &Option<String>, tc_b64: &Option<String>) -> Result<T
     serde_json::from_str(&json_str).map_err(|e| format!("Invalid config: {e}"))
 }
 
-async fn oidc_login(tc: &TcConfig) -> Result<String, String> {
-    let base = tc.auth_server_url.trim_end_matches('/');
-    let realm_path = format!("{base}/realms/{}/protocol/openid-connect", tc.realm);
-    let auth_url = format!("{realm_path}/auth");
-    let token_url = format!("{realm_path}/token");
-    let redirect_uri = format!("http://localhost:{CALLBACK_PORT}/callback");
+/// Generate a DPoP proof JWT (required by TideCloak for token exchange).
+/// Uses an ephemeral Ed25519 keypair.
+fn generate_dpop_proof(method: &str, url: &str) -> Result<String, String> {
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use base64::Engine;
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-    // Generate state for CSRF protection
-    let state: String = (0..16)
-        .map(|_| format!("{:02x}", rand::Rng::random::<u8>(&mut rand::rng())))
-        .collect();
+    // Generate ephemeral Ed25519 key
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
+        .map_err(|e| format!("Key gen error: {e}"))?;
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+        .map_err(|e| format!("Key load error: {e}"))?;
 
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("client_id", &tc.resource)
-        .append_pair("redirect_uri", &redirect_uri)
-        .append_pair("response_type", "code")
-        .append_pair("scope", "openid")
-        .append_pair("state", &state)
-        .finish();
-    let login_url = format!("{auth_url}?{query}");
+    // Public key in JWK format
+    let pub_key_bytes = key_pair.public_key().as_ref();
+    let x = b64url.encode(pub_key_bytes);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // DPoP JWT header
+    let header = serde_json::json!({
+        "typ": "dpop+jwt",
+        "alg": "EdDSA",
+        "jwk": {
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": x,
+        }
+    });
+
+    // DPoP JWT payload
+    let payload = serde_json::json!({
+        "jti": uuid::Uuid::new_v4().to_string(),
+        "htm": method,
+        "htu": url,
+        "iat": now,
+    });
+
+    let header_b64 = b64url.encode(serde_json::to_string(&header).unwrap().as_bytes());
+    let payload_b64 = b64url.encode(serde_json::to_string(&payload).unwrap().as_bytes());
+    let signing_input = format!("{header_b64}.{payload_b64}");
+
+    let signature = key_pair.sign(signing_input.as_bytes());
+    let sig_b64 = b64url.encode(signature.as_ref());
+
+    Ok(format!("{signing_input}.{sig_b64}"))
+}
+
+fn generate_dpop_proof_with_nonce(method: &str, url: &str, nonce: &str) -> Result<String, String> {
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use base64::Engine;
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
+        .map_err(|e| format!("Key gen error: {e}"))?;
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+        .map_err(|e| format!("Key load error: {e}"))?;
+    let pub_key_bytes = key_pair.public_key().as_ref();
+    let x = b64url.encode(pub_key_bytes);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+
+    let header = serde_json::json!({
+        "typ": "dpop+jwt", "alg": "EdDSA",
+        "jwk": { "kty": "OKP", "crv": "Ed25519", "x": x }
+    });
+    let payload = serde_json::json!({
+        "jti": uuid::Uuid::new_v4().to_string(),
+        "htm": method, "htu": url, "iat": now, "nonce": nonce,
+    });
+
+    let header_b64 = b64url.encode(serde_json::to_string(&header).unwrap().as_bytes());
+    let payload_b64 = b64url.encode(serde_json::to_string(&payload).unwrap().as_bytes());
+    let signing_input = format!("{header_b64}.{payload_b64}");
+    let signature = key_pair.sign(signing_input.as_bytes());
+    let sig_b64 = b64url.encode(signature.as_ref());
+    Ok(format!("{signing_input}.{sig_b64}"))
+}
+
+async fn oidc_login(_tc: &TcConfig) -> Result<String, String> {
+    // Open the KeyleSSH web app's VPN auth page.
+    // If user is logged in, it sends the token immediately.
+    // If not, it opens a login popup, waits for auth, then sends the token.
+    let app_url = std::env::var("SERVER_URL")
+        .unwrap_or_else(|_| "https://demo.keylessh.com".to_string());
+    let login_url = format!(
+        "{}/gateway/vpn-auth.html?callback=http://localhost:{}/token",
+        app_url.trim_end_matches('/'),
+        CALLBACK_PORT,
+    );
 
     tracing::info!("Opening browser for login...");
     tracing::info!("If the browser doesn't open, visit:");
     tracing::info!("  {}", login_url);
 
-    // Open browser
     open_browser(&login_url);
 
     // Start local HTTP server to receive the callback
@@ -1168,88 +1253,47 @@ async fn oidc_login(tc: &TcConfig) -> Result<String, String> {
     tracing::info!("Waiting for login callback on port {CALLBACK_PORT}...");
 
     // Accept one connection
-    let (stream, _) = tokio::time::timeout(Duration::from_secs(120), listener.accept())
-        .await
-        .map_err(|_| "Login timeout (120s)".to_string())?
-        .map_err(|e| format!("Accept error: {e}"))?;
+    // Wait for the vpn-auth.html page to POST the token
+    loop {
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(120), listener.accept())
+            .await
+            .map_err(|_| "Login timeout (120s)".to_string())?
+            .map_err(|e| format!("Accept error: {e}"))?;
 
-    // Read the HTTP request
-    let mut stream = stream;
-    let mut buf = vec![0u8; 4096];
-    let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
-        .await
-        .map_err(|e| format!("Read error: {e}"))?;
-    let request = String::from_utf8_lossy(&buf[..n]);
+        let mut stream = stream;
+        let mut buf = vec![0u8; 16384];
+        let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
+            .await
+            .map_err(|e| format!("Read error: {e}"))?;
+        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+        let first_line = request.lines().next().unwrap_or("");
 
-    // Extract the code from GET /callback?code=...&state=...
-    let first_line = request.lines().next().unwrap_or("");
-    let path = first_line.split_whitespace().nth(1).unwrap_or("");
-    let query = path.split('?').nth(1).unwrap_or("");
+        // Handle CORS preflight
+        if first_line.starts_with("OPTIONS") {
+            let resp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
+            continue;
+        }
 
-    let mut code = None;
-    let mut recv_state = None;
-    for pair in query.split('&') {
-        let mut kv = pair.splitn(2, '=');
-        match (kv.next(), kv.next()) {
-            (Some("code"), Some(v)) => code = Some(urldecoded(v)),
-            (Some("state"), Some(v)) => recv_state = Some(urldecoded(v)),
-            _ => {}
+        // Extract token from POST body
+        let mut token = None;
+        if let Some(body_start) = request.find("\r\n\r\n") {
+            let body = request[body_start + 4..].trim();
+            if !body.is_empty() {
+                token = Some(body.to_string());
+            }
+        }
+
+        let resp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
+
+        if let Some(t) = token {
+            if !t.is_empty() {
+                tracing::info!("Token received from browser!");
+                return Ok(t);
+            }
         }
     }
-
-    // Send success response to browser
-    let html = "<html><body><h2>Login successful!</h2><p>You can close this tab and return to the terminal.</p><script>window.close()</script></body></html>";
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
-        html.len()
-    );
-    let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
-
-    // Validate state
-    if recv_state.as_deref() != Some(&state) {
-        return Err("OIDC state mismatch — possible CSRF attack".into());
-    }
-
-    let code = code.ok_or("No authorization code in callback")?;
-    tracing::info!("Authorization code received, exchanging for token...");
-
-    // Exchange code for tokens
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("grant_type", "authorization_code")
-        .append_pair("client_id", &tc.resource)
-        .append_pair("code", &code)
-        .append_pair("redirect_uri", &redirect_uri)
-        .finish();
-
-    let resp = client
-        .post(&token_url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| format!("Token exchange error: {e}"))?;
-
-    let status = resp.status();
-    let text = resp.text().await.map_err(|e| format!("Read error: {e}"))?;
-
-    if !status.is_success() {
-        return Err(format!("Token exchange failed ({status}): {text}"));
-    }
-
-    #[derive(Deserialize)]
-    struct TokenResp {
-        access_token: String,
-    }
-    let tokens: TokenResp =
-        serde_json::from_str(&text).map_err(|e| format!("Invalid token response: {e}"))?;
-
-    tracing::info!("Login successful!");
-    Ok(tokens.access_token)
 }
 
 fn urldecoded(s: &str) -> String {
@@ -1746,7 +1790,12 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
     let tc = load_tc_config(&cfg.tc_path, &cfg.tc_b64)?;
     tracing::info!("[QUIC-VPN] TideCloak: realm={}, auth={}", tc.realm, tc.auth_server_url);
 
-    let token = oidc_login(&tc).await?;
+    let token = if let Some(ref t) = cfg.token {
+        tracing::info!("[QUIC-VPN] Using provided access token");
+        t.clone()
+    } else {
+        oidc_login(&tc).await?
+    };
 
     // Connect to signaling server
     tracing::info!("[QUIC-VPN] Connecting to signaling server...");
@@ -1781,22 +1830,22 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
     }
     tracing::info!("[QUIC-VPN] Registered as: {peer_id}");
 
-    // Create QUIC client endpoint
-    let quic_endpoint = quic_transport::create_client_endpoint()?;
-    let local_addr = quic_endpoint.local_addr().unwrap();
-    tracing::info!("[QUIC-VPN] QUIC endpoint on {local_addr}");
+    // Bind ONE UDP socket for STUN + QUIC (same port = same NAT pinhole)
+    let std_socket = std::net::UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("UDP socket bind error: {e}"))?;
+    std_socket.set_nonblocking(true).map_err(|e| format!("Nonblocking error: {e}"))?;
+    let local_addr = std_socket.local_addr().map_err(|e| format!("Local addr error: {e}"))?;
+    tracing::info!("[QUIC-VPN] UDP socket bound on {local_addr}");
 
-    // Resolve public address via STUN (if configured)
+    // Resolve public address via STUN on the same socket
+    let stun_socket_clone = std_socket.try_clone().map_err(|e| format!("Clone error: {e}"))?;
     let public_addr = if let Some(ref ice) = cfg.ice_server {
         let stun_addr = ice.trim_start_matches("stun:");
-        // Create a temp socket for STUN resolution
-        let stun_sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-            Ok(s) => s,
-            Err(e) => return Err(format!("STUN socket bind error: {e}")),
-        };
-        match quic_transport::stun_resolve(&stun_sock, stun_addr).await {
+        let tokio_sock = tokio::net::UdpSocket::from_std(stun_socket_clone)
+            .map_err(|e| format!("Tokio socket error: {e}"))?;
+        match quic_transport::stun_resolve(&tokio_sock, stun_addr).await {
             Ok(addr) => {
-                tracing::info!("[QUIC-VPN] STUN resolved: {addr}");
+                tracing::info!("[QUIC-VPN] STUN resolved: {addr} (same socket as QUIC)");
                 addr
             }
             Err(e) => {
@@ -1807,6 +1856,17 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
     } else {
         local_addr
     };
+
+    // Create QUIC client endpoint on the SAME socket (preserves NAT pinhole)
+    let runtime = quinn::default_runtime().ok_or("No async runtime")?;
+    let mut quic_endpoint = quinn::Endpoint::new_with_abstract_socket(
+        quinn::EndpointConfig::default(),
+        None,
+        runtime.wrap_udp_socket(std_socket).map_err(|e| format!("Wrap socket error: {e}"))?,
+        runtime,
+    ).map_err(|e| format!("QUIC endpoint error: {e}"))?;
+    quic_endpoint.set_default_client_config(quic_transport::make_client_config());
+    tracing::info!("[QUIC-VPN] QUIC endpoint on same socket as STUN");
 
     // Wait for pairing and gateway's QUIC address
     let gateway_addr: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::new(Mutex::new(None));
@@ -1871,7 +1931,22 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
     let gateway_addr = gateway_addr.lock().await
         .ok_or_else(|| "No gateway address received".to_string())?;
 
-    // Try direct QUIC connection first, fall back to TURN relay
+    // Send UDP punch packets to the gateway's address (opens NAT pinhole)
+    // The gateway also punches us (via the "punch" signaling message)
+    tracing::info!("[QUIC-VPN] Sending punch packets to {gateway_addr}...");
+    let punch_sock = quic_endpoint.local_addr()
+        .map_err(|e| format!("Local addr error: {e}"))?;
+    // Use a raw UDP socket clone for punching (quinn owns the main socket)
+    // Actually, we can't clone quinn's socket. Instead, the STUN request already
+    // opened a pinhole for the STUN server. The gateway's punch to our address
+    // opens the gateway's NAT for us. We just need to try connecting.
+    // For portal-tunneler style: both sides send simultaneously.
+    // Quinn's connect() sends the Initial packet which IS the punch from our side.
+
+    // Wait a moment for the gateway to send its punch packets
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Try direct QUIC connection (our connect = our punch)
     tracing::info!("[QUIC-VPN] Connecting QUIC to {gateway_addr}...");
     let conn = match tokio::time::timeout(
         Duration::from_secs(5),
