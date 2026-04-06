@@ -24,6 +24,7 @@ import {
 } from "./lib/tidecloakApi";
 import { UserRepresentation, RoleRepresentation, ClientRepresentation } from "./lib/auth/keycloakTypes";
 import { getResource, getAuthOverrideUrl, getRealm } from "./lib/auth/tidecloakConfig";
+import { tcAuthHeaders } from "./lib/tidecloakApi";
 
 // Extended Request interface with user information
 export interface AuthenticatedRequest extends Request {
@@ -349,7 +350,7 @@ export class TidecloakAdmin {
       const tcUrl = `${getAuthOverrideUrl()}/admin/realms/${getRealm()}`;
       // Fetch role list for the app client
       const rolesRes = await fetch(`${tcUrl}/clients/${appClient.id}/roles`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: tcAuthHeaders(token),
       });
       if (rolesRes.ok) {
         const roles: RoleRepresentation[] = await rolesRes.json();
@@ -360,7 +361,7 @@ export class TidecloakAdmin {
             try {
               const usersRes = await fetch(
                 `${tcUrl}/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`,
-                { headers: { Authorization: `Bearer ${token}` } }
+                { headers: tcAuthHeaders(token) }
               );
               if (usersRes.ok) {
                 const roleUsers: UserRepresentation[] = await usersRes.json();
@@ -383,7 +384,7 @@ export class TidecloakAdmin {
         const tcUrl = `${getAuthOverrideUrl()}/admin/realms/${getRealm()}`;
         const adminRes = await fetch(
           `${tcUrl}/clients/${rmClient.id}/roles/${encodeURIComponent(ADMIN_ROLE)}/users`,
-          { headers: { Authorization: `Bearer ${token}` } }
+          { headers: tcAuthHeaders(token) }
         );
         if (adminRes.ok) {
           const adminUsers: UserRepresentation[] = await adminRes.json();
