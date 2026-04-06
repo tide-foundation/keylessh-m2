@@ -1056,6 +1056,16 @@ async fn run_agent() -> Result<(), String> {
                             let turn_server = params["turnServer"].as_str().map(|s| s.to_string());
                             let turn_secret = params["turnSecret"].as_str().map(|s| s.to_string());
 
+                            // TideCloak config from browser (realm, auth-server-url, resource)
+                            let tc_b64_from_browser = if let Some(tc) = params.get("tidecloakConfig") {
+                                Some(base64::Engine::encode(
+                                    &base64::engine::general_purpose::STANDARD,
+                                    serde_json::to_string(tc).unwrap_or_default(),
+                                ))
+                            } else {
+                                None
+                            };
+
                             if stun_server.is_empty() || gateway_id.is_empty() || token.is_empty() {
                                 ("400 Bad Request", json!({"error": "Missing stunServer, gatewayId, or token"}).to_string())
                             } else {
@@ -1073,15 +1083,18 @@ async fn run_agent() -> Result<(), String> {
                                     let state_clone = state.clone();
                                     let tun_clone = tun_name.clone();
 
-                                    // Read TideCloak config from vpn-config.toml
+                                    // TideCloak config: prefer browser-provided, fall back to vpn-config.toml
                                     let file_cfg = load_file_config();
+                                    let tc_b64 = tc_b64_from_browser
+                                        .or_else(|| file_cfg.tidecloak_config_b64.clone());
+                                    let tc_path = file_cfg.tidecloak_config_path.clone();
 
                                     let handle = tokio::spawn(async move {
                                         let cfg = ResolvedConfig {
                                             stun_server,
                                             gateway_id: gw_id.clone(),
-                                            tc_path: file_cfg.tidecloak_config_path.clone(),
-                                            tc_b64: file_cfg.tidecloak_config_b64.clone(),
+                                            tc_path,
+                                            tc_b64,
                                             ice_server,
                                             turn_server,
                                             turn_secret,
