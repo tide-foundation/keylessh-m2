@@ -13,20 +13,20 @@ jobs:
   # Punchd VPN Client — Windows MSI (with WebView2 DPoP)
   # ════════════════════════════════════════════════════════════════
   build-vpn-msi:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-gnu
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64
-      - name: Build
+      - name: Install MinGW
+        run: choco install mingw -y
+      - name: Build VPN client (GNU target)
         run: |
           cd bridges/punchd-bridge-rs
           cargo build --release --bin punchd-vpn --target x86_64-pc-windows-gnu --features webview
-          cp target/x86_64-pc-windows-gnu/release/punchd-vpn.exe wix/
-          cp webview2/WebView2Loader_amd64.dll wix/WebView2Loader.dll
+          Copy-Item target/x86_64-pc-windows-gnu/release/punchd-vpn.exe wix/
+          Copy-Item webview2/WebView2Loader_amd64.dll wix/WebView2Loader.dll
       - name: Install WiX
         run: |
           dotnet tool install --global wix --version 6.0.2
