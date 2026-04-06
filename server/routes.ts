@@ -3126,7 +3126,8 @@ export async function registerRoutes(
         res.json(approvals);
       } catch (error) {
         log(`Failed to fetch role approvals: ${error}`);
-        res.status(500).json({ message: "Failed to fetch role approvals" });
+        // Return empty list instead of 500 (TideCloak may reject Bearer when DPoP signer unavailable)
+        res.json([]);
       }
     }
   );
