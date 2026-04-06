@@ -5,14 +5,15 @@ REM ---------------------------------------------------------------
 REM  Build PunchdEndpoint MSI (TideSSP + Punchd Gateway service)
 REM
 REM  Expects the repository root at C:\src:
-REM    C:\src\tide-ssp\                   TideSSP driver
-REM    C:\src\bridges\punchd-bridge-rs\   Punchd Gateway (Rust)
+REM    C:\src\tide-ssp\                   TideSSP driver (C, built with MSVC)
+REM    C:\src\bridges\punchd-bridge-rs\   Punchd Gateway (Rust, built with GNU)
 REM
 REM  Prerequisites (provided by the Docker image):
-REM    - Visual Studio Build Tools (MSVC)
+REM    - Visual Studio Build Tools (MSVC for TideSSP)
 REM    - CMake, Ninja
 REM    - WiX Toolset v6+
-REM    - Rust toolchain (stable-x86_64-pc-windows-msvc)
+REM    - Rust with x86_64-pc-windows-gnu target
+REM    - MinGW-w64
 REM ---------------------------------------------------------------
 
 set "TIDESSP=%~dp0.."
@@ -20,28 +21,27 @@ set "PUNCHD=C:\src\bridges\punchd-bridge-rs"
 set "BUILD=%TIDESSP%\build"
 set "OUTDIR=%TIDESSP%\out"
 
-echo === Step 1: Build TideSSP DLLs (TideSSP, TideSubAuth, TideCA) ===
+echo === Step 1: Build TideSSP DLLs with MSVC (TideSSP, TideSubAuth, TideCA) ===
 cmake -B "%BUILD%" -S "%TIDESSP%" -A x64
 if %errorlevel% neq 0 goto :fail
 cmake --build "%BUILD%" --config Release
 if %errorlevel% neq 0 goto :fail
 
 echo.
-echo === Step 2: Build punchd-bridge-rs (gateway) ===
+echo === Step 2: Build punchd-bridge-rs with GNU (static binary, no vcruntime) ===
 if not exist "%PUNCHD%\Cargo.toml" (
     echo ERROR: %PUNCHD%\Cargo.toml not found.
     echo Mount the repository root at C:\src.
     goto :fail
 )
 pushd "%PUNCHD%"
-cargo build --release --bin punchd-bridge-rs
+cargo build --release --target x86_64-pc-windows-gnu --bin punchd-bridge-rs
 if %errorlevel% neq 0 (popd & goto :fail)
-popd
 
-echo.
-echo === Step 2b: Copy VC++ runtime DLLs (needed for MSVC build) ===
-copy /Y "%SystemRoot%\System32\vcruntime140.dll" "%PUNCHD%\target\release\" 2>nul
-copy /Y "%SystemRoot%\System32\msvcp140.dll" "%PUNCHD%\target\release\" 2>nul
+REM Copy binary to target\release for WiX bindpath
+if not exist target\release mkdir target\release
+copy /Y target\x86_64-pc-windows-gnu\release\punchd-bridge-rs.exe target\release\punchd-bridge-rs.exe
+popd
 
 echo.
 echo === Step 3: Build combined MSI ===
