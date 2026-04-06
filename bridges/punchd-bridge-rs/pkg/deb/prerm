@@ -1,6 +1,4 @@
 #!/bin/sh
 set -e
 
-# Stop service before removal
-systemctl stop punchd-vpn 2>/dev/null || true
-systemctl disable punchd-vpn 2>/dev/null || true
+#DEBHELPER#
