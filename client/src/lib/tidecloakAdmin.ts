@@ -411,6 +411,16 @@ async function getClientIdForRole(roleName: string): Promise<string> {
   return await getClientId();
 }
 
+/// Look up a role by name without putting the name in the URL path.
+/// Keycloak's GET /roles/{name} breaks on colons/slashes in role names.
+/// Instead, list all roles and find the match.
+async function findRoleByName(clientUuid: string, roleName: string): Promise<RoleRepresentation> {
+  const roles = await tcFetch<RoleRepresentation[]>(`/clients/${clientUuid}/roles`);
+  const role = roles.find((r) => r.name === roleName);
+  if (!role) throw new Error(`Role '${roleName}' not found`);
+  return role;
+}
+
 export async function grantUserRole(userId: string, roleName: string): Promise<void> {
   const isAdmin = roleName === ADMIN_ROLE;
   const targetClientId = await getClientIdForRole(roleName);
@@ -420,7 +430,7 @@ export async function grantUserRole(userId: string, roleName: string): Promise<v
 
   const role = isAdmin
     ? await getTideRealmAdminRole()
-    : await tcFetch<RoleRepresentation>(`/clients/${client.id}/roles/${roleName}`);
+    : await findRoleByName(client.id, roleName);
 
   await tcFetch(`/users/${userId}/role-mappings/clients/${client.id}`, {
     method: "POST",
@@ -439,7 +449,7 @@ export async function removeUserRole(userId: string, roleName: string): Promise<
 
   const role = isAdmin
     ? await getTideRealmAdminRole()
-    : await tcFetch<RoleRepresentation>(`/clients/${client.id}/roles/${roleName}`);
+    : await findRoleByName(client.id, roleName);
 
   await tcFetch(`/users/${userId}/role-mappings/clients/${client.id}`, {
     method: "DELETE",
