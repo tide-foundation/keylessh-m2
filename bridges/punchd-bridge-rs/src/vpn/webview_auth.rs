@@ -314,10 +314,7 @@ mod imp {
             }
             #[cfg(not(target_os = "windows"))]
             {
-                dirs_next::data_local_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-                    .join("punchd-vpn")
-                    .join("webview2")
+                std::path::PathBuf::from("/var/lib/punchd-vpn/webview2")
             }
         };
         let _ = std::fs::create_dir_all(&data_dir);
