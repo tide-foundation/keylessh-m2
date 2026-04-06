@@ -13,24 +13,30 @@ jobs:
   # Punchd VPN Client — Windows MSI (with WebView2 DPoP)
   # ════════════════════════════════════════════════════════════════
   build-vpn-msi:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-gnu
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64
-      - name: Build
+      - name: Install MinGW
+        run: choco install mingw -y
+      - name: Build VPN client (GNU target)
         run: |
           cd bridges/punchd-bridge-rs
           cargo build --release --bin punchd-vpn --target x86_64-pc-windows-gnu --features webview
-          cp target/x86_64-pc-windows-gnu/release/punchd-vpn.exe wix/
-          cp webview2/WebView2Loader_amd64.dll wix/WebView2Loader.dll
+          Copy-Item target/x86_64-pc-windows-gnu/release/punchd-vpn.exe wix/
+          Copy-Item webview2/WebView2Loader_amd64.dll wix/WebView2Loader.dll
+      - name: Compile custom actions DLL (MSVC)
+        working-directory: bridges/punchd-bridge-rs/wix
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=amd64
+          cl /LD /O2 ca\PunchdCA.c ca\PunchdCA.def /Fe:ca\PunchdCA.dll /link msi.lib advapi32.lib shell32.lib user32.lib ole32.lib
       - name: Install WiX
         run: |
-          dotnet tool install --global wix
-          wix extension add --global WixToolset.UI.wixext
+          dotnet tool install --global wix --version 6.0.2
+          wix extension add --global WixToolset.UI.wixext/6.0.2
       - name: Build MSI
         working-directory: bridges/punchd-bridge-rs/wix
         run: wix build punchd-vpn.wxs -arch x64 -o punchd-vpn.msi
@@ -109,9 +115,9 @@ jobs:
         run: choco install mingw -y
       - name: Install WiX
         run: |
-          dotnet tool install --global wix
-          wix extension add --global WixToolset.UI.wixext
-          wix extension add --global WixToolset.Util.wixext
+          dotnet tool install --global wix --version 6.0.2
+          wix extension add --global WixToolset.UI.wixext/6.0.2
+          wix extension add --global WixToolset.Util.wixext/6.0.2
       - name: Build TideSSP DLLs (MSVC)
         run: |
           cmake -B tide-ssp/build -S tide-ssp -A x64
@@ -209,7 +215,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install WiX
-        run: dotnet tool install --global wix
+        run: dotnet tool install --global wix --version 6.0.2
       - name: Build TideSSP DLLs
         run: |
           cmake -B tide-ssp/build -S tide-ssp -A x64
@@ -226,30 +232,6 @@ jobs:
           path: tide-ssp/out/TideSSP.msi
 
   # ════════════════════════════════════════════════════════════════
-  # Punchd Gateway — Docker image
-  # ════════════════════════════════════════════════════════════════
-  build-gateway-docker:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-        if: github.event_name == 'push'
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: bridges/punchd-bridge-rs
-          push: ${{ github.event_name == 'push' }}
-          tags: |
-            tideorg/punchd-gateway:latest
-            tideorg/punchd-gateway:${{ github.ref_name }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # ════════════════════════════════════════════════════════════════
   # Create GitHub Release
   # ════════════════════════════════════════════════════════════════
   release:
@@ -261,7 +243,6 @@ jobs:
       - build-endpoint-linux
       - build-endpoint-macos
       - build-tidessp
-      - build-gateway-docker
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

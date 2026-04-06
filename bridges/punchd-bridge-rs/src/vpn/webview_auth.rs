@@ -306,7 +306,21 @@ mod imp {
         let login_url = format!("{}/app", config.app_url.trim_end_matches('/'));
         let proxy_clone = proxy.clone();
 
-        let webview = WebViewBuilder::new()
+        // WebView2 data directory — must be writable (not Program Files)
+        let data_dir = {
+            #[cfg(target_os = "windows")]
+            {
+                std::path::PathBuf::from(r"C:\ProgramData\punchd-vpn\webview2")
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                std::path::PathBuf::from("/var/lib/punchd-vpn/webview2")
+            }
+        };
+        let _ = std::fs::create_dir_all(&data_dir);
+        let mut web_context = wry::WebContext::new(Some(data_dir));
+
+        let webview = WebViewBuilder::new_with_web_context(&mut web_context)
             .with_url(&login_url)
             .with_initialization_script(init_script)
             .with_ipc_handler(move |msg| {
@@ -343,7 +357,7 @@ mod imp {
                 }
             })
             .with_devtools(cfg!(debug_assertions))
-            .build_as_child(&window)
+            .build(&window)
             .map_err(|e| format!("Failed to create webview: {e}"))?;
 
         event_loop.run(move |event, _, control_flow| {

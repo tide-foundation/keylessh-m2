@@ -1,12 +1,13 @@
 ///! punchd-vpn: VPN client that tunnels IP traffic through a punchd-bridge-rs gateway.
 ///!
-///! Creates a local TUN interface and routes IP packets through a WebRTC
-///! DataChannel to a punchd-bridge gateway, which forwards them to its LAN.
+///! Creates a local TUN interface and routes IP packets through a QUIC P2P
+///! tunnel to a punchd-bridge gateway, which forwards them to its LAN.
+///! Authentication uses TideCloak OIDC with DPoP via embedded WebView2.
 ///!
 ///! Usage:
 ///!   punchd-vpn --stun-server wss://stun.example.com --gateway-id my-gateway --config tidecloak.json
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,18 +17,8 @@ use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{Mutex, Notify};
 use tokio_tungstenite::tungstenite::Message;
-use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::MediaEngine;
-use webrtc::api::setting_engine::SettingEngine;
-use webrtc::api::APIBuilder;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::interceptor::registry::Registry;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 const VPN_TUNNEL_MAGIC: u8 = 0x04;
 const AGENT_PORT: u16 = 19877;
@@ -961,12 +952,37 @@ async fn run_agent() -> Result<(), String> {
 
         tokio::spawn(async move {
             let mut stream = stream;
+
+            // Read headers + possibly partial body
             let mut buf = vec![0u8; 65536];
-            let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await {
-                Ok(n) => n,
-                Err(_) => return,
-            };
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let mut total = 0;
+            loop {
+                let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf[total..]).await {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                total += n;
+                // Check if we have the full headers
+                let data = &buf[..total];
+                if let Some(header_end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                    // Parse Content-Length from headers
+                    let headers = String::from_utf8_lossy(&data[..header_end]).to_lowercase();
+                    let content_length: usize = headers.lines()
+                        .find(|l| l.starts_with("content-length:"))
+                        .and_then(|l| l.split(':').nth(1))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    let body_start = header_end + 4;
+                    let body_received = total - body_start;
+                    if body_received >= content_length {
+                        break; // Got full body
+                    }
+                }
+                if total >= buf.len() { break; }
+            }
+
+            let request = String::from_utf8_lossy(&buf[..total]).to_string();
             let first_line = request.lines().next().unwrap_or("");
             let method = first_line.split_whitespace().next().unwrap_or("");
             let path = first_line.split_whitespace().nth(1).unwrap_or("");
@@ -1730,17 +1746,15 @@ async fn try_turn_relay(
 
 /// Agent-mode VPN connection — takes token directly, no OIDC login.
 /// Accepts a shutdown receiver to disconnect on demand.
-/// Agent-mode VPN connection — uses QUIC + WebView DPoP (same as standalone).
-/// The token parameter is ignored — WebView handles authentication.
+/// Agent-mode VPN connection — uses QUIC with token from browser.
+/// Browser provides the token (and optionally DPoP proof) via /connect API.
 /// Accepts a shutdown receiver to disconnect on demand.
 async fn run_vpn_with_token(
     cfg: ResolvedConfig,
     _token: String,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), String> {
-    // Use the QUIC path with WebView auth (token: None forces oidc_login → WebView)
-    let mut cfg = cfg;
-    cfg.token = None; // Force WebView login for DPoP support
+    // Token is already set in cfg.token by the /connect handler
     run_vpn_quic_inner(cfg, Some(shutdown_rx)).await
 }
 
@@ -1758,7 +1772,7 @@ struct VpnConfig {
 fn install_route(cidr: &str, gateway: &str) {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 { return; }
-    let network = parts[0];
+    let _network = parts[0];
     let prefix: u32 = parts[1].parse().unwrap_or(24);
 
     #[cfg(target_os = "windows")]
@@ -1766,11 +1780,23 @@ fn install_route(cidr: &str, gateway: &str) {
         let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
         let m = mask.to_be_bytes();
         let mask_str = format!("{}.{}.{}.{}", m[0], m[1], m[2], m[3]);
+
+        // Find the TUN interface index so the route goes through the VPN, not the LAN
+        let if_index = find_tun_interface_index();
+        let mut args = vec!["add".to_string(), _network.to_string(), "MASK".to_string(), mask_str, gateway.to_string()];
+        if let Some(idx) = if_index {
+            args.push("IF".to_string());
+            args.push(idx.to_string());
+        }
+        // Low metric so VPN route wins over LAN
+        args.push("METRIC".to_string());
+        args.push("5".to_string());
+
         let status = std::process::Command::new("route")
-            .args(["add", network, "MASK", &mask_str, gateway])
+            .args(&args)
             .status();
         match status {
-            Ok(s) if s.success() => tracing::info!("[VPN] Route added: {} via {}", cidr, gateway),
+            Ok(s) if s.success() => tracing::info!("[VPN] Route added: {} via {} (IF {:?}, metric 5)", cidr, gateway, if_index),
             Ok(s) => tracing::warn!("[VPN] Failed to add route {} (exit {})", cidr, s),
             Err(e) => tracing::warn!("[VPN] Failed to add route {}: {}", cidr, e),
         }
@@ -1789,12 +1815,30 @@ fn install_route(cidr: &str, gateway: &str) {
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
-        let _ = (network, prefix, gateway);
+        let _ = (_network, prefix, gateway);
         tracing::warn!("[VPN] Auto route not supported on this platform: {}", cidr);
     }
 }
 
 /// Remove a previously installed route.
+/// Find the Windows interface index for the punchd TUN adapter.
+#[cfg(target_os = "windows")]
+fn find_tun_interface_index() -> Option<u32> {
+    let output = std::process::Command::new("netsh")
+        .args(["interface", "ipv4", "show", "interfaces"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        if line.contains("punchd") {
+            // Format: "  Idx  Met  MTU  State  Name"
+            let idx_str = line.split_whitespace().next()?;
+            return idx_str.parse().ok();
+        }
+    }
+    None
+}
+
 fn remove_route(cidr: &str) {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 { return; }

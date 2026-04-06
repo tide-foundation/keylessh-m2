@@ -4,11 +4,7 @@ set -e
 # Create config directory
 mkdir -p /etc/punchd-vpn
 
-# Reload systemd
-systemctl daemon-reload
-
-# Enable service (don't start — no config yet)
-systemctl enable punchd-vpn || true
+#DEBHELPER#
 
 echo ""
 echo "Punchd VPN installed."
