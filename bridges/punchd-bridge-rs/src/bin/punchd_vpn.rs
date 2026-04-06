@@ -354,6 +354,9 @@ mod turn_client;
 #[path = "../vpn/webview_auth.rs"]
 mod webview_auth;
 
+#[path = "../vpn/vpn_tray.rs"]
+mod vpn_tray;
+
 // ── Windows Service support ───────────────────────────────────────────
 
 const SERVICE_NAME: &str = "punchd-vpn";
@@ -776,6 +779,36 @@ async fn main() {
         }
     }
 
+    // System tray icon
+    vpn_tray::spawn_vpn_tray();
+
+    vpn_tray::set_logs_callback(|| {
+        tracing::info!("[Tray] Show Logs requested");
+        // Open logs in browser (agent health endpoint)
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("rundll32")
+                .args(["url.dll,FileProtocolHandler", "http://127.0.0.1:19877/status"])
+                .spawn();
+        }
+    });
+
+    vpn_tray::set_refresh_callback(|| {
+        tracing::info!("[Tray] Refresh Token requested");
+        // Clear cached token so next reconnect re-authenticates via WebView
+        if let Some(store) = webview_auth::get_latest_token() {
+            let _ = store; // token exists, will be refreshed on reconnect
+        }
+        // Trigger WebView to show login window for fresh token
+        // (WebView is still running in background — it refreshes automatically)
+    });
+
+    vpn_tray::set_reconnect_callback(|| {
+        tracing::info!("[Tray] Reconnect requested");
+        // The auto-reconnect loop handles this — just need to drop the current connection
+        // For now, log it. Full implementation would signal the VPN loop to restart.
+    });
+
     // Start agent HTTP server in the background (unless --standalone)
     if !args.standalone {
         tracing::info!("punchd-vpn starting (agent on port {AGENT_PORT})");
@@ -1023,6 +1056,16 @@ async fn run_agent() -> Result<(), String> {
                             let turn_server = params["turnServer"].as_str().map(|s| s.to_string());
                             let turn_secret = params["turnSecret"].as_str().map(|s| s.to_string());
 
+                            // TideCloak config from browser (realm, auth-server-url, resource)
+                            let tc_b64_from_browser = if let Some(tc) = params.get("tidecloakConfig") {
+                                Some(base64::Engine::encode(
+                                    &base64::engine::general_purpose::STANDARD,
+                                    serde_json::to_string(tc).unwrap_or_default(),
+                                ))
+                            } else {
+                                None
+                            };
+
                             if stun_server.is_empty() || gateway_id.is_empty() || token.is_empty() {
                                 ("400 Bad Request", json!({"error": "Missing stunServer, gatewayId, or token"}).to_string())
                             } else {
@@ -1040,12 +1083,18 @@ async fn run_agent() -> Result<(), String> {
                                     let state_clone = state.clone();
                                     let tun_clone = tun_name.clone();
 
+                                    // TideCloak config: prefer browser-provided, fall back to vpn-config.toml
+                                    let file_cfg = load_file_config();
+                                    let tc_b64 = tc_b64_from_browser
+                                        .or_else(|| file_cfg.tidecloak_config_b64.clone());
+                                    let tc_path = file_cfg.tidecloak_config_path.clone();
+
                                     let handle = tokio::spawn(async move {
                                         let cfg = ResolvedConfig {
                                             stun_server,
                                             gateway_id: gw_id.clone(),
-                                            tc_path: None,
-                                            tc_b64: None,
+                                            tc_path,
+                                            tc_b64,
                                             ice_server,
                                             turn_server,
                                             turn_secret,

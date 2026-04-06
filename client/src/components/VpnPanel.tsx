@@ -92,6 +92,11 @@ export function VpnPanel() {
           stunServer: gw.signalServerUrl.replace(/^http/, "ws"),
           gatewayId: gw.id,
           token: vpnToken,
+          tidecloakConfig: authConfig ? {
+            realm: authConfig.realm,
+            "auth-server-url": authConfig.url,
+            resource: authConfig.clientId,
+          } : undefined,
         }),
       });
 
