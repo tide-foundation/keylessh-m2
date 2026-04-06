@@ -411,9 +411,9 @@ function CustomConnectionCard({ endpoint }: { endpoint: GatewayEndpoint }) {
                 <Network className="h-5 w-5 text-muted-foreground" />
               </div>
               <div>
-                <CardTitle className="text-base">Custom Connection</CardTitle>
+                <CardTitle className="text-base">{endpoint.displayName}</CardTitle>
                 <CardDescription className="text-xs">
-                  {endpoint.displayName} &middot; Connect to any IP
+                  Custom Connection &middot; Connect to any IP
                 </CardDescription>
               </div>
             </div>
@@ -594,8 +594,8 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
             <Network className="h-5 w-5 text-muted-foreground" />
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-medium truncate">Custom Connection</p>
-            <p className="text-xs text-muted-foreground truncate">{item.endpoint.displayName} &middot; Connect to any IP</p>
+            <p className="text-sm font-medium truncate">{item.endpoint.displayName}</p>
+            <p className="text-xs text-muted-foreground truncate">Custom Connection &middot; Connect to any IP</p>
           </div>
         </div>
         <CustomConnectionCard endpoint={item.endpoint} />
