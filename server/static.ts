@@ -23,8 +23,12 @@ export function serveStatic(app: Express) {
   app.use(express.static(distPath, { maxAge: 0 }));
 
   // fall through to index.html if the file doesn't exist
+  // Skip WebSocket paths — they're handled by the ws library via HTTP upgrade
   // Set no-cache headers to prevent stale HTML being served
-  app.use("*", (_req, res) => {
+  app.use("*", (req, res, next) => {
+    if (req.originalUrl.startsWith("/ws/")) {
+      return next();
+    }
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     res.setHeader("Pragma", "no-cache");
     res.setHeader("Expires", "0");
