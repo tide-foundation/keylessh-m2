@@ -75,6 +75,7 @@ export function TerminalSession({
   onCloseTab,
   gatewayUrl,
   gatewayId,
+  autoConnect = false,
 }: {
   serverId: string;
   sshUser: string;
@@ -82,6 +83,7 @@ export function TerminalSession({
   onCloseTab?: () => void;
   gatewayUrl?: string;
   gatewayId?: string;
+  autoConnect?: boolean;
 }) {
   const { toast } = useToast();
   const authConfig = useAuthConfig();
@@ -522,14 +524,15 @@ export function TerminalSession({
   }, [server?.name, sshUser, status, toast]);
 
   // Important UX: never auto-open the Tide connect modal for standalone servers.
-  // But for gateway mode, auto-connect immediately (user already chose from Dashboard).
+  // Auto-connect only when explicitly requested (user clicked Connect from Dashboard).
+  // The autoConnect flag is set once on tab creation and not persisted across remounts.
   const hasAutoConnected = useRef(false);
   useEffect(() => {
-    if (isGatewayMode && !hasAutoConnected.current && status === "disconnected" && !error) {
+    if (autoConnect && !hasAutoConnected.current && status === "disconnected" && !error) {
       hasAutoConnected.current = true;
       handleConnect();
     }
-  }, [isGatewayMode, status, error, handleConnect]);
+  }, [autoConnect, status, error, handleConnect]);
 
   const StatusIcon = statusConfig[status].icon;
 

@@ -5,6 +5,10 @@
 ///! forwards UDP packets between client and gateway.
 ///!
 ///! Uses TURN ChannelData for minimal overhead (4-byte header vs 36-byte Send Indication).
+///!
+///! Architecture: quinn can't speak TURN natively, so we run a local UDP proxy:
+///!   quinn ←→ localhost:proxy_port ←→ TURN server ←→ gateway
+///! The proxy wraps/unwraps ChannelData frames transparently.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -13,7 +17,6 @@ use std::time::Duration;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -28,10 +31,8 @@ const CHANNEL_BIND_SUCCESS: u16 = 0x0109;
 const REFRESH_REQUEST: u16 = 0x0004;
 
 // TURN attributes
-const ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 const ATTR_USERNAME: u16 = 0x0006;
 const ATTR_MESSAGE_INTEGRITY: u16 = 0x0008;
-const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const ATTR_XOR_RELAYED_ADDRESS: u16 = 0x0016;
 const ATTR_XOR_PEER_ADDRESS: u16 = 0x0012;
 const ATTR_LIFETIME: u16 = 0x000D;
@@ -71,15 +72,12 @@ pub fn generate_credentials(secret: &str, username_base: &str) -> (String, Strin
 }
 
 /// Compute credential key for TURN authentication.
-/// For REST API credentials (ephemeral): the credential IS the HMAC-SHA1 password,
-/// so the key is MD5(username:realm:credential) per RFC 5389 long-term auth.
 fn compute_key(username: &str, realm: &str, credential: &str) -> Vec<u8> {
     let digest = md5::compute(format!("{username}:{realm}:{credential}").as_bytes());
     digest.0.to_vec()
 }
 
 /// Create a TURN allocation and bind a channel for the given peer.
-/// Returns a TurnAllocation that can wrap/unwrap QUIC packets.
 pub async fn allocate(
     socket: Arc<UdpSocket>,
     turn_server: &str,
@@ -87,7 +85,6 @@ pub async fn allocate(
     credential: &str,
     peer_addr: SocketAddr,
 ) -> Result<TurnAllocation, String> {
-    // Resolve TURN server address
     let turn_str = turn_server
         .trim_start_matches("turn:")
         .trim_start_matches("//");
@@ -98,10 +95,9 @@ pub async fn allocate(
 
     tracing::info!("[TURN] Allocating relay via {turn_addr}...");
 
-    // Step 1: Send Allocate request (will get 401 with realm+nonce)
+    // Step 1: Unauthenticated Allocate → 401 with realm+nonce
     let txn_id = random_txn_id();
     let mut req = build_stun_header(ALLOCATE_REQUEST, &txn_id, 0);
-    // Add REQUESTED-TRANSPORT: UDP (17)
     append_attr(&mut req, ATTR_REQUESTED_TRANSPORT, &[17, 0, 0, 0]);
     update_length(&mut req);
 
@@ -111,7 +107,6 @@ pub async fn allocate(
     let mut buf = vec![0u8; 2048];
     let n = recv_timeout(&socket, &mut buf, 5).await?;
 
-    // Parse 401 error to get realm and nonce
     let (msg_type, attrs) = parse_stun_response(&buf[..n])?;
     if msg_type != ALLOCATE_ERROR {
         return Err(format!("Expected 401, got msg type 0x{msg_type:04x}"));
@@ -124,10 +119,9 @@ pub async fn allocate(
 
     tracing::debug!("[TURN] Got realm={realm}, nonce={}", &nonce[..16.min(nonce.len())]);
 
-    // Compute key
     let key = compute_key(username, &realm, credential);
 
-    // Step 2: Authenticated Allocate request
+    // Step 2: Authenticated Allocate
     let txn_id = random_txn_id();
     let mut req = build_stun_header(ALLOCATE_REQUEST, &txn_id, 0);
     append_attr(&mut req, ATTR_REQUESTED_TRANSPORT, &[17, 0, 0, 0]);
@@ -177,7 +171,7 @@ pub async fn allocate(
     tracing::debug!("[TURN] Permission created for {peer_addr}");
 
     // Step 4: ChannelBind for minimal overhead
-    let channel_number: u16 = CHANNEL_DATA_MIN; // 0x4000
+    let channel_number: u16 = CHANNEL_DATA_MIN;
     let txn_id = random_txn_id();
     let mut req = build_stun_header(CHANNEL_BIND_REQUEST, &txn_id, 0);
     append_attr(&mut req, ATTR_CHANNEL_NUMBER, &[(channel_number >> 8) as u8, (channel_number & 0xff) as u8, 0, 0]);
@@ -214,49 +208,145 @@ pub async fn allocate(
 }
 
 impl TurnAllocation {
-    /// Get the relay address (public address on the TURN server).
     pub fn relay_addr(&self) -> SocketAddr {
         self.relay_addr
     }
 
-    /// Wrap a QUIC packet in a TURN ChannelData frame and send it.
-    /// ChannelData: [channel:u16][length:u16][data...]
-    pub async fn send(&self, data: &[u8]) -> Result<(), String> {
-        let mut frame = Vec::with_capacity(4 + data.len());
-        frame.push((self.channel_number >> 8) as u8);
-        frame.push((self.channel_number & 0xff) as u8);
-        frame.push((data.len() >> 8) as u8);
-        frame.push((data.len() & 0xff) as u8);
-        frame.extend_from_slice(data);
-        // Pad to 4-byte boundary
-        while frame.len() % 4 != 0 { frame.push(0); }
+    /// Send a TURN Refresh to keep the allocation alive.
+    pub async fn refresh(&self) -> Result<(), String> {
+        let txn_id = random_txn_id();
+        let mut req = build_stun_header(REFRESH_REQUEST, &txn_id, 0);
+        append_attr(&mut req, ATTR_LIFETIME, &600u32.to_be_bytes());
+        append_string_attr(&mut req, ATTR_USERNAME, &self.username);
+        append_string_attr(&mut req, ATTR_REALM, &self.realm);
+        append_string_attr(&mut req, ATTR_NONCE, &self.nonce);
+        update_length(&mut req);
+        append_message_integrity(&mut req, &self.key);
+        update_length(&mut req);
 
-        self.socket.send_to(&frame, self.turn_addr).await
-            .map_err(|e| format!("TURN send: {e}"))?;
+        self.socket.send_to(&req, self.turn_addr).await
+            .map_err(|e| format!("TURN refresh send: {e}"))?;
         Ok(())
     }
+}
 
-    /// Receive and unwrap a TURN ChannelData frame.
-    /// Returns the inner QUIC packet data.
-    pub async fn recv(&self, buf: &mut [u8]) -> Result<usize, String> {
-        let mut frame_buf = vec![0u8; 4 + buf.len()];
-        let n = self.socket.recv(&mut frame_buf).await
-            .map_err(|e| format!("TURN recv: {e}"))?;
+/// Start a local UDP proxy that bridges quinn <-> TURN ChannelData.
+///
+/// Quinn connects to the returned proxy address (localhost). The proxy:
+/// - Outbound: raw UDP from quinn -> wrap in ChannelData -> send to TURN server
+/// - Inbound: ChannelData from TURN server -> unwrap -> forward to quinn
+///
+/// Also refreshes the TURN allocation every 4 minutes.
+///
+/// Returns (proxy_addr, shutdown_sender).
+pub async fn start_turn_proxy(
+    allocation: TurnAllocation,
+) -> Result<(SocketAddr, tokio::sync::oneshot::Sender<()>), String> {
+    let proxy_socket = Arc::new(
+        tokio::net::UdpSocket::bind("127.0.0.1:0").await
+            .map_err(|e| format!("TURN proxy bind: {e}"))?
+    );
+    let proxy_addr = proxy_socket.local_addr()
+        .map_err(|e| format!("TURN proxy addr: {e}"))?;
 
-        if n < 4 { return Err("Short TURN frame".into()); }
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let channel = u16::from_be_bytes([frame_buf[0], frame_buf[1]]);
-        let length = u16::from_be_bytes([frame_buf[2], frame_buf[3]]) as usize;
+    let turn_socket = allocation.socket.clone();
+    let turn_addr = allocation.turn_addr;
+    let channel_number = allocation.channel_number;
 
-        if channel >= CHANNEL_DATA_MIN && length <= n - 4 {
-            // ChannelData — unwrap
-            buf[..length].copy_from_slice(&frame_buf[4..4+length]);
-            Ok(length)
-        } else {
-            // STUN message (not ChannelData) �� skip
-            Err("Not a ChannelData frame".into())
+    let proxy_in = proxy_socket.clone();
+    let proxy_out = proxy_socket.clone();
+    let turn_out = turn_socket.clone();
+
+    tokio::spawn(async move {
+        let mut quinn_peer: Option<SocketAddr> = None;
+        let mut outbound_buf = vec![0u8; 65536];
+        let mut inbound_buf = vec![0u8; 65536];
+
+        // Refresh allocation every 4 minutes
+        let alloc_socket = allocation.socket.clone();
+        let alloc_turn_addr = allocation.turn_addr;
+        let alloc_username = allocation.username.clone();
+        let alloc_key = allocation.key.clone();
+        let alloc_realm = allocation.realm.clone();
+        let alloc_nonce = allocation.nonce.clone();
+        let refresh_handle = tokio::spawn(async move {
+            let alloc = TurnAllocation {
+                socket: alloc_socket,
+                turn_addr: alloc_turn_addr,
+                relay_addr: allocation.relay_addr,
+                channel_number: allocation.channel_number,
+                peer_addr: allocation.peer_addr,
+                username: alloc_username,
+                key: alloc_key,
+                realm: alloc_realm,
+                nonce: alloc_nonce,
+            };
+            loop {
+                tokio::time::sleep(Duration::from_secs(240)).await;
+                if let Err(e) = alloc.refresh().await {
+                    tracing::warn!("[TURN] Refresh failed: {e}");
+                } else {
+                    tracing::debug!("[TURN] Allocation refreshed");
+                }
+            }
+        });
+
+        loop {
+            tokio::select! {
+                // Quinn -> proxy -> TURN (outbound)
+                result = proxy_in.recv_from(&mut outbound_buf) => {
+                    match result {
+                        Ok((n, from)) => {
+                            quinn_peer = Some(from);
+                            let mut frame = Vec::with_capacity(4 + n + 3);
+                            frame.push((channel_number >> 8) as u8);
+                            frame.push((channel_number & 0xff) as u8);
+                            frame.push((n >> 8) as u8);
+                            frame.push((n & 0xff) as u8);
+                            frame.extend_from_slice(&outbound_buf[..n]);
+                            while frame.len() % 4 != 0 { frame.push(0); }
+                            let _ = turn_out.send_to(&frame, turn_addr).await;
+                        }
+                        Err(e) => {
+                            tracing::debug!("[TURN proxy] quinn recv: {e}");
+                        }
+                    }
+                }
+
+                // TURN -> proxy -> Quinn (inbound)
+                result = turn_socket.recv_from(&mut inbound_buf) => {
+                    match result {
+                        Ok((n, _)) => {
+                            if n < 4 { continue; }
+                            let ch = u16::from_be_bytes([inbound_buf[0], inbound_buf[1]]);
+                            let len = u16::from_be_bytes([inbound_buf[2], inbound_buf[3]]) as usize;
+
+                            if ch >= CHANNEL_DATA_MIN && len <= n - 4 {
+                                if let Some(peer) = quinn_peer {
+                                    let _ = proxy_out.send_to(&inbound_buf[4..4+len], peer).await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("[TURN proxy] turn recv: {e}");
+                        }
+                    }
+                }
+
+                _ = &mut shutdown_rx => {
+                    tracing::info!("[TURN] Proxy shutting down");
+                    break;
+                }
+            }
         }
-    }
+
+        refresh_handle.abort();
+    });
+
+    tracing::info!("[TURN] UDP proxy started on {proxy_addr}");
+    Ok((proxy_addr, shutdown_tx))
 }
 
 // ── STUN/TURN message helpers ────────────────────────────────────
@@ -286,7 +376,6 @@ fn append_attr(buf: &mut Vec<u8>, attr_type: u16, value: &[u8]) {
     buf.extend_from_slice(&attr_type.to_be_bytes());
     buf.extend_from_slice(&(value.len() as u16).to_be_bytes());
     buf.extend_from_slice(value);
-    // Pad to 4-byte boundary
     while buf.len() % 4 != 0 { buf.push(0); }
 }
 
@@ -294,7 +383,7 @@ fn append_string_attr(buf: &mut Vec<u8>, attr_type: u16, value: &str) {
     append_attr(buf, attr_type, value.as_bytes());
 }
 
-fn append_xor_address(buf: &mut Vec<u8>, attr_type: u16, addr: SocketAddr, txn_id: &[u8; 12]) {
+fn append_xor_address(buf: &mut Vec<u8>, attr_type: u16, addr: SocketAddr, _txn_id: &[u8; 12]) {
     let magic = STUN_MAGIC.to_be_bytes();
     match addr {
         SocketAddr::V4(v4) => {
@@ -306,12 +395,11 @@ fn append_xor_address(buf: &mut Vec<u8>, attr_type: u16, addr: SocketAddr, txn_i
             value.extend_from_slice(&xored);
             append_attr(buf, attr_type, &value);
         }
-        _ => {} // IPv6 not implemented
+        _ => {}
     }
 }
 
 fn append_message_integrity(buf: &mut Vec<u8>, key: &[u8]) {
-    // Update length to include MESSAGE-INTEGRITY (24 bytes: 4 header + 20 HMAC)
     let integrity_len = (buf.len() - 20 + 24) as u16;
     buf[2] = (integrity_len >> 8) as u8;
     buf[3] = (integrity_len & 0xff) as u8;
@@ -337,7 +425,7 @@ fn parse_stun_response(buf: &[u8]) -> Result<(u16, Vec<(u16, Vec<u8>)>), String>
         offset += 4;
         if offset + attr_len > buf.len() { break; }
         attrs.push((attr_type, buf[offset..offset+attr_len].to_vec()));
-        offset += (attr_len + 3) & !3; // pad to 4
+        offset += (attr_len + 3) & !3;
     }
 
     Ok((msg_type, attrs))
@@ -349,13 +437,12 @@ fn get_string_attr(attrs: &[(u16, Vec<u8>)], attr_type: u16) -> Option<String> {
         .and_then(|(_, v)| String::from_utf8(v.clone()).ok())
 }
 
-fn get_xor_address(attrs: &[(u16, Vec<u8>)], attr_type: u16, magic_bytes: &[u8]) -> Option<SocketAddr> {
+fn get_xor_address(attrs: &[(u16, Vec<u8>)], attr_type: u16, _magic_bytes: &[u8]) -> Option<SocketAddr> {
     let (_, value) = attrs.iter().find(|(t, _)| *t == attr_type)?;
     if value.len() < 8 { return None; }
     let magic = STUN_MAGIC.to_be_bytes();
     let family = value[1];
     if family == 1 {
-        // IPv4
         let port = u16::from_be_bytes([value[2], value[3]]) ^ (STUN_MAGIC >> 16) as u16;
         let ip = std::net::Ipv4Addr::new(
             value[4] ^ magic[0], value[5] ^ magic[1],

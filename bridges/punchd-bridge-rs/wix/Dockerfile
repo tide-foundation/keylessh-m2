@@ -50,9 +50,11 @@ RUN > C:\build.cmd echo @echo off `
  && >> C:\build.cmd echo cd /d C:\src `
  && >> C:\build.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
  && >> C:\build.cmd echo echo === Step 1: Build punchd-vpn.exe === `
- && >> C:\build.cmd echo cargo build --release --bin punchd-vpn `
+ && >> C:\build.cmd echo cargo build --release --features webview --bin punchd-vpn `
  && >> C:\build.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
  && >> C:\build.cmd echo copy target\release\punchd-vpn.exe wix\punchd-vpn.exe `
+ && >> C:\build.cmd echo echo === Step 1b: Copy WebView2Loader.dll === `
+ && >> C:\build.cmd echo for /r target\release\build %%f in (WebView2Loader.dll) do if "%%~nxf"=="WebView2Loader.dll" copy "%%f" wix\WebView2Loader.dll `
  && >> C:\build.cmd echo echo === Step 2: Compile custom actions DLL === `
  && >> C:\build.cmd echo cd /d C:\src\wix `
  && >> C:\build.cmd echo cl /LD /O2 ca\PunchdCA.c ca\PunchdCA.def /Fe:ca\PunchdCA.dll /link msi.lib advapi32.lib shell32.lib user32.lib ole32.lib `

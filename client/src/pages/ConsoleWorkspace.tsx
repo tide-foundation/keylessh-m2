@@ -17,6 +17,7 @@ type ConsoleTab = {
   gatewayUrl?: string;
   gatewayId?: string;
   backend?: string;
+  autoConnect?: boolean;
 };
 
 function newId() {
@@ -60,7 +61,9 @@ export default function ConsoleWorkspace() {
 
   useEffect(() => {
     try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(tabs));
+      // Strip autoConnect before persisting — it's a one-shot flag
+      const toStore = tabs.map(({ autoConnect, ...rest }) => rest);
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(toStore));
     } catch {
       // ignore
     }
@@ -112,15 +115,16 @@ export default function ConsoleWorkspace() {
     const sshUser = searchParams.get("user");
 
     if (gatewayUrl && gateway && backend && sshUser) {
-      // Gateway SSH mode
+      // Gateway SSH mode — autoConnect since user clicked from Dashboard
       const tabId = newId();
       setTabs((prev) => [...prev, {
         id: tabId,
-        serverId: backend, // use backend name as serverId for display
+        serverId: backend,
         sshUser,
         gatewayUrl,
         gatewayId: gateway,
         backend,
+        autoConnect: true,
       }]);
       setActiveTabId(tabId);
       setLocation("/app/console");
@@ -240,6 +244,7 @@ export default function ConsoleWorkspace() {
                 onCloseTab={() => closeTab(tab.id)}
                 gatewayUrl={tab.gatewayUrl}
                 gatewayId={tab.gatewayId}
+                autoConnect={tab.autoConnect}
               />
             </TabsContent>
           ))}

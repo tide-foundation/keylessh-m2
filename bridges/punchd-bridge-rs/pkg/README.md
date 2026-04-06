@@ -1,6 +1,6 @@
 # Punchd VPN — Packaging & Deployment
 
-Punchd VPN tunnels IP traffic through punchd-bridge gateways using WebRTC DataChannels. It runs as a system service, auto-connects on boot, and auto-reconnects on disconnect.
+Punchd VPN tunnels IP traffic through punchd-bridge gateways using QUIC P2P (NAT hole-punched via STUN, with TURN relay fallback). Authentication uses TideCloak OIDC with full DPoP support via an embedded WebView2 browser (Heimdall enclave). It runs as a system service, auto-connects on boot, and auto-reconnects on disconnect.
 
 ## Table of Contents
 
@@ -96,8 +96,8 @@ wix extension add WixToolset.UI.wixext
 
 **Build the MSI:**
 ```powershell
-# Cross-compile from Linux/WSL
-cargo build --release --target x86_64-pc-windows-gnu --bin punchd-vpn
+# Cross-compile from Linux/WSL (with WebView2 DPoP support)
+cargo build --release --target x86_64-pc-windows-gnu --features webview --bin punchd-vpn
 
 # Build MSI (from Windows/PowerShell)
 cd wix
@@ -522,24 +522,26 @@ services:
 ```
 User device                          Gateway LAN
 ┌──────────────┐                    ┌──────────────────┐
-│  punchd-vpn  │◄──── WebRTC ─────►│  punchd-bridge   │
-│  (TUN iface) │    DataChannel     │  (TUN + NAT)     │
-│  10.66.0.x   │    0x04 prefix     │  10.66.0.1       │
-└──────────────┘                    └──────┬───────────┘
-                                           │
-                                    ┌──────▼───────────┐
-                                    │  LAN: 192.168.x  │
+│  punchd-vpn  │◄── QUIC P2P ─────►│  punchd-bridge   │
+│  + WebView2  │   (hole-punched)   │  (QUIC + TUN)    │
+│  (TUN iface) │   QUIC datagrams   │  10.66.0.1       │
+│  10.66.0.x   │                    └──────┬───────────┘
+└──────────────┘                           │
+       │                            ┌──────▼───────────┐
+       └── TURN relay (fallback) ──►│  LAN: 192.168.x  │
                                     │  RDP, SSH, HTTP   │
                                     └──────────────────┘
 ```
 
 **How it works:**
-1. Client authenticates via TideCloak OIDC (JWT with `vpn:<gatewayId>` role)
+1. Client authenticates via WebView2 (TideCloak OIDC + Heimdall DPoP)
 2. Connects to signal server via WebSocket for signaling
-3. WebRTC peer connection established (with STUN/TURN for NAT traversal)
-4. TUN interface created on both sides
-5. IP packets prefixed with `0x04` and sent over the DataChannel
-6. Gateway NATs packets to its LAN
+3. STUN resolves public address, both sides exchange addresses
+4. QUIC P2P connection established (NAT hole-punched, same UDP socket as STUN)
+5. Auth stream: JWT + DPoP proof verified by gateway
+6. VPN tunnel: QUIC datagrams carry IP packets (unreliable, low overhead)
+7. Gateway enforces firewall rules from JWT roles, NATs packets to LAN
+8. If direct P2P fails: automatic TURN relay fallback (ChannelData framing)
 
 **Features:**
 - Auto-connect on boot, auto-reconnect on disconnect (exponential backoff: 2s → 4s → 8s → ... → 60s max)

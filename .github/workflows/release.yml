@@ -9,74 +9,262 @@ permissions:
   contents: write
 
 jobs:
-  # ── Punchd Gateway (Rust) ── builds for Linux and Windows
-  build-gateway:
+  # ════════════════════════════════════════════════════════════════
+  # Punchd VPN Client — Windows MSI (with WebView2 DPoP)
+  # ════════════════════════════════════════════════════════════════
+  build-vpn-msi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: Build
+        run: |
+          cd bridges/punchd-bridge-rs
+          cargo build --release --bin punchd-vpn --target x86_64-pc-windows-gnu --features webview
+          cp target/x86_64-pc-windows-gnu/release/punchd-vpn.exe wix/
+          cp webview2/WebView2Loader_amd64.dll wix/WebView2Loader.dll
+      - name: Install WiX
+        run: |
+          dotnet tool install --global wix
+          wix extension add --global WixToolset.UI.wixext
+      - name: Build MSI
+        working-directory: bridges/punchd-bridge-rs/wix
+        run: wix build punchd-vpn.wxs -arch x64 -o punchd-vpn.msi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: punchd-vpn-windows-msi
+          path: bridges/punchd-bridge-rs/wix/punchd-vpn.msi
+
+  # ════════════════════════════════════════════════════════════════
+  # Punchd VPN Client — Linux .deb (with WebView/webkit2gtk)
+  # ════════════════════════════════════════════════════════════════
+  build-vpn-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+          cargo install cargo-deb
+      - name: Build deb
+        run: |
+          cd bridges/punchd-bridge-rs
+          cargo build --release --bin punchd-vpn --features webview
+          cargo deb --no-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: punchd-vpn-linux-deb
+          path: bridges/punchd-bridge-rs/target/debian/*.deb
+
+  # ════════════════════════════════════════════════════════════════
+  # Punchd VPN Client — macOS (x64 + ARM64)
+  # ════════════════════════════════════════════════════════════════
+  build-vpn-macos:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact: punchd-gateway-linux-x64
-            binary: punchd-gateway
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: punchd-gateway-windows-x64
-            binary: punchd-gateway.exe
-    runs-on: ${{ matrix.os }}
+          - target: x86_64-apple-darwin
+            artifact: punchd-vpn-macos-x64
+          - target: aarch64-apple-darwin
+            artifact: punchd-vpn-macos-arm64
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Build gateway
-        run: cargo build --release --manifest-path bridges/punchd-bridge-rs/Cargo.toml --target ${{ matrix.target }}
-
-      - name: Package artifact
-        shell: bash
+      - name: Build
+        run: |
+          cargo build --release --bin punchd-vpn \
+            --manifest-path bridges/punchd-bridge-rs/Cargo.toml \
+            --target ${{ matrix.target }}
+      - name: Package
         run: |
           mkdir -p dist
-          cp "bridges/punchd-bridge-rs/target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/
+          cp bridges/punchd-bridge-rs/target/${{ matrix.target }}/release/punchd-vpn dist/
           cd dist && tar czf ../${{ matrix.artifact }}.tar.gz *
-
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.tar.gz
 
+  # ════════════════════════════════════════════════════════════════
+  # PunchdEndpoint — Windows combined MSI (TideSSP + Gateway)
+  # ════════════════════════════════════════════════════════════════
+  build-endpoint-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Install MinGW
+        run: choco install mingw -y
+      - name: Install WiX
+        run: |
+          dotnet tool install --global wix
+          wix extension add --global WixToolset.UI.wixext
+          wix extension add --global WixToolset.Util.wixext
+      - name: Build TideSSP DLLs (MSVC)
+        run: |
+          cmake -B tide-ssp/build -S tide-ssp -A x64
+          cmake --build tide-ssp/build --config Release
+      - name: Build Gateway (GNU — static binary)
+        run: |
+          cd bridges/punchd-bridge-rs
+          cargo build --release --target x86_64-pc-windows-gnu --bin punchd-bridge-rs
+          New-Item -ItemType Directory -Force -Path target/release
+          Copy-Item target/x86_64-pc-windows-gnu/release/punchd-bridge-rs.exe target/release/
+      - name: Build combined MSI
+        run: |
+          New-Item -ItemType Directory -Force -Path tide-ssp/out
+          wix build tide-ssp/installer/WorkstationProduct.wxs -arch x64 `
+            -bindpath BinDir=tide-ssp/build/Release `
+            -bindpath InstallerDir=tide-ssp/installer `
+            -bindpath PunchdDir=bridges/punchd-bridge-rs/target/release `
+            -o tide-ssp/out/PunchdEndpoint.msi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PunchdEndpoint-windows-msi
+          path: tide-ssp/out/PunchdEndpoint.msi
 
-  # ── TideSSP (Windows MSI) ──
+  # ════════════════════════════════════════════════════════════════
+  # PunchdEndpoint — Linux .deb (Gateway only, TideSSP is Windows-only)
+  # ════════════════════════════════════════════════════════════════
+  build-endpoint-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build gateway
+        run: |
+          cd bridges/punchd-bridge-rs
+          cargo build --release --bin punchd-bridge-rs
+      - name: Package deb
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p pkg-deb/DEBIAN pkg-deb/usr/bin pkg-deb/etc/punchd-gateway
+          cp bridges/punchd-bridge-rs/target/release/punchd-bridge-rs pkg-deb/usr/bin/
+          chmod 755 pkg-deb/usr/bin/punchd-bridge-rs
+          cat > pkg-deb/DEBIAN/control << EOF
+          Package: punchd-gateway
+          Version: ${VERSION:-1.0.0}
+          Architecture: amd64
+          Maintainer: KeyleSSH <support@keylessh.com>
+          Depends: ca-certificates, libssl3
+          Section: net
+          Priority: optional
+          Description: Punchd Gateway - NAT-traversing reverse proxy with QUIC VPN and DPoP
+          EOF
+          dpkg-deb --build pkg-deb punchd-gateway-linux-x64.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: punchd-gateway-linux-deb
+          path: punchd-gateway-linux-x64.deb
+
+  # ════════════════════════════════════════════════════════════════
+  # PunchdEndpoint — macOS (Gateway binary, x64 + ARM64)
+  # ════════════════════════════════════════════════════════════════
+  build-endpoint-macos:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            artifact: punchd-gateway-macos-x64
+          - target: aarch64-apple-darwin
+            artifact: punchd-gateway-macos-arm64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build gateway
+        run: |
+          cargo build --release --bin punchd-bridge-rs \
+            --manifest-path bridges/punchd-bridge-rs/Cargo.toml \
+            --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp bridges/punchd-bridge-rs/target/${{ matrix.target }}/release/punchd-bridge-rs dist/
+          cd dist && tar czf ../${{ matrix.artifact }}.tar.gz *
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
+  # ════════════════════════════════════════════════════════════════
+  # TideSSP — standalone MSI (Windows only, passwordless RDP)
+  # ════════════════════════════════════════════════════════════════
   build-tidessp:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install WiX Toolset
+      - name: Install WiX
         run: dotnet tool install --global wix
-
       - name: Build TideSSP DLLs
         run: |
           cmake -B tide-ssp/build -S tide-ssp -A x64
           cmake --build tide-ssp/build --config Release
-
       - name: Build MSI
         run: |
-          wix build tide-ssp/installer/Product.wxs -arch x64 -bindpath BinDir=tide-ssp/build/Release -bindpath InstallerDir=tide-ssp/installer -o tide-ssp/out/TideSSP.msi
-
+          wix build tide-ssp/installer/Product.wxs -arch x64 `
+            -bindpath BinDir=tide-ssp/build/Release `
+            -bindpath InstallerDir=tide-ssp/installer `
+            -o tide-ssp/out/TideSSP.msi
       - uses: actions/upload-artifact@v4
         with:
           name: TideSSP-installer
           path: tide-ssp/out/TideSSP.msi
 
-  # ── Create GitHub Release ──
-  release:
-    needs: [build-gateway, build-tidessp]
+  # ════════════════════════════════════════════════════════════════
+  # Punchd Gateway — Docker image
+  # ════════════════════════════════════════════════════════════════
+  build-gateway-docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        if: github.event_name == 'push'
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: bridges/punchd-bridge-rs
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            tideorg/punchd-gateway:latest
+            tideorg/punchd-gateway:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
+  # ════════════════════════════════════════════════════════════════
+  # Create GitHub Release
+  # ════════════════════════════════════════════════════════════════
+  release:
+    needs:
+      - build-vpn-msi
+      - build-vpn-deb
+      - build-vpn-macos
+      - build-endpoint-windows
+      - build-endpoint-linux
+      - build-endpoint-macos
+      - build-tidessp
+      - build-gateway-docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -86,6 +274,12 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            artifacts/punchd-gateway-linux-x64/*.tar.gz
-            artifacts/punchd-gateway-windows-x64/*.tar.gz
+            artifacts/punchd-vpn-windows-msi/punchd-vpn.msi
+            artifacts/punchd-vpn-linux-deb/*.deb
+            artifacts/punchd-vpn-macos-x64/*.tar.gz
+            artifacts/punchd-vpn-macos-arm64/*.tar.gz
+            artifacts/PunchdEndpoint-windows-msi/PunchdEndpoint.msi
+            artifacts/punchd-gateway-linux-deb/punchd-gateway-linux-x64.deb
+            artifacts/punchd-gateway-macos-x64/*.tar.gz
+            artifacts/punchd-gateway-macos-arm64/*.tar.gz
             artifacts/TideSSP-installer/TideSSP.msi

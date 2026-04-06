@@ -214,6 +214,16 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                             }
                         }
 
+                        // Also resolve nativeAddress (for VPN clients)
+                        let mut native_address = parsed["nativeAddress"].as_str().unwrap_or("").to_string();
+                        if native_address.starts_with("0.0.0.0:") {
+                            if let Some(gw) = state.registry.get_gateway(from) {
+                                if let Some(ref ip) = gw.public_ip {
+                                    native_address = native_address.replace("0.0.0.0", ip);
+                                }
+                            }
+                        }
+
                         let msg = serde_json::json!({
                             "type": "quic_address",
                             "fromId": from,
@@ -221,6 +231,7 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                             "certHash": parsed["certHash"],
                             "relayUrl": format!("{}:{}", state.config.relay_host, state.config.relay_port),
                             "gatewayId": from,
+                            "nativeAddress": native_address,
                         });
                         forward_to_peer(&state, target, &msg);
                     }

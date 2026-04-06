@@ -47,7 +47,7 @@ pub fn make_server_config() -> (ServerConfig, String) {
 
     let mut transport = TransportConfig::default();
     transport.max_idle_timeout(Some(
-        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(30)).unwrap(),
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(120)).unwrap(),
     ));
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     // Allow large streams for RDP/VPN
@@ -76,7 +76,7 @@ pub fn make_client_config() -> quinn::ClientConfig {
 
     let mut transport = TransportConfig::default();
     transport.max_idle_timeout(Some(
-        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(30)).unwrap(),
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(120)).unwrap(),
     ));
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     transport.max_concurrent_bidi_streams(100u32.into());

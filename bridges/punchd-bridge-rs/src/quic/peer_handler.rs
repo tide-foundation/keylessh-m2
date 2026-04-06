@@ -39,6 +39,8 @@ struct PeerState {
     client_id: String,
     connection: Connection,
     vpn_session: Option<VpnSession>,
+    /// JWT token from auth stream — kept for VPN role checking
+    token: Option<String>,
 }
 
 pub struct QuicPeerHandler {
@@ -119,13 +121,56 @@ impl QuicPeerHandler {
             }
         };
 
+        // Read DPoP proof (length-prefixed: u16 big-endian + proof bytes, 0 = no DPoP)
+        let dpop_proof = if recv.read_exact(&mut len_buf).await.is_ok() {
+            let dpop_len = u16::from_be_bytes(len_buf) as usize;
+            if dpop_len > 0 && dpop_len <= 8192 {
+                let mut dpop_buf = vec![0u8; dpop_len];
+                if recv.read_exact(&mut dpop_buf).await.is_ok() {
+                    String::from_utf8(dpop_buf).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None // Old client without DPoP support
+        };
+
         // Verify JWT
         if let Some(ref auth) = self.options.auth {
             match auth.verify_token(&token).await {
                 Some(payload) => {
                     let user = payload.sub.as_deref().unwrap_or("unknown");
-                    tracing::info!("[QUIC] Authenticated: {user} (client: {client_id})");
-                    // Send auth OK
+
+                    // Verify DPoP proof if token has cnf.jkt (DPoP-bound)
+                    let expected_jkt = crate::auth::dpop::extract_cnf_jkt(&token);
+                    if let Some(ref jkt) = expected_jkt {
+                        match &dpop_proof {
+                            Some(proof) => {
+                                let verifier = crate::auth::dpop::DPoPVerifier::new();
+                                if let Err(e) = verifier.verify_proof(proof, "POST", "quic://gateway/auth", Some(jkt)) {
+                                    tracing::warn!("[QUIC] DPoP verification failed for {user}: {e}");
+                                    let _ = send.write_all(b"DENIED").await;
+                                    let _ = send.finish();
+                                    conn.close(4u32.into(), b"dpop failed");
+                                    return;
+                                }
+                                tracing::info!("[QUIC] Authenticated with DPoP: {user} (client: {client_id})");
+                            }
+                            None => {
+                                tracing::warn!("[QUIC] Token requires DPoP but no proof provided for {user}");
+                                let _ = send.write_all(b"DENIED").await;
+                                let _ = send.finish();
+                                conn.close(4u32.into(), b"dpop required");
+                                return;
+                            }
+                        }
+                    } else {
+                        tracing::info!("[QUIC] Authenticated: {user} (client: {client_id})");
+                    }
+
                     let _ = send.write_all(b"OK").await;
                     let _ = send.finish();
                 }
@@ -143,11 +188,12 @@ impl QuicPeerHandler {
             let _ = send.finish();
         }
 
-        // Store peer state
+        // Store peer state (keep token for VPN role checking)
         let peer_state = Arc::new(Mutex::new(PeerState {
             client_id: client_id.clone(),
             connection: conn.clone(),
             vpn_session: None,
+            token: Some(token),
         }));
 
         {
@@ -258,6 +304,9 @@ async fn handle_bidi_stream(
         }
         stream_type::SSH => {
             handle_ssh_stream(send, recv, options, client_id).await;
+        }
+        stream_type::VPN => {
+            handle_vpn_stream(send, recv, options, peer_state, client_id).await;
         }
         other => {
             tracing::warn!("[QUIC] Unknown stream type 0x{other:02x} from {client_id}");
@@ -526,6 +575,166 @@ async fn handle_ssh_stream(
 
     tokio::join!(quic_to_tcp, tcp_to_quic);
     tracing::info!("[QUIC] SSH stream ended: {addr}");
+}
+
+/// VPN control stream — handle vpn_open request, set up VPN session.
+async fn handle_vpn_stream(
+    mut send: SendStream,
+    mut recv: RecvStream,
+    options: Arc<QuicPeerHandlerOptions>,
+    peer_state: Arc<Mutex<PeerState>>,
+    client_id: String,
+) {
+    // Read length-prefixed JSON: [len:u32][json]
+    let mut len_buf = [0u8; 4];
+    if recv.read_exact(&mut len_buf).await.is_err() { return; }
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > 65536 { return; }
+    let mut buf = vec![0u8; len];
+    if recv.read_exact(&mut buf).await.is_err() { return; }
+
+    let req: serde_json::Value = match serde_json::from_slice(&buf) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let req_type = req["type"].as_str().unwrap_or("");
+    tracing::info!("[QUIC] VPN control: {req_type} from {client_id}");
+
+    if req_type == "vpn_open" {
+        // Get stored JWT token for role verification
+        let token = {
+            let ps = peer_state.lock().await;
+            ps.token.clone()
+        };
+
+        let vpn_state = match options.vpn_state {
+            Some(ref vs) => vs.clone(),
+            None => {
+                let err = serde_json::json!({"type": "vpn_error", "message": "VPN not configured on this gateway"});
+                let err_bytes = err.to_string();
+                let _ = send.write_all(&(err_bytes.len() as u32).to_be_bytes()).await;
+                let _ = send.write_all(err_bytes.as_bytes()).await;
+                return;
+            }
+        };
+
+        // Use handle_vpn_open which verifies JWT roles and builds firewall rules
+        let mut session = match crate::vpn::vpn_handler::handle_vpn_open(
+            vpn_state.clone(),
+            client_id.clone(),
+            token.as_deref(),
+            options.auth.as_ref(),
+            &options.gateway_id,
+        ).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("[QUIC] VPN access denied for {client_id}: {e}");
+                let err = serde_json::json!({"type": "vpn_error", "message": e});
+                let err_bytes = err.to_string();
+                let _ = send.write_all(&(err_bytes.len() as u32).to_be_bytes()).await;
+                let _ = send.write_all(err_bytes.as_bytes()).await;
+                return;
+            }
+        };
+
+        let client_ip_addr = session.client_ip;
+        let client_ip = client_ip_addr.to_string();
+
+        // Ensure TUN device is started
+        {
+            let vs = vpn_state.lock().await;
+            if !vs.tun_started() {
+                let vpn_clone = vpn_state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::vpn::vpn_handler::ensure_tun_started(vpn_clone).await {
+                        tracing::error!("[VPN] TUN start error: {e}");
+                    }
+                });
+            }
+        }
+
+        // Register route: TUN reads for this client_ip → send as QUIC datagram
+        {
+            let (route_tx, mut route_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            {
+                let mut vs = vpn_state.lock().await;
+                vs.routes.insert(client_ip_addr, route_tx);
+            }
+
+            let conn = {
+                let ps = peer_state.lock().await;
+                ps.connection.clone()
+            };
+            tokio::spawn(async move {
+                while let Some(packet) = route_rx.recv().await {
+                    let ip_data = if !packet.is_empty() && packet[0] == 0x04 {
+                        &packet[1..]
+                    } else {
+                        &packet
+                    };
+                    if let Err(e) = conn.send_datagram(bytes::Bytes::copy_from_slice(ip_data)) {
+                        tracing::debug!("[QUIC] VPN datagram send error: {e}");
+                        break;
+                    }
+                }
+            });
+        }
+
+        // Drain firewall block notifications (log only — can't send back on QUIC control stream from here)
+        if let Some(mut block_rx) = session.block_rx.take() {
+            tokio::spawn(async move {
+                while let Some((dst_ip, dst_port)) = block_rx.recv().await {
+                    tracing::debug!("[QUIC] VPN blocked: {}:{}", dst_ip, dst_port);
+                }
+            });
+        }
+
+        // Set VPN session on peer state (with firewall from JWT roles)
+        {
+            let mut ps = peer_state.lock().await;
+            ps.vpn_session = Some(session);
+        }
+
+        // Send vpn_opened response (with LAN routes for client-side route installation)
+        let resp = {
+            let vs = vpn_state.lock().await;
+            let ps = peer_state.lock().await;
+            crate::vpn::vpn_handler::vpn_opened_response(
+                ps.vpn_session.as_ref().unwrap(),
+                vs.pool.gateway_ip,
+                vs.pool.netmask,
+            )
+        };
+        let resp_bytes = resp.to_string();
+        let _ = send.write_all(&(resp_bytes.len() as u32).to_be_bytes()).await;
+        let _ = send.write_all(resp_bytes.as_bytes()).await;
+
+        tracing::info!("[QUIC] VPN session opened for {client_id}: client={client_ip}");
+
+        // Keep control stream alive
+        let mut ctrl_buf = [0u8; 4096];
+        loop {
+            match recv.read(&mut ctrl_buf).await {
+                Ok(Some(0)) | Err(_) => break,
+                Ok(Some(_n)) => { /* control messages */ }
+                Ok(None) => break,
+            }
+        }
+
+        // Cleanup: remove route and release IP
+        if let Some(ref vpn_state) = options.vpn_state {
+            let mut vs = vpn_state.lock().await;
+            vs.routes.remove(&client_ip_addr);
+            vs.pool.release(client_ip_addr);
+        }
+        {
+            let mut ps = peer_state.lock().await;
+            ps.vpn_session = None;
+        }
+
+        tracing::info!("[QUIC] VPN session closed for {client_id}");
+    }
 }
 
 /// Handle a VPN datagram (unreliable IP packet).

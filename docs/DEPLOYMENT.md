@@ -9,7 +9,8 @@ KeyleSSH has several deployable components. This guide walks through deploying e
 | **Main Server** | React UI + REST API + built-in SSH bridge | Linux VM / container | Yes |
 | **TideCloak** | Authentication & authorization (OIDC) | Docker | Yes |
 | **Signal Server** | WebRTC signaling + HTTP relay + STUN/TURN | Public-facing Linux VM | For Punch'd Bridge |
-| **Punch'd Bridge** | NAT-traversing reverse proxy gateway | Private network | For RDP / web app access |
+| **Punch'd Bridge** | NAT-traversing reverse proxy gateway + VPN | Private network | For RDP / web app / VPN access |
+| **Punchd VPN** | QUIC P2P VPN client with WebView2 DPoP | User device | For VPN tunnel to gateway LAN |
 | **SSH Bridge** | WebSocket-to-TCP tunnel for SSH sessions | Any server with SSH access | For standalone SSH bridging |
 | **TideSSP** | Passwordless RDP via Ed25519 SSP | Windows RDP target | For passwordless RDP |
 
@@ -188,6 +189,7 @@ BACKENDS="MyApp=http://localhost:3000" \
 | `GATEWAY_DISPLAY_NAME` | — | auto | Name shown in portal |
 | `GATEWAY_DESCRIPTION` | — | — | Description shown in portal |
 | `HTTPS` | — | true | Generate self-signed TLS |
+| `QUIC_PORT` | — | 7893 | QUIC/VPN UDP port (STUN + P2P) |
 | `TC_CLIENT_ID` | — | from `tidecloak.json` | Override client ID for role lookups in `resource_access` |
 
 ### Backend format
@@ -255,7 +257,54 @@ curl https://SIGNAL_SERVER_IP:9090/health
 
 ---
 
-## 4. SSH Bridge
+## 4. Punchd VPN Client
+
+Native VPN client that tunnels IP traffic through the gateway over QUIC P2P. Authenticates via an embedded WebView2 browser running the full TideCloak + Heimdall DPoP flow.
+
+### Build
+
+```bash
+cd bridges/punchd-bridge-rs
+
+# Windows with WebView2 DPoP (recommended)
+cargo build --release --target x86_64-pc-windows-gnu --features webview --bin punchd-vpn
+
+# Linux/macOS
+cargo build --release --bin punchd-vpn
+```
+
+### VPN Roles (TideCloak)
+
+Assign these roles to users in TideCloak:
+
+| Role | Description |
+|------|-------------|
+| `vpn:<gatewayId>` | Basic VPN access to the gateway |
+| `vpn:<gw>:allow:<cidr>:<ports>` | Allow traffic to subnet/ports |
+| `vpn:<gw>:deny:<cidr>:<ports>` | Deny traffic to subnet/ports |
+
+Without the `vpn:<gatewayId>` role, the connection is rejected.
+
+### Firewall
+
+Open UDP port 7893 on the gateway for QUIC P2P. If behind symmetric NAT, configure TURN:
+
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 7893 | UDP | QUIC VPN (gateway side) |
+| 3478 | UDP + TCP | STUN/TURN (signal server side) |
+| 49152–65535 | UDP | TURN relay range |
+
+### Offline Mode (No Signal Server)
+
+The VPN client can connect directly to a gateway without a signal server:
+1. Add the gateway URL in the **Gateways** tab on the Dashboard
+2. The client connects directly to the gateway's QUIC port
+3. No signaling or STUN required for same-network connections
+
+---
+
+## 5. SSH Bridge
 
 A standalone WebSocket-to-TCP bridge for SSH sessions. Browsers connect via WebSocket, the bridge pipes traffic to the SSH server over TCP.
 
@@ -507,6 +556,16 @@ Browser
                     │             └─ Verifies JWT, creates logon session
                     │
                     └─ HTTP ──→ Web App (localhost:3000)
+
+VPN Client (punchd-vpn)
+  │
+  ├─ WebView2 ──→ TideCloak (OIDC + Heimdall DPoP)
+  │
+  ├─ Signal Server (signaling + STUN address exchange)
+  │
+  └─ QUIC P2P ──→ Punch'd Bridge (port 7893/UDP, NAT hole-punched)
+                    │
+                    └─ TUN ──→ LAN (192.168.x — IP forwarding)
 ```
 
 ### Quick start
@@ -527,6 +586,7 @@ Browser
 | coturn | 49152–65535 | UDP | TURN relay range |
 | Punch'd Bridge | 7891 | TCP | Proxy (HTTP/HTTPS) |
 | Punch'd Bridge | 7892 | TCP | Health check |
+| Punch'd Bridge | 7893 | UDP | QUIC VPN (P2P + STUN) |
 | SSH Bridge | 8081 | TCP | WebSocket SSH tunnel |
 | Main Server | 3000 | TCP | UI + API |
 

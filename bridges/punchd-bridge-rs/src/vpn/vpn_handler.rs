@@ -337,6 +337,26 @@ impl VpnState {
             tun_started: false,
         }
     }
+
+    pub fn tun_started(&self) -> bool {
+        self.tun_started
+    }
+}
+
+/// Ensure the TUN device is started (called when first VPN session connects).
+pub async fn ensure_tun_started(vpn_state: Arc<Mutex<VpnState>>) -> Result<(), String> {
+    {
+        let mut vs = vpn_state.lock().await;
+        if vs.tun_started {
+            return Ok(());
+        }
+        vs.tun_started = true;
+    }
+
+    let gateway_ip: Ipv4Addr = "10.66.0.1".parse().unwrap();
+    let netmask: Ipv4Addr = "255.255.255.0".parse().unwrap();
+
+    run_tun_device("punchd-vpn0".to_string(), gateway_ip, netmask, vpn_state).await
 }
 
 /// Handle a `vpn_open` message from a peer.

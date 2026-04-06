@@ -30,7 +30,6 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 const VPN_TUNNEL_MAGIC: u8 = 0x04;
-const CALLBACK_PORT: u16 = 19876;
 const AGENT_PORT: u16 = 19877;
 
 #[derive(Parser, Debug)]
@@ -360,6 +359,9 @@ mod quic_transport;
 
 #[path = "../quic/turn_client.rs"]
 mod turn_client;
+
+#[path = "../vpn/webview_auth.rs"]
+mod webview_auth;
 
 // ── Windows Service support ───────────────────────────────────────────
 
@@ -813,7 +815,7 @@ async fn main() {
             tracing::info!("  STUN server: {}", stun_server);
             tracing::info!("  Gateway: {}", gateway_id);
 
-            let resolved = ResolvedConfig {
+            let mut resolved = ResolvedConfig {
                 stun_server,
                 gateway_id,
                 tc_path,
@@ -827,12 +829,34 @@ async fn main() {
             };
 
             if args.standalone {
-                // Standalone: single attempt, exit on failure
-                if let Err(e) = run_vpn(resolved).await {
-                    tracing::error!("VPN error: {}", e);
-                    eprintln!("\nPress Enter to exit...");
-                    let _ = std::io::Read::read(&mut std::io::stdin(), &mut [0u8]);
-                    std::process::exit(1);
+                // Standalone: auto-reconnect with backoff
+                let mut backoff_secs: u64 = 2;
+                loop {
+                    match run_vpn(resolved.clone()).await {
+                        Ok(()) => {
+                            tracing::info!("VPN disconnected cleanly");
+                            backoff_secs = 2;
+                        }
+                        Err(e) if e.contains("access denied") || e.contains("Access denied") => {
+                            tracing::error!("VPN access denied: {e}");
+                            eprintln!("\n*** VPN ACCESS DENIED ***");
+                            eprintln!("Your account does not have the required VPN role.");
+                            eprintln!("Ask your admin to assign the role, then re-login.");
+                            eprintln!("Re-opening browser login in 60s (or press Ctrl+C to exit)...\n");
+                            // Wait longer — role change requires a fresh token
+                            tokio::time::sleep(Duration::from_secs(60)).await;
+                            // Clear cached token so next attempt re-authenticates
+                            resolved.token = None;
+                            backoff_secs = 2;
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!("VPN error: {e}");
+                        }
+                    }
+                    tracing::info!("Reconnecting in {backoff_secs}s...");
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(30);
                 }
             } else {
                 // Agent mode: auto-reconnect with exponential backoff
@@ -1228,565 +1252,33 @@ fn generate_dpop_proof_with_nonce(method: &str, url: &str, nonce: &str) -> Resul
 }
 
 async fn oidc_login(_tc: &TcConfig) -> Result<String, String> {
-    // Open the KeyleSSH web app's VPN auth page.
-    // If user is logged in, it sends the token immediately.
-    // If not, it opens a login popup, waits for auth, then sends the token.
     let app_url = std::env::var("SERVER_URL")
         .unwrap_or_else(|_| "https://demo.keylessh.com".to_string());
-    let login_url = format!(
-        "{}/gateway/vpn-auth.html?callback=http://localhost:{}/token",
-        app_url.trim_end_matches('/'),
-        CALLBACK_PORT,
-    );
 
-    tracing::info!("Opening browser for login...");
-    tracing::info!("If the browser doesn't open, visit:");
-    tracing::info!("  {}", login_url);
-
-    open_browser(&login_url);
-
-    // Start local HTTP server to receive the callback
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], CALLBACK_PORT)))
-        .await
-        .map_err(|e| format!("Failed to bind callback server on port {CALLBACK_PORT}: {e}"))?;
-
-    tracing::info!("Waiting for login callback on port {CALLBACK_PORT}...");
-
-    // Accept one connection
-    // Wait for the vpn-auth.html page to POST the token
-    loop {
-        let (stream, _) = tokio::time::timeout(Duration::from_secs(120), listener.accept())
-            .await
-            .map_err(|_| "Login timeout (120s)".to_string())?
-            .map_err(|e| format!("Accept error: {e}"))?;
-
-        let mut stream = stream;
-        let mut buf = vec![0u8; 16384];
-        let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
-            .await
-            .map_err(|e| format!("Read error: {e}"))?;
-        let request = String::from_utf8_lossy(&buf[..n]).to_string();
-        let first_line = request.lines().next().unwrap_or("");
-
-        // Handle CORS preflight
-        if first_line.starts_with("OPTIONS") {
-            let resp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
-            continue;
-        }
-
-        // Extract token from POST body
-        let mut token = None;
-        if let Some(body_start) = request.find("\r\n\r\n") {
-            let body = request[body_start + 4..].trim();
-            if !body.is_empty() {
-                token = Some(body.to_string());
-            }
-        }
-
-        let resp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
-        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
-
-        if let Some(t) = token {
-            if !t.is_empty() {
-                tracing::info!("Token received from browser!");
-                return Ok(t);
-            }
-        }
+    // If WebView is running in background, it may have a refreshed token already
+    if let Some(token) = webview_auth::get_latest_token() {
+        tracing::info!("Using refreshed token from WebView");
+        return Ok(token);
     }
-}
 
-fn urldecoded(s: &str) -> String {
-    url::form_urlencoded::parse(s.as_bytes())
-        .next()
-        .map(|(k, v)| {
-            if v.is_empty() {
-                k.to_string()
-            } else {
-                format!("{k}={v}")
-            }
-        })
-        .unwrap_or_else(|| s.to_string())
-}
-
-fn open_browser(url: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        // Use rundll32 to open URL — cmd /C start breaks on & in URLs
-        let _ = std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", url])
-            .spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(url).spawn();
-    }
+    // Open embedded WebView for OIDC login (full DPoP via Heimdall)
+    tracing::info!("Opening embedded login window (WebView)...");
+    webview_auth::webview_oidc_login(&app_url).await
 }
 
 // ── VPN connection ──────────────────────────────────────────────────
 
 async fn run_vpn(cfg: ResolvedConfig) -> Result<(), String> {
-    // Use QUIC transport by default
-    return run_vpn_quic(cfg).await;
-
-    // Legacy WebRTC path (kept for fallback — unreachable by default)
-    #[allow(unreachable_code)]
-    // Load TideCloak config and login
-    let tc = load_tc_config(&cfg.tc_path, &cfg.tc_b64)?;
-    tracing::info!("TideCloak: realm={}, auth={}", tc.realm, tc.auth_server_url);
-
-    let token = oidc_login(&tc).await?;
-
-    // Connect to STUN signaling server
-    tracing::info!("Connecting to STUN server...");
-
-    let connector = {
-        let tls = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .map_err(|e| format!("TLS error: {e}"))?;
-        Some(tokio_tungstenite::Connector::NativeTls(tls))
-    };
-
-    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
-        &cfg.stun_server,
-        None,
-        false,
-        connector,
-    )
-    .await
-    .map_err(|e| format!("Failed to connect to STUN server: {e}"))?;
-
-    tracing::info!("Connected to STUN server");
-
-    let (ws_sink, ws_stream) = ws_stream.split();
-
-    // Register as a client
-    let peer_id = uuid::Uuid::new_v4().to_string();
-    let register_msg = json!({
-        "type": "register",
-        "role": "client",
-        "id": peer_id,
-        "targetGatewayId": cfg.gateway_id,
-    });
-
-    let ws_sink = Arc::new(Mutex::new(ws_sink));
-    {
-        let mut sink = ws_sink.lock().await;
-        sink.send(Message::Text(register_msg.to_string()))
-            .await
-            .map_err(|e| format!("Failed to send register: {e}"))?;
-    }
-
-    tracing::info!("Registered as client: {}", peer_id);
-
-    // Build WebRTC API
-    let mut media_engine = MediaEngine::default();
-    media_engine.register_default_codecs().ok();
-    let mut registry = Registry::new();
-    registry = register_default_interceptors(registry, &mut media_engine)
-        .expect("Failed to register interceptors");
-    let setting_engine = SettingEngine::default();
-    let api = Arc::new(
-        APIBuilder::new()
-            .with_media_engine(media_engine)
-            .with_interceptor_registry(registry)
-            .with_setting_engine(setting_engine)
-            .build(),
-    );
-
-    // Build ICE server list
-    let mut ice_servers = Vec::new();
-    if let Some(ref ice) = cfg.ice_server {
-        ice_servers.push(RTCIceServer {
-            urls: vec![ice.clone()],
-            ..Default::default()
-        });
-    }
-    if let Some(ref turn) = cfg.turn_server {
-        let (username, credential) = if let Some(ref secret) = cfg.turn_secret {
-            generate_turn_credentials(secret, &peer_id)
-        } else {
-            (String::new(), String::new())
-        };
-        ice_servers.push(RTCIceServer {
-            urls: vec![turn.clone()],
-            username,
-            credential,
-            ..Default::default()
-        });
-    }
-
-    let rtc_config = RTCConfiguration {
-        ice_servers,
-        ..Default::default()
-    };
-
-    let pc = api
-        .new_peer_connection(rtc_config)
-        .await
-        .map_err(|e| format!("Failed to create peer connection: {e}"))?;
-    let pc = Arc::new(pc);
-
-    // Create DataChannels (client creates them, bridge receives)
-    let control_dc = pc
-        .create_data_channel("http-tunnel", None)
-        .await
-        .map_err(|e| format!("Failed to create control channel: {e}"))?;
-
-    // Unordered + unreliable for VPN packets — eliminates head-of-line blocking.
-    // TCP retransmits at the app layer, so SCTP reliability is redundant and harmful.
-    let bulk_dc = pc
-        .create_data_channel("bulk-data", Some({
-            let mut init = webrtc::data_channel::data_channel_init::RTCDataChannelInit::default();
-            init.ordered = Some(false);
-            init.max_retransmits = Some(3);
-            init
-        }))
-        .await
-        .map_err(|e| format!("Failed to create bulk channel: {e}"))?;
-
-    // Channels for VPN packet flow
-    let (tun_write_tx, tun_write_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let vpn_ready = Arc::new(Notify::new());
-    let vpn_config: Arc<Mutex<Option<VpnConfig>>> = Arc::new(Mutex::new(None));
-
-    // Control channel: handle vpn_opened response
-    let vpn_config_ctrl = vpn_config.clone();
-    let vpn_ready_ctrl = vpn_ready.clone();
-    control_dc.on_message(Box::new(move |msg: DataChannelMessage| {
-        let vpn_config = vpn_config_ctrl.clone();
-        let vpn_ready = vpn_ready_ctrl.clone();
-        Box::pin(async move {
-            let buf = msg.data.to_vec();
-            if let Ok(text) = String::from_utf8(buf) {
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                    let msg_type = parsed["type"].as_str().unwrap_or("");
-                    match msg_type {
-                        "vpn_opened" => {
-                            let client_ip: Ipv4Addr = parsed["clientIp"]
-                                .as_str()
-                                .unwrap_or("10.66.0.2")
-                                .parse()
-                                .unwrap_or(Ipv4Addr::new(10, 0, 0, 2));
-                            let server_ip: Ipv4Addr = parsed["serverIp"]
-                                .as_str()
-                                .unwrap_or("10.66.0.1")
-                                .parse()
-                                .unwrap_or(Ipv4Addr::new(10, 0, 0, 1));
-                            let netmask: Ipv4Addr = parsed["netmask"]
-                                .as_str()
-                                .unwrap_or("255.255.255.0")
-                                .parse()
-                                .unwrap_or(Ipv4Addr::new(255, 255, 255, 0));
-                            let mtu = parsed["mtu"].as_u64().unwrap_or(1400) as u16;
-
-                            let routes: Vec<String> = parsed["routes"]
-                                .as_array()
-                                .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-                                .unwrap_or_default();
-
-                            tracing::info!(
-                                "VPN opened: client={}, server={}, mtu={}, routes={:?}",
-                                client_ip, server_ip, mtu, routes
-                            );
-
-                            let mut cfg = vpn_config.lock().await;
-                            *cfg = Some(VpnConfig { client_ip, server_ip, netmask, mtu, routes });
-                            vpn_ready.notify_one();
-                        }
-                        "vpn_error" => {
-                            let message = parsed["message"].as_str().unwrap_or("unknown");
-                            tracing::error!("VPN error from gateway: {}", message);
-                        }
-                        "vpn_blocked" => {
-                            let dst = parsed["destination"].as_str().unwrap_or("?");
-                            let port = parsed["port"].as_u64().unwrap_or(0);
-                            let message = parsed["message"].as_str().unwrap_or("");
-                            tracing::warn!("ACCESS DENIED: {}:{} — {}", dst, port, message);
-                        }
-                        "capabilities" => {
-                            let features = parsed["features"]
-                                .as_array()
-                                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
-                                .unwrap_or_default();
-                            tracing::info!("Gateway capabilities: {}", features);
-                        }
-                        _ => {
-                            tracing::debug!("Control message: {}", msg_type);
-                        }
-                    }
-                }
-            }
-        })
-    }));
-
-    // Bulk channel: receive VPN packets from bridge
-    let tun_write_tx_bulk = tun_write_tx.clone();
-    bulk_dc.on_message(Box::new(move |msg: DataChannelMessage| {
-        let tx = tun_write_tx_bulk.clone();
-        Box::pin(async move {
-            let buf = msg.data.to_vec();
-            if buf.len() > 1 && buf[0] == VPN_TUNNEL_MAGIC {
-                let _ = tx.send(buf[1..].to_vec());
-            }
-        })
-    }));
-
-    // Wait for control channel to open, then send vpn_open
-    let control_dc_open = control_dc.clone();
-    let token_clone = token.clone();
-    control_dc.on_open(Box::new(move || {
-        let dc = control_dc_open.clone();
-        let token = token_clone.clone();
-        Box::pin(async move {
-            tracing::info!("Control channel open, requesting VPN tunnel...");
-
-            let caps = json!({
-                "type": "capabilities",
-                "features": ["bulk-channel", "vpn-tunnel"],
-            });
-            let _ = dc.send_text(caps.to_string()).await;
-
-            let vpn_open = json!({
-                "type": "vpn_open",
-                "id": uuid::Uuid::new_v4().to_string(),
-                "token": token,
-            });
-            let _ = dc.send_text(vpn_open.to_string()).await;
-        })
-    }));
-
-    // ICE candidate handling
-    let ws_sink_ice = ws_sink.clone();
-    let gw_id = cfg.gateway_id.clone();
-    let cid = peer_id.clone();
-    pc.on_ice_candidate(Box::new(move |candidate| {
-        let ws_sink = ws_sink_ice.clone();
-        let gw_id = gw_id.clone();
-        let cid = cid.clone();
-        Box::pin(async move {
-            if let Some(c) = candidate {
-                if let Ok(json_str) = c.to_json() {
-                    let msg = json!({
-                        "type": "candidate",
-                        "fromId": cid,
-                        "targetId": gw_id,
-                        "candidate": {
-                            "candidate": json_str.candidate,
-                            "mid": json_str.sdp_mid.unwrap_or_default(),
-                        },
-                    });
-                    let mut sink = ws_sink.lock().await;
-                    let _ = sink.send(Message::Text(msg.to_string())).await;
-                }
-            }
-        })
-    }));
-
-    // Create and send SDP offer
-    let offer = pc.create_offer(None).await
-        .map_err(|e| format!("Failed to create offer: {e}"))?;
-    pc.set_local_description(offer.clone()).await
-        .map_err(|e| format!("Failed to set local description: {e}"))?;
-
-    let offer_msg = json!({
-        "type": "sdp_offer",
-        "fromId": peer_id,
-        "targetId": cfg.gateway_id,
-        "sdp": offer.sdp,
-    });
-    {
-        let mut sink = ws_sink.lock().await;
-        sink.send(Message::Text(offer_msg.to_string())).await
-            .map_err(|e| format!("Failed to send offer: {e}"))?;
-    }
-
-    tracing::info!("SDP offer sent, waiting for answer...");
-
-    // Process STUN signaling messages
-    let pc_sig = pc.clone();
-    let mut ws_stream = ws_stream;
-    tokio::spawn(async move {
-        while let Some(Ok(msg)) = ws_stream.next().await {
-            if let Message::Text(text) = msg {
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                    let msg_type = parsed["type"].as_str().unwrap_or("");
-                    match msg_type {
-                        "sdp_answer" => {
-                            let sdp = parsed["sdp"].as_str().unwrap_or("");
-                            match RTCSessionDescription::answer(sdp.to_string()) {
-                                Ok(answer) => {
-                                    if let Err(e) = pc_sig.set_remote_description(answer).await {
-                                        tracing::error!("Failed to set remote description: {}", e);
-                                    } else {
-                                        tracing::info!("SDP answer applied");
-                                    }
-                                }
-                                Err(e) => tracing::error!("Invalid SDP answer: {}", e),
-                            }
-                        }
-                        "candidate" => {
-                            // Gateway sends nested: { candidate: { candidate: "...", mid: "..." } }
-                            // or flat: { candidate: "...", sdpMid: "..." }
-                            let (candidate_str, sdp_mid) = if let Some(obj) = parsed["candidate"].as_object() {
-                                (
-                                    obj.get("candidate").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                    obj.get("mid").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                                )
-                            } else {
-                                (
-                                    parsed["candidate"].as_str().unwrap_or("").to_string(),
-                                    parsed["sdpMid"].as_str().map(|s| s.to_string()),
-                                )
-                            };
-                            if !candidate_str.is_empty() {
-                                let init = RTCIceCandidateInit {
-                                    candidate: candidate_str,
-                                    sdp_mid,
-                                    ..Default::default()
-                                };
-                                if let Err(e) = pc_sig.add_ice_candidate(init).await {
-                                    tracing::error!("Failed to add ICE candidate: {}", e);
-                                }
-                            }
-                        }
-                        "registered" => tracing::info!("Registered with STUN server"),
-                        "paired" => tracing::info!("Paired with gateway"),
-                        "error" => {
-                            let message = parsed["message"].as_str().unwrap_or("unknown");
-                            tracing::error!("STUN server error: {}", message);
-                        }
-                        _ => tracing::debug!("STUN message: {}", msg_type),
-                    }
-                }
-            }
-        }
-        tracing::warn!("STUN WebSocket closed");
-    });
-
-    // Wait for VPN to be established
-    tracing::info!("Waiting for VPN tunnel...");
-    tokio::select! {
-        _ = vpn_ready.notified() => {}
-        _ = tokio::time::sleep(Duration::from_secs(30)) => {
-            return Err("Timeout waiting for VPN tunnel".into());
-        }
-    }
-
-    let vpn_cfg = vpn_config.lock().await.clone().unwrap();
-
-    // Create TUN device
-    tracing::info!("Creating TUN device: {} ({})", cfg.tun_name, vpn_cfg.client_ip);
-
-    let tun_cfg = tun_device::TunConfig {
-        name: cfg.tun_name.clone(),
-        address: vpn_cfg.client_ip,
-        netmask: vpn_cfg.netmask,
-        mtu: vpn_cfg.mtu,
-    };
-
-    let mut tun = tun_device::TunDevice::create(&tun_cfg)
-        .map_err(|e| format!("Failed to create TUN device: {e}"))?;
-
-    tracing::info!("TUN device created successfully");
-
-    if cfg.default_route {
-        setup_routing(&cfg.tun_name, &vpn_cfg.server_ip.to_string());
-    }
-
-    // Install LAN routes pushed by the gateway
-    let gateway_ip_str = vpn_cfg.server_ip.to_string();
-    for route in &vpn_cfg.routes {
-        install_route(route, &gateway_ip_str);
-    }
-
-    tracing::info!("VPN tunnel active! Press Ctrl+C to disconnect.");
-    tracing::info!("  Local IP:   {}", vpn_cfg.client_ip);
-    tracing::info!("  Gateway IP: {}", vpn_cfg.server_ip);
-    tracing::info!("  MTU:        {}", vpn_cfg.mtu);
-    if !vpn_cfg.routes.is_empty() {
-        tracing::info!("  Routes:     {:?}", vpn_cfg.routes);
-    }
-
-    // Packet forwarding loop
-    let bulk_dc_send = bulk_dc.clone();
-    let mut tun_write_rx = tun_write_rx;
-    let mut read_buf = vec![0u8; 65536];
-
-    loop {
-        tokio::select! {
-            result = tun.read(&mut read_buf) => {
-                match result {
-                    Ok(n) if n >= 20 => {
-                        // Drop non-IPv4 packets (IPv6 noise, etc.)
-                        if (read_buf[0] >> 4) != 4 {
-                            continue;
-                        }
-                        let src = std::net::Ipv4Addr::new(read_buf[12], read_buf[13], read_buf[14], read_buf[15]);
-                        let dst = std::net::Ipv4Addr::new(read_buf[16], read_buf[17], read_buf[18], read_buf[19]);
-                        let proto = read_buf[9];
-                        tracing::debug!("[VPN] TUN read: {} -> {} proto={} ({} bytes)", src, dst, proto, n);
-                        let mut frame = Vec::with_capacity(1 + n);
-                        frame.push(VPN_TUNNEL_MAGIC);
-                        frame.extend_from_slice(&read_buf[..n]);
-                        if let Err(e) = bulk_dc_send.send(&Bytes::from(frame)).await {
-                            tracing::error!("Failed to send to bulk channel: {}", e);
-                            break;
-                        }
-                    }
-                    Ok(n) => {
-                        tracing::debug!("[VPN] TUN read: short packet ({} bytes)", n);
-                    }
-                    Err(e) => {
-                        tracing::error!("TUN read error: {}", e);
-                        break;
-                    }
-                }
-            }
-            data = tun_write_rx.recv() => {
-                match data {
-                    Some(packet) => {
-                        if packet.len() >= 20 {
-                            let src = std::net::Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
-                            let dst = std::net::Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-                            tracing::debug!("[VPN] TUN write: {} -> {} ({} bytes)", src, dst, packet.len());
-                        }
-                        if let Err(e) = tun.write(&packet).await {
-                            tracing::error!("TUN write error: {}", e);
-                            break;
-                        }
-                    }
-                    None => {
-                        tracing::info!("Bulk channel closed");
-                        break;
-                    }
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Shutting down VPN...");
-                break;
-            }
-        }
-    }
-
-    // Remove LAN routes on disconnect
-    for route in &vpn_cfg.routes {
-        remove_route(route);
-    }
-
-    let _ = pc.close().await;
-    tracing::info!("VPN disconnected");
-    Ok(())
+    run_vpn_quic(cfg).await
 }
 
 /// QUIC-based VPN connection — no WebRTC, no SDP, no ICE.
 /// Connects to signaling, receives gateway's QUIC address, connects directly.
 async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
+    run_vpn_quic_inner(cfg, None).await
+}
+
+async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>) -> Result<(), String> {
     let tc = load_tc_config(&cfg.tc_path, &cfg.tc_b64)?;
     tracing::info!("[QUIC-VPN] TideCloak: realm={}, auth={}", tc.realm, tc.auth_server_url);
 
@@ -1901,9 +1393,10 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
                         }
                         "quic_address" => {
                             // Gateway sent its QUIC address
-                            if let Some(addr_str) = parsed["address"].as_str() {
+                            let addr_str = parsed["address"].as_str();
+                            if let Some(addr_str) = addr_str {
                                 if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
-                                    tracing::info!("[QUIC-VPN] Gateway QUIC address: {addr}");
+                                    tracing::info!("[QUIC-VPN] Gateway native QUIC address: {addr}");
                                     *gateway_addr_clone.lock().await = Some(addr);
                                     gateway_addr_notify_clone.notify_one();
                                 }
@@ -1933,18 +1426,31 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
 
     // Send UDP punch packets to the gateway's address (opens NAT pinhole)
     // The gateway also punches us (via the "punch" signaling message)
+    // Send punch packets to the gateway to open OUR NAT pinhole
+    // This must happen before the gateway's punch arrives, so both NATs are open
     tracing::info!("[QUIC-VPN] Sending punch packets to {gateway_addr}...");
-    let punch_sock = quic_endpoint.local_addr()
-        .map_err(|e| format!("Local addr error: {e}"))?;
-    // Use a raw UDP socket clone for punching (quinn owns the main socket)
-    // Actually, we can't clone quinn's socket. Instead, the STUN request already
-    // opened a pinhole for the STUN server. The gateway's punch to our address
-    // opens the gateway's NAT for us. We just need to try connecting.
-    // For portal-tunneler style: both sides send simultaneously.
-    // Quinn's connect() sends the Initial packet which IS the punch from our side.
 
-    // Wait a moment for the gateway to send its punch packets
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Send our quic_address to the gateway (triggers gateway to punch us)
+    // Then immediately start punching from our side
+    {
+        let mut sink = ws_sink.lock().await;
+        let _ = sink.send(Message::Text(serde_json::json!({
+            "type": "quic_address",
+            "targetId": cfg.gateway_id,
+            "fromId": peer_id,
+            "address": public_addr.to_string(),
+        }).to_string())).await;
+    }
+
+    // Use quinn's rebind trick: the QUIC endpoint can't send raw UDP, but
+    // we can use connect() as a punch — it sends a QUIC Initial packet.
+    // Send multiple rapid connect attempts to punch the NAT:
+    for i in 0..3 {
+        let _ = quic_endpoint.connect(gateway_addr, "punchd-gateway");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Small delay to let gateway's return punch arrive
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Try direct QUIC connection (our connect = our punch)
     tracing::info!("[QUIC-VPN] Connecting QUIC to {gateway_addr}...");
@@ -1970,11 +1476,27 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
 
     tracing::info!("[QUIC-VPN] QUIC connected to gateway");
 
-    // Auth stream: send JWT
+    // Auth stream: send JWT + DPoP proof
     let (mut auth_send, mut auth_recv) = conn.open_bi().await
         .map_err(|e| format!("Failed to open auth stream: {e}"))?;
 
-    // [type=0x01][token_len:u16][token_bytes]
+    // Try to generate a DPoP proof via WebView (if available)
+    let dpop_proof = match webview_auth::request_dpop_proof("POST", "quic://gateway/auth").await {
+        Ok(proof) if !proof.starts_with("ERROR:") => {
+            tracing::info!("[QUIC-VPN] DPoP proof generated");
+            Some(proof)
+        }
+        Ok(err) => {
+            tracing::warn!("[QUIC-VPN] DPoP proof failed: {err}");
+            None
+        }
+        Err(e) => {
+            tracing::debug!("[QUIC-VPN] DPoP not available: {e}");
+            None
+        }
+    };
+
+    // [type=0x01][token_len:u16][token_bytes][dpop_len:u16][dpop_bytes]
     auth_send.write_all(&[0x01u8 /* AUTH */]).await
         .map_err(|e| format!("Auth write error: {e}"))?;
     let token_bytes = token.as_bytes();
@@ -1982,6 +1504,18 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
         .map_err(|e| format!("Auth write error: {e}"))?;
     auth_send.write_all(token_bytes).await
         .map_err(|e| format!("Auth write error: {e}"))?;
+
+    // DPoP proof (0 length = no DPoP)
+    if let Some(ref proof) = dpop_proof {
+        let proof_bytes = proof.as_bytes();
+        auth_send.write_all(&(proof_bytes.len() as u16).to_be_bytes()).await
+            .map_err(|e| format!("Auth write error: {e}"))?;
+        auth_send.write_all(proof_bytes).await
+            .map_err(|e| format!("Auth write error: {e}"))?;
+    } else {
+        auth_send.write_all(&0u16.to_be_bytes()).await
+            .map_err(|e| format!("Auth write error: {e}"))?;
+    }
     auth_send.finish().map_err(|e| format!("Auth finish error: {e}"))?;
 
     // Read auth response
@@ -2066,6 +1600,7 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
 
     // Packet forwarding loop using QUIC datagrams
     let mut read_buf = vec![0u8; 65536];
+    let mut shutdown_fuse = shutdown_rx;
 
     loop {
         tokio::select! {
@@ -2103,6 +1638,16 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
                     }
                 }
             }
+            // Agent shutdown request
+            _ = async {
+                match shutdown_fuse.as_mut() {
+                    Some(rx) => { let _ = rx.await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                tracing::info!("[QUIC-VPN] Shutdown requested by agent");
+                break;
+            }
             // Ctrl+C
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("[QUIC-VPN] Shutting down...");
@@ -2122,9 +1667,16 @@ async fn run_vpn_quic(cfg: ResolvedConfig) -> Result<(), String> {
 }
 
 /// Try TURN relay when direct QUIC connection fails.
+///
+/// Architecture: quinn can't speak TURN natively, so we:
+/// 1. Allocate a relay on the TURN server (with ChannelBind)
+/// 2. Start a local UDP proxy (localhost) that wraps/unwraps ChannelData
+/// 3. Create a new quinn endpoint that connects through the proxy
+///
+/// quinn -> localhost:proxy -> TURN server -> gateway
 async fn try_turn_relay(
     cfg: &ResolvedConfig,
-    quic_endpoint: &quinn::Endpoint,
+    _quic_endpoint: &quinn::Endpoint, // unused — we create a new endpoint for TURN
     gateway_addr: std::net::SocketAddr,
     peer_id: &str,
 ) -> Result<quinn::Connection, String> {
@@ -2137,12 +1689,13 @@ async fn try_turn_relay(
 
     let (username, credential) = turn_client::generate_credentials(turn_secret, peer_id);
 
-    // Separate socket for TURN since quinn owns its socket
+    // Separate UDP socket for TURN control
     let turn_socket = Arc::new(
         tokio::net::UdpSocket::bind("0.0.0.0:0").await
             .map_err(|e| format!("TURN socket bind: {e}"))?
     );
 
+    // Allocate relay + bind channel for the gateway peer
     let allocation = turn_client::allocate(
         turn_socket.clone(),
         turn_server,
@@ -2153,12 +1706,20 @@ async fn try_turn_relay(
 
     let relay_addr = allocation.relay_addr();
     tracing::info!("[QUIC-VPN] TURN relay allocated: {relay_addr}");
-    tracing::info!("[QUIC-VPN] Connecting QUIC through TURN relay...");
 
-    // Connect QUIC to the gateway through TURN
-    // The gateway sees the connection coming from the TURN relay address
-    let conn = quic_endpoint
-        .connect(gateway_addr, "punchd-gateway")
+    // Start local UDP proxy: quinn <-> ChannelData <-> TURN server
+    let (proxy_addr, _shutdown_tx) = turn_client::start_turn_proxy(allocation).await?;
+
+    tracing::info!("[QUIC-VPN] Connecting QUIC through TURN proxy {proxy_addr}...");
+
+    // Create a new quinn endpoint that sends to the proxy
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap())
+        .map_err(|e| format!("QUIC TURN endpoint: {e}"))?;
+    endpoint.set_default_client_config(quic_transport::make_client_config());
+
+    // Connect to the proxy address — proxy forwards to TURN -> gateway
+    let conn = endpoint
+        .connect(proxy_addr, "punchd-gateway")
         .map_err(|e| format!("QUIC connect via TURN: {e}"))?
         .await
         .map_err(|e| format!("QUIC via TURN failed: {e}"))?;
@@ -2169,279 +1730,18 @@ async fn try_turn_relay(
 
 /// Agent-mode VPN connection — takes token directly, no OIDC login.
 /// Accepts a shutdown receiver to disconnect on demand.
+/// Agent-mode VPN connection — uses QUIC + WebView DPoP (same as standalone).
+/// The token parameter is ignored — WebView handles authentication.
+/// Accepts a shutdown receiver to disconnect on demand.
 async fn run_vpn_with_token(
     cfg: ResolvedConfig,
-    token: String,
+    _token: String,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), String> {
-    agent_log("Connecting to STUN server...");
-
-    let connector = {
-        let tls = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .map_err(|e| format!("TLS error: {e}"))?;
-        Some(tokio_tungstenite::Connector::NativeTls(tls))
-    };
-
-    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
-        &cfg.stun_server, None, false, connector,
-    )
-    .await
-    .map_err(|e| format!("Failed to connect to STUN server: {e}"))?;
-
-    agent_log("Connected to STUN server");
-
-    let (ws_sink, ws_stream) = ws_stream.split();
-    let peer_id = uuid::Uuid::new_v4().to_string();
-
-    let ws_sink = Arc::new(Mutex::new(ws_sink));
-    {
-        let register_msg = json!({
-            "type": "register",
-            "role": "client",
-            "id": peer_id,
-            "targetGatewayId": cfg.gateway_id,
-        });
-        let mut sink = ws_sink.lock().await;
-        sink.send(Message::Text(register_msg.to_string())).await
-            .map_err(|e| format!("Failed to register: {e}"))?;
-    }
-
-    // Build WebRTC (same as run_vpn)
-    let mut media_engine = MediaEngine::default();
-    media_engine.register_default_codecs().ok();
-    let mut registry = Registry::new();
-    registry = register_default_interceptors(registry, &mut media_engine).expect("interceptors");
-    let api = Arc::new(APIBuilder::new()
-        .with_media_engine(media_engine)
-        .with_interceptor_registry(registry)
-        .with_setting_engine(SettingEngine::default())
-        .build());
-
-    let mut ice_servers = Vec::new();
-    if let Some(ref ice) = cfg.ice_server {
-        ice_servers.push(RTCIceServer { urls: vec![ice.clone()], ..Default::default() });
-    }
-    if let Some(ref turn) = cfg.turn_server {
-        let (username, credential) = if let Some(ref secret) = cfg.turn_secret {
-            generate_turn_credentials(secret, &peer_id)
-        } else { (String::new(), String::new()) };
-        ice_servers.push(RTCIceServer { urls: vec![turn.clone()], username, credential, ..Default::default() });
-    }
-
-    let pc = Arc::new(api.new_peer_connection(RTCConfiguration { ice_servers, ..Default::default() }).await
-        .map_err(|e| format!("PeerConnection error: {e}"))?);
-
-    let control_dc = pc.create_data_channel("http-tunnel", None).await
-        .map_err(|e| format!("Control channel error: {e}"))?;
-    let bulk_dc = pc.create_data_channel("bulk-data", Some({
-        let mut init = webrtc::data_channel::data_channel_init::RTCDataChannelInit::default();
-        init.ordered = Some(false);
-        init.max_retransmits = Some(3);
-        init
-    })).await.map_err(|e| format!("Bulk channel error: {e}"))?;
-
-    let (tun_write_tx, tun_write_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let vpn_ready = Arc::new(Notify::new());
-    let vpn_config: Arc<Mutex<Option<VpnConfig>>> = Arc::new(Mutex::new(None));
-
-    // Control channel handler
-    let vpn_config_ctrl = vpn_config.clone();
-    let vpn_ready_ctrl = vpn_ready.clone();
-    control_dc.on_message(Box::new(move |msg: DataChannelMessage| {
-        let vpn_config = vpn_config_ctrl.clone();
-        let vpn_ready = vpn_ready_ctrl.clone();
-        Box::pin(async move {
-            if let Ok(text) = String::from_utf8(msg.data.to_vec()) {
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                    match parsed["type"].as_str().unwrap_or("") {
-                        "vpn_opened" => {
-                            let client_ip: Ipv4Addr = parsed["clientIp"].as_str().unwrap_or("10.66.0.2").parse().unwrap_or(Ipv4Addr::new(10, 66, 0, 2));
-                            let server_ip: Ipv4Addr = parsed["serverIp"].as_str().unwrap_or("10.66.0.1").parse().unwrap_or(Ipv4Addr::new(10, 66, 0, 1));
-                            let netmask: Ipv4Addr = parsed["netmask"].as_str().unwrap_or("255.255.255.0").parse().unwrap_or(Ipv4Addr::new(255, 255, 255, 0));
-                            let mtu = parsed["mtu"].as_u64().unwrap_or(1400) as u16;
-                            let routes: Vec<String> = parsed["routes"].as_array()
-                                .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-                                .unwrap_or_default();
-                            let mut cfg = vpn_config.lock().await;
-                            *cfg = Some(VpnConfig { client_ip, server_ip, netmask, mtu, routes });
-                            vpn_ready.notify_one();
-                        }
-                        "vpn_error" => { agent_log(&format!("VPN error: {}", parsed["message"].as_str().unwrap_or("unknown"))); }
-                        "vpn_blocked" => {
-                            let dst = parsed["destination"].as_str().unwrap_or("?");
-                            let port = parsed["port"].as_u64().unwrap_or(0);
-                            agent_log(&format!("ACCESS DENIED: {}:{}", dst, port));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        })
-    }));
-
-    // Bulk channel handler
-    let tun_write_tx_bulk = tun_write_tx.clone();
-    bulk_dc.on_message(Box::new(move |msg: DataChannelMessage| {
-        let tx = tun_write_tx_bulk.clone();
-        Box::pin(async move {
-            let buf = msg.data.to_vec();
-            if buf.len() > 1 && buf[0] == VPN_TUNNEL_MAGIC {
-                let _ = tx.send(buf[1..].to_vec());
-            }
-        })
-    }));
-
-    // Send vpn_open on control channel open
-    let control_dc_open = control_dc.clone();
-    let token_clone = token.clone();
-    control_dc.on_open(Box::new(move || {
-        let dc = control_dc_open.clone();
-        let token = token_clone.clone();
-        Box::pin(async move {
-            let _ = dc.send_text(json!({"type": "capabilities", "features": ["bulk-channel", "vpn-tunnel"]}).to_string()).await;
-            let _ = dc.send_text(json!({"type": "vpn_open", "id": uuid::Uuid::new_v4().to_string(), "token": token}).to_string()).await;
-        })
-    }));
-
-    // ICE candidates
-    let ws_sink_ice = ws_sink.clone();
-    let gw_id = cfg.gateway_id.clone();
-    let cid = peer_id.clone();
-    pc.on_ice_candidate(Box::new(move |candidate| {
-        let ws_sink = ws_sink_ice.clone();
-        let gw_id = gw_id.clone();
-        let cid = cid.clone();
-        Box::pin(async move {
-            if let Some(c) = candidate {
-                if let Ok(j) = c.to_json() {
-                    let msg = json!({"type": "candidate", "fromId": cid, "targetId": gw_id, "candidate": {"candidate": j.candidate, "mid": j.sdp_mid.unwrap_or_default()}});
-                    let mut sink = ws_sink.lock().await;
-                    let _ = sink.send(Message::Text(msg.to_string())).await;
-                }
-            }
-        })
-    }));
-
-    // Send SDP offer
-    let offer = pc.create_offer(None).await.map_err(|e| format!("Offer error: {e}"))?;
-    pc.set_local_description(offer.clone()).await.map_err(|e| format!("Set local desc: {e}"))?;
-    {
-        let msg = json!({"type": "sdp_offer", "fromId": peer_id, "targetId": cfg.gateway_id, "sdp": offer.sdp});
-        let mut sink = ws_sink.lock().await;
-        sink.send(Message::Text(msg.to_string())).await.map_err(|e| format!("Send offer: {e}"))?;
-    }
-
-    // STUN signaling task
-    let pc_sig = pc.clone();
-    let mut ws_stream = ws_stream;
-    tokio::spawn(async move {
-        while let Some(Ok(msg)) = ws_stream.next().await {
-            if let Message::Text(text) = msg {
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                    match parsed["type"].as_str().unwrap_or("") {
-                        "sdp_answer" => {
-                            if let Ok(answer) = RTCSessionDescription::answer(parsed["sdp"].as_str().unwrap_or("").to_string()) {
-                                let _ = pc_sig.set_remote_description(answer).await;
-                                agent_log("SDP answer applied");
-                            }
-                        }
-                        "candidate" => {
-                            let (cs, mid) = if let Some(obj) = parsed["candidate"].as_object() {
-                                (obj.get("candidate").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                 obj.get("mid").and_then(|v| v.as_str()).map(|s| s.to_string()))
-                            } else {
-                                (parsed["candidate"].as_str().unwrap_or("").to_string(),
-                                 parsed["sdpMid"].as_str().map(|s| s.to_string()))
-                            };
-                            if !cs.is_empty() {
-                                let _ = pc_sig.add_ice_candidate(RTCIceCandidateInit { candidate: cs, sdp_mid: mid, ..Default::default() }).await;
-                            }
-                        }
-                        "error" => { agent_log(&format!("STUN error: {}", parsed["message"].as_str().unwrap_or("unknown"))); }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    });
-
-    // Wait for VPN tunnel
-    agent_log("Waiting for VPN tunnel...");
-    tokio::select! {
-        _ = vpn_ready.notified() => {}
-        _ = tokio::time::sleep(Duration::from_secs(30)) => {
-            return Err("Timeout waiting for VPN tunnel".into());
-        }
-    }
-
-    let vpn_cfg = vpn_config.lock().await.clone().unwrap();
-    agent_log(&format!("VPN connected: {} -> {} routes={:?}", vpn_cfg.client_ip, vpn_cfg.server_ip, vpn_cfg.routes));
-
-    // Agent info is updated by the caller via the AgentState
-
-    // Create TUN
-    let tun_cfg = tun_device::TunConfig {
-        name: cfg.tun_name.clone(),
-        address: vpn_cfg.client_ip,
-        netmask: vpn_cfg.netmask,
-        mtu: vpn_cfg.mtu,
-    };
-    let mut tun = tun_device::TunDevice::create(&tun_cfg)
-        .map_err(|e| format!("TUN device error: {e}"))?;
-
-    agent_log("TUN device created");
-
-    // Install routes
-    let gateway_ip_str = vpn_cfg.server_ip.to_string();
-    for route in &vpn_cfg.routes {
-        install_route(route, &gateway_ip_str);
-        agent_log(&format!("Route added: {} via {}", route, gateway_ip_str));
-    }
-
-    // Packet forwarding loop
-    let bulk_dc_send = bulk_dc.clone();
-    let mut tun_write_rx = tun_write_rx;
-    let mut read_buf = vec![0u8; 65536];
-    let mut shutdown_rx = shutdown_rx;
-
-    loop {
-        tokio::select! {
-            result = tun.read(&mut read_buf) => {
-                match result {
-                    Ok(n) if n >= 20 => {
-                        if (read_buf[0] >> 4) != 4 { continue; }
-                        let mut frame = Vec::with_capacity(1 + n);
-                        frame.push(VPN_TUNNEL_MAGIC);
-                        frame.extend_from_slice(&read_buf[..n]);
-                        if bulk_dc_send.send(&Bytes::from(frame)).await.is_err() { break; }
-                    }
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-            }
-            data = tun_write_rx.recv() => {
-                match data {
-                    Some(packet) => { let _ = tun.write(&packet).await; }
-                    None => break,
-                }
-            }
-            _ = &mut shutdown_rx => {
-                agent_log("Shutdown signal received");
-                break;
-            }
-        }
-    }
-
-    // Cleanup routes
-    for route in &vpn_cfg.routes {
-        remove_route(route);
-    }
-
-    let _ = pc.close().await;
-    agent_log("VPN disconnected");
-    Ok(())
+    // Use the QUIC path with WebView auth (token: None forces oidc_login → WebView)
+    let mut cfg = cfg;
+    cfg.token = None; // Force WebView login for DPoP support
+    run_vpn_quic_inner(cfg, Some(shutdown_rx)).await
 }
 
 #[derive(Clone)]

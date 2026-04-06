@@ -16,12 +16,22 @@ EXE_PATH="${1:-$SCRIPT_DIR/../target/x86_64-pc-windows-gnu/release/punchd-vpn.ex
 if [ ! -f "$EXE_PATH" ]; then
     echo "Error: punchd-vpn.exe not found at $EXE_PATH"
     echo "Build it first:"
-    echo "  cargo build --release --target x86_64-pc-windows-gnu --bin punchd-vpn"
+    echo "  cargo build --release --target x86_64-pc-windows-gnu --features webview --bin punchd-vpn"
     exit 1
 fi
 
 # Copy exe next to the wxs and CA source
 cp "$EXE_PATH" "$SCRIPT_DIR/punchd-vpn.exe"
+
+# Copy WebView2Loader.dll from build artifacts
+WV2_DLL=$(find "$SCRIPT_DIR/../target/x86_64-pc-windows-gnu/release/build" -name "WebView2Loader.dll" -path "*/x64/*" 2>/dev/null | head -1)
+if [ -n "$WV2_DLL" ]; then
+    cp "$WV2_DLL" "$SCRIPT_DIR/WebView2Loader.dll"
+    echo "  WebView2Loader.dll: $WV2_DLL"
+else
+    echo "Warning: WebView2Loader.dll not found in build artifacts"
+    echo "  The exe has it embedded, but MSI install is cleaner with the DLL alongside"
+fi
 
 echo "Building Punchd VPN MSI..."
 echo "  Exe: $EXE_PATH"
@@ -36,7 +46,7 @@ fi
 docker run --rm -v "${SCRIPT_DIR}:C:\src" punchd-vpn-builder
 
 # Cleanup
-rm -f "$SCRIPT_DIR/punchd-vpn.exe"
+rm -f "$SCRIPT_DIR/punchd-vpn.exe" "$SCRIPT_DIR/WebView2Loader.dll"
 
 if [ -f "$SCRIPT_DIR/punchd-vpn.msi" ]; then
     SIZE=$(du -h "$SCRIPT_DIR/punchd-vpn.msi" | cut -f1)

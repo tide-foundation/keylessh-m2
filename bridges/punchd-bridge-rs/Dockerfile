@@ -61,7 +61,7 @@ COPY --from=runtime-deps /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/lib/x86_6
 # Copy public assets (static files served by the gateway)
 COPY public ./public
 
-EXPOSE 7891 7892
+EXPOSE 7891 7892 7893/udp
 
 USER nonroot
 

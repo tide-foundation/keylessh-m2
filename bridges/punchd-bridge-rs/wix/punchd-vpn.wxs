@@ -25,6 +25,7 @@
       <Directory Id="INSTALLFOLDER" Name="Punchd VPN">
         <Component Id="MainExecutable" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
           <File Id="PunchdVpnExe" Source="punchd-vpn.exe" KeyPath="yes" />
+          <File Id="WebView2LoaderDll" Source="WebView2Loader.dll" />
 
           <ServiceInstall
             Id="PunchdVpnService"
@@ -112,7 +113,7 @@
         <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
                  Text="{\TitleFont}Welcome to Punchd VPN Setup" />
         <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="60"
-                 Text="{\BodyFont}This will install Punchd VPN as a Windows service. It connects to punchd-bridge gateways over WebRTC, providing secure VPN access to remote networks.&#xA;&#xA;You will need your vpn-config.toml configuration file." />
+                 Text="{\BodyFont}This will install Punchd VPN as a Windows service. It connects to punchd-bridge gateways over QUIC P2P with DPoP authentication, providing secure VPN access to remote networks.&#xA;&#xA;You will need your vpn-config.toml configuration file." />
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
                  Default="yes" Text="Next">
           <Publish Event="NewDialog" Value="ConfigDlg" />
