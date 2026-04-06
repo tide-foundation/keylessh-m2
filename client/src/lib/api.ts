@@ -352,7 +352,7 @@ export const api = {
         return requests.map((req) => ({
           id: req.retrievalInfo.changeSetId,
           requestType: req.data.actionType || req.data.action,
-          status: req.data.status,
+          status: (req.data.actionType === "DELETE" ? req.data.deleteStatus : req.data.status) || "PENDING",
           requestedBy: req.data.userRecord?.[0]?.username || "Unknown",
           requestedAt: req.data.createdAt || new Date().toISOString(),
           role: req.data.role,
