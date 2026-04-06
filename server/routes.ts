@@ -118,6 +118,7 @@ import {
   tidecloakAdmin,
   type AuthenticatedRequest,
 } from "./auth";
+import { withTcDPoP } from "./lib/tidecloakApi";
 import {
   GetUserChangeRequests,
   GetRoleChangeRequests,
@@ -593,10 +594,17 @@ export async function registerRoutes(
   app.get(
     "/api/ssh/access-status",
     authenticate,
+    withTcDPoP,
     async (req: AuthenticatedRequest, res) => {
       try {
-        // Client provides enabledUsers count (fetched direct from TideCloak via DPoP)
-        const enabledUserCount = parseInt(req.query.enabledUsers as string) || 0;
+        // Fetch user count server-side from TideCloak
+        let enabledUserCount = parseInt(req.query.enabledUsers as string) || 0;
+        if (!enabledUserCount && req.accessToken) {
+          try {
+            const users = await tidecloakAdmin.getUsers(req.accessToken);
+            enabledUserCount = users.filter((u: any) => u.enabled !== false).length;
+          } catch { /* fall through with 0 */ }
+        }
         if (enabledUserCount > 0) {
           try {
             const subscription = await subscriptionStorage.getSubscription();
@@ -1740,6 +1748,9 @@ export async function registerRoutes(
       }
     }
   );
+
+  // Forward browser's X-TC-DPoP proof to TideCloak on all admin routes
+  app.use("/api/admin", withTcDPoP);
 
   // ============================================
   // Admin User Routes
@@ -3103,10 +3114,10 @@ export async function registerRoutes(
         const requests = await GetRoleChangeRequests(token);
 
         // Transform to match frontend expectations
-        const approvals: AccessApproval[] = requests.map((req) => ({
+        const approvals = requests.map((req) => ({
           id: req.retrievalInfo.changeSetId,
           requestType: req.data.actionType || req.data.action,
-          status: req.data.status,
+          status: (req.data.actionType === "DELETE" ? req.data.deleteStatus : req.data.status) || "PENDING",
           requestedBy: req.data.userRecord?.[0]?.username || "Unknown",
           requestedAt: req.data.createdAt || new Date().toISOString(),
           role: req.data.role,
@@ -3513,11 +3524,20 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        // Client provides user counts (fetched direct from TideCloak via DPoP)
-        const userCounts = {
+        // Fetch user counts server-side
+        let userCounts = {
           total: parseInt(req.query.totalUsers as string) || 0,
           enabled: parseInt(req.query.enabledUsers as string) || 0,
         };
+        if (!userCounts.total && req.accessToken) {
+          try {
+            const users = await tidecloakAdmin.getUsers(req.accessToken);
+            userCounts = {
+              total: users.length,
+              enabled: users.filter((u: any) => u.enabled !== false).length,
+            };
+          } catch { /* keep zeros */ }
+        }
 
         // Always validate local subscription against Stripe to ensure consistency
         if (stripeLib.isStripeConfigured()) {
@@ -3669,8 +3689,14 @@ export async function registerRoutes(
 
         let currentCount: number;
         if (resource === 'user') {
-          // Client provides user count (fetched direct from TideCloak via DPoP)
+          // Fetch user count server-side
           currentCount = parseInt(req.query.count as string) || 0;
+          if (!currentCount && req.accessToken) {
+            try {
+              const users = await tidecloakAdmin.getUsers(req.accessToken);
+              currentCount = users.filter((u: any) => u.enabled !== false).length;
+            } catch { /* keep 0 */ }
+          }
         } else {
           currentCount = await subscriptionStorage.getServerCount();
         }

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   ChangeSetRequest,
   ClientRepresentation,
@@ -7,6 +8,42 @@ import {
 } from "./auth/keycloakTypes";
 import { Roles } from "@shared/config/roles";
 import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
+
+// ============================================
+// Request-scoped DPoP context
+// When the browser sends X-TC-DPoP, the middleware stores it here
+// so all TideCloak API calls within the request use DPoP auth.
+// ============================================
+
+interface TcDPoPContext {
+  token: string;
+  dpopProof?: string;
+}
+
+const tcDPoPStorage = new AsyncLocalStorage<TcDPoPContext>();
+
+/** Middleware: extract X-TC-DPoP and token, store in async context */
+export function withTcDPoP(req: any, _res: any, next: any) {
+  const dpopProof = req.headers["x-tc-dpop"] as string | undefined;
+  const token = req.accessToken as string | undefined;
+  if (token) {
+    tcDPoPStorage.run({ token, dpopProof }, next);
+  } else {
+    next();
+  }
+}
+
+/** Build Authorization headers for TideCloak — uses DPoP if available */
+export function tcAuthHeaders(token: string): Record<string, string> {
+  const ctx = tcDPoPStorage.getStore();
+  if (ctx?.dpopProof) {
+    return {
+      Authorization: `DPoP ${ctx.token}`,
+      DPoP: ctx.dpopProof,
+    };
+  }
+  return { Authorization: `Bearer ${token}` };
+}
 
 // Lazy-evaluated getters to avoid calling config functions at module load time
 const getKeycloakAuthServer = () => getAuthOverrideUrl();
@@ -103,7 +140,7 @@ export const syncPolicyToTideCloak = async (
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
     body: JSON.stringify(policy),
   });
@@ -152,7 +189,7 @@ export const GetClientEvents = async (
     method: "GET",
     headers: {
       accept: "application/json",
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
   });
 
@@ -172,7 +209,7 @@ export const getUserByVuid = async (
     method: "GET",
     headers: {
       accept: "application/json",
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
   });
 
@@ -197,7 +234,7 @@ export const getRoleById = async (
     method: "GET",
     headers: {
       accept: "application/json",
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
   });
   if (!response.ok) {
@@ -226,7 +263,7 @@ export const getClientRoles = async (
     method: "GET",
     headers: {
       accept: "application/json",
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
   });
   if (!response.ok) {
@@ -256,7 +293,7 @@ export const getTideRealmAdminRole = async (
       method: "GET",
       headers: {
         accept: "application/json",
-        Authorization: `Bearer ${token}`,
+        ...tcAuthHeaders(token),
       },
     }
   );
@@ -282,7 +319,7 @@ export const getClientByClientId = async (
     const response = await fetch(`${getTcUrl()}/clients?clientId=${clientId}`, {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${token}`,
+        ...tcAuthHeaders(token),
       },
     });
     if (!response.ok) {
@@ -311,7 +348,7 @@ export const getClientById = async (
     const response = await fetch(`${getTcUrl()}/clients/${id}`, {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${token}`,
+        ...tcAuthHeaders(token),
       },
     });
     if (!response.ok) {
@@ -336,7 +373,7 @@ export const createRoleForClient = async (
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
     body: JSON.stringify(roleRep),
   });
@@ -348,33 +385,38 @@ export const createRoleForClient = async (
   return;
 };
 
+/// Look up a role by name without putting the name in the URL path.
+/// Keycloak's GET /roles/{name} breaks on colons/slashes in role names.
+/// Lists all roles for the client and finds by name.
 export const getClientRoleByName = async (
   roleName: string,
   clientuuid: string,
   token: string
 ): Promise<RoleRepresentation> => {
   const response = await fetch(
-    `${getTcUrl()}/clients/${clientuuid}/roles/${roleName}`,
+    `${getTcUrl()}/clients/${clientuuid}/roles`,
     {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${token}`,
+        ...tcAuthHeaders(token),
       },
     }
   );
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(`Error fetching client role by name: ${response.statusText}`);
-    throw new Error(`Error fetching client role by name: ${errorBody}`);
+    throw new Error(`Error fetching client roles: ${errorBody}`);
   }
-  return response.json();
+  const roles: RoleRepresentation[] = await response.json();
+  const role = roles.find(r => r.name === roleName);
+  if (!role) throw new Error(`Role '${roleName}' not found`);
+  return role;
 };
 
 export const GetUsers = async (token: string): Promise<UserRepresentation[]> => {
   const response = await fetch(`${getTcUrl()}/users?briefRepresentation=false`, {
     method: "GET",
     headers: {
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
   });
 
@@ -407,7 +449,7 @@ export const GrantUserRole = async (
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        ...tcAuthHeaders(token),
       },
       body: JSON.stringify([role]),
     }
@@ -431,7 +473,7 @@ export const UpdateUser = async (
   const userResponse = await fetch(`${getTcUrl()}/users/${userId}`, {
     method: "GET",
     headers: {
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
   });
 
@@ -446,7 +488,7 @@ export const UpdateUser = async (
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
     body: JSON.stringify(updatedUserRep),
   });
@@ -464,7 +506,7 @@ export const DeleteUser = async (userId: string, token: string): Promise<void> =
   const response = await fetch(`${getTcUrl()}/users/${userId}`, {
     method: "DELETE",
     headers: {
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
   });
 
@@ -486,7 +528,7 @@ export const SetUserEnabled = async (
   const userResponse = await fetch(`${getTcUrl()}/users/${userId}`, {
     method: "GET",
     headers: {
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
   });
 
@@ -501,7 +543,7 @@ export const SetUserEnabled = async (
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
     body: JSON.stringify(updatedUserRep),
   });
@@ -525,12 +567,16 @@ export const DeleteRole = async (roleName: string, token: string): Promise<Delet
     getClient(),
     token
   );
+
+  // Look up role by name to get UUID (name in URL path breaks on colons/slashes)
+  const role = await getClientRoleByName(roleName, client!.id!, token);
+
   const response = await fetch(
-    `${getTcUrl()}/clients/${client!.id!}/roles/${roleName}`,
+    `${getTcUrl()}/roles-by-id/${role.id}`,
     {
       method: "DELETE",
       headers: {
-        Authorization: `Bearer ${token}`,
+        ...tcAuthHeaders(token),
       },
     }
   );
@@ -541,14 +587,14 @@ export const DeleteRole = async (roleName: string, token: string): Promise<Delet
     throw new Error(`Error deleting role: ${errorBody}`);
   }
 
-  // Check if the role still exists after deletion
-  // If it does, an approval was created instead of immediate deletion
+  // Invalidate roles cache
+  invalidateCache("clientRoles");
+
+  // Check if the role still exists after deletion (approval created instead of immediate delete)
   try {
     await getClientRoleByName(roleName, client!.id!, token);
-    // Role still exists - approval was created
     return { approvalCreated: true, message: "Approval request created" };
   } catch {
-    // Role doesn't exist - it was deleted immediately
     return { approvalCreated: false };
   }
 };
@@ -566,13 +612,14 @@ export const UpdateRole = async (
     return;
   }
 
+  // Use roles-by-id to avoid colons/slashes in URL path
   const response = await fetch(
-    `${getTcUrl()}/clients/${client!.id!}/roles/${roleRep.name!}`,
+    `${getTcUrl()}/roles-by-id/${role.id}`,
     {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        ...tcAuthHeaders(token),
       },
       body: JSON.stringify(roleRep),
     }
@@ -610,7 +657,7 @@ export const RemoveUserRole = async (
       method: "DELETE",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        ...tcAuthHeaders(token),
       },
       body: JSON.stringify([{ id: role.id, name: role.name }]),
     }
@@ -631,7 +678,7 @@ export const AddUser = async (
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
     body: JSON.stringify(userRep),
   });
@@ -650,7 +697,7 @@ export const GetUserRoleMappings = async (
   const response = await fetch(`${getTcUrl()}/users/${userId}/role-mappings`, {
     method: "GET",
     headers: {
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
   });
 
@@ -675,7 +722,7 @@ export const GetTideLinkUrl = async (
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        ...tcAuthHeaders(token),
       },
       body: JSON.stringify(["link-tide-account-action"]),
     }
@@ -714,7 +761,7 @@ export const GetUserChangeRequests = async (
     {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${token}`,
+        ...tcAuthHeaders(token),
       },
     }
   );
@@ -748,7 +795,7 @@ export const GetRoleChangeRequests = async (
     {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${token}`,
+        ...tcAuthHeaders(token),
       },
     }
   );
@@ -786,7 +833,7 @@ export const AddApprovalToChangeRequest = async (
   const response = await fetch(`${getTcUrl()}/tideAdminResources/add-review`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
     body: formData,
   });
@@ -815,7 +862,7 @@ export const AddRejectionToChangeRequest = async (
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${token}`,
+        ...tcAuthHeaders(token),
       },
       body: formData,
     }
@@ -841,7 +888,7 @@ export const CommitChangeRequest = async (
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
     body: JSON.stringify(changeSet),
   });
@@ -862,7 +909,7 @@ export const CancelChangeRequest = async (
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
     body: JSON.stringify(changeSet),
   });
@@ -889,7 +936,7 @@ export const GetRawChangeSetRequest = async (
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
     body: JSON.stringify({ changeSets: [changeSet] }),
   });
@@ -919,7 +966,7 @@ export const AddApprovalWithSignedRequest = async (
   const response = await fetch(`${getTcUrl()}/tideAdminResources/add-review`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${token}`,
+      ...tcAuthHeaders(token),
     },
     body: formData,
   });
