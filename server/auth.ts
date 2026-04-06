@@ -24,7 +24,7 @@ import {
 } from "./lib/tidecloakApi";
 import { UserRepresentation, RoleRepresentation, ClientRepresentation } from "./lib/auth/keycloakTypes";
 import { getResource, getAuthOverrideUrl, getRealm } from "./lib/auth/tidecloakConfig";
-import { tcAuthHeaders } from "./lib/tidecloakApi";
+import { tcAuthHeaders, withTcDPoP } from "./lib/tidecloakApi";
 
 // Extended Request interface with user information
 export interface AuthenticatedRequest extends Request {
@@ -232,7 +232,9 @@ export async function authenticate(
     req.user = extractUserFromPayload(payload);
     req.accessToken = token;
     req.tokenPayload = payload;
-    next();
+
+    // Set up DPoP context for TideCloak calls within this request
+    withTcDPoP(req, res, next);
   } catch (error) {
     console.error("[Auth] Token verification failed:", error);
     res.status(401).json({ message: "Token verification failed" });

@@ -29,12 +29,14 @@ export function connectDPoPSigner(): void {
   if (!token) return;
 
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = `${proto}//${window.location.host}/ws/dpop-signer?token=${encodeURIComponent(token)}`;
+  const url = `${proto}//${window.location.host}/ws/dpop-signer`;
 
   ws = new WebSocket(url);
 
   ws.onopen = () => {
-    console.log("[DPoP-Signer] Connected");
+    console.log("[DPoP-Signer] Connected, authenticating...");
+    // Send token as first message (avoids URL length limits)
+    ws?.send(JSON.stringify({ type: "auth", token }));
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
