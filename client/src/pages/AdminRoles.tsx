@@ -489,6 +489,21 @@ export default function AdminRoles() {
       return;
     }
 
+    // For VPN roles: base role may already exist if we're just adding firewall rules
+    if (roleType === "vpn") {
+      try {
+        await api.admin.roles.create({ name, description: formData.description || undefined });
+      } catch {
+        // 409 = role already exists, that's fine for VPN
+      }
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/roles"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/roles"] });
+      setCreatingRole(false);
+      setFormData({ name: "", description: "" });
+      toast({ title: vpnFirewallRules.length > 0 ? "VPN firewall rules created" : "VPN role created" });
+      return;
+    }
+
     // Create the role
     createMutation.mutate({
       name,
