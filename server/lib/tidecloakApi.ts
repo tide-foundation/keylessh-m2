@@ -22,12 +22,16 @@ interface TcRequestContext {
 
 const tcRequestStorage = new AsyncLocalStorage<TcRequestContext>();
 
-/** Middleware: store token and userId in async context for TideCloak calls */
-export function withTcDPoP(req: any, _res: any, next: any) {
+/**
+ * Middleware: store token and userId in async context for TideCloak calls.
+ * Must run AFTER authenticate middleware (needs req.accessToken).
+ * Safe to call when not yet authenticated — just passes through.
+ */
+export function withTcDPoP(req: any, res: any, next: any) {
   const token = req.accessToken as string | undefined;
   const userId = req.tokenPayload?.sub as string | undefined;
   if (token && userId) {
-    tcRequestStorage.run({ token, userId }, next);
+    tcRequestStorage.run({ token, userId }, () => next());
   } else {
     next();
   }

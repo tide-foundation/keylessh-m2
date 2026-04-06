@@ -31,37 +31,49 @@ const pendingRequests = new Map<string, {
 export function setupDPoPSigner(httpServer: HTTPServer): void {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws/dpop-signer" });
 
-  wss.on("connection", async (ws: WebSocket, req) => {
-    const url = new URL(req.url || "/", `http://${req.headers.host}`);
-    const token = url.searchParams.get("token");
+  wss.on("connection", (ws: WebSocket) => {
+    let userId: string | null = null;
+    let authenticated = false;
 
-    if (!token) {
-      ws.close(4001, "Missing token");
-      return;
-    }
+    // 10 second auth timeout
+    const authTimeout = setTimeout(() => {
+      if (!authenticated) {
+        ws.close(4001, "Auth timeout");
+      }
+    }, 10000);
 
-    // Verify the token to get the user ID
-    const payload = await verifyTideCloakToken(token, []);
-    if (!payload?.sub) {
-      ws.close(4002, "Invalid token");
-      return;
-    }
-
-    const userId = payload.sub;
-
-    // Close any existing connection for this user (only one signer per user)
-    const existing = signers.get(userId);
-    if (existing && existing.readyState === WebSocket.OPEN) {
-      existing.close(4003, "Replaced by new connection");
-    }
-
-    signers.set(userId, ws);
-    console.log(`[DPoP-Signer] User ${payload.preferred_username || userId} connected`);
-
-    ws.on("message", (data) => {
+    ws.on("message", async (data) => {
       try {
         const msg = JSON.parse(data.toString());
 
+        // First message must be auth
+        if (!authenticated) {
+          if (msg.type === "auth" && msg.token) {
+            const payload = await verifyTideCloakToken(msg.token, []);
+            if (!payload?.sub) {
+              ws.close(4002, "Invalid token");
+              return;
+            }
+
+            userId = payload.sub;
+            authenticated = true;
+            clearTimeout(authTimeout);
+
+            // Close existing connection for this user
+            const existing = signers.get(userId);
+            if (existing && existing.readyState === WebSocket.OPEN) {
+              existing.close(4003, "Replaced by new connection");
+            }
+
+            signers.set(userId, ws);
+            console.log(`[DPoP-Signer] User ${payload.preferred_username || userId} connected`);
+          } else {
+            ws.close(4001, "Auth required");
+          }
+          return;
+        }
+
+        // Authenticated — handle proof responses
         if (msg.type === "dpop_proof" && msg.requestId && msg.proof) {
           const pending = pendingRequests.get(msg.requestId);
           if (pending) {
@@ -83,14 +95,15 @@ export function setupDPoPSigner(httpServer: HTTPServer): void {
     });
 
     ws.on("close", () => {
-      if (signers.get(userId) === ws) {
+      clearTimeout(authTimeout);
+      if (userId && signers.get(userId) === ws) {
         signers.delete(userId);
-        console.log(`[DPoP-Signer] User ${payload.preferred_username || userId} disconnected`);
+        console.log(`[DPoP-Signer] User ${userId} disconnected`);
       }
     });
 
     ws.on("error", () => {
-      if (signers.get(userId) === ws) {
+      if (userId && signers.get(userId) === ws) {
         signers.delete(userId);
       }
     });

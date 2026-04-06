@@ -118,7 +118,6 @@ import {
   tidecloakAdmin,
   type AuthenticatedRequest,
 } from "./auth";
-import { withTcDPoP } from "./lib/tidecloakApi";
 import {
   GetUserChangeRequests,
   GetRoleChangeRequests,
@@ -594,7 +593,6 @@ export async function registerRoutes(
   app.get(
     "/api/ssh/access-status",
     authenticate,
-    withTcDPoP,
     async (req: AuthenticatedRequest, res) => {
       try {
         // Fetch user count server-side from TideCloak
@@ -1749,8 +1747,6 @@ export async function registerRoutes(
     }
   );
 
-  // Forward browser's X-TC-DPoP proof to TideCloak on all admin routes
-  app.use("/api/admin", withTcDPoP);
 
   // ============================================
   // Admin User Routes
