@@ -25,6 +25,7 @@
       <Directory Id="INSTALLFOLDER" Name="Punchd VPN">
         <Component Id="MainExecutable" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
           <File Id="PunchdVpnExe" Source="punchd-vpn.exe" KeyPath="yes" />
+          <File Id="WebView2LoaderDll" Source="WebView2Loader.dll" />
 
           <ServiceInstall
             Id="PunchdVpnService"

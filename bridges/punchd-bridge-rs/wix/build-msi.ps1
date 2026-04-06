@@ -16,7 +16,7 @@ $ErrorActionPreference = "Stop"
 # Verify exe exists
 if (-not (Test-Path $ExePath)) {
     Write-Error "Exe not found: $ExePath"
-    Write-Host "Build it first: cargo build --release --target x86_64-pc-windows-gnu --bin punchd-vpn"
+    Write-Host "Build it first: cargo build --release --target x86_64-pc-windows-gnu --features webview --bin punchd-vpn"
     exit 1
 }
 

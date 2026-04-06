@@ -30,12 +30,23 @@ done
 
 if [ -z "$BINARY" ]; then
     echo "Error: $BINARY_NAME binary not found"
-    echo "Build it first: cargo build --release --bin punchd-vpn"
+    echo "Build it first: cargo build --release --features webview --bin punchd-vpn"
     exit 1
 fi
 
 echo "=== Punchd VPN Installer ==="
 echo ""
+
+# Install WebView dependencies (for DPoP auth via embedded browser)
+if command -v apt-get &>/dev/null; then
+    echo "Installing WebView dependencies..."
+    apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libgtk-3-0 2>/dev/null || \
+        echo "Warning: could not install webkit2gtk. WebView auth may not work."
+elif command -v dnf &>/dev/null; then
+    echo "Installing WebView dependencies..."
+    dnf install -y webkit2gtk4.1 gtk3 2>/dev/null || \
+        echo "Warning: could not install webkit2gtk. WebView auth may not work."
+fi
 
 # Stop existing service if running
 if systemctl is-active --quiet punchd-vpn 2>/dev/null; then
