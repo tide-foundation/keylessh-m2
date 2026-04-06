@@ -1721,17 +1721,15 @@ async fn try_turn_relay(
 
 /// Agent-mode VPN connection — takes token directly, no OIDC login.
 /// Accepts a shutdown receiver to disconnect on demand.
-/// Agent-mode VPN connection — uses QUIC + WebView DPoP (same as standalone).
-/// The token parameter is ignored — WebView handles authentication.
+/// Agent-mode VPN connection — uses QUIC with token from browser.
+/// Browser provides the token (and optionally DPoP proof) via /connect API.
 /// Accepts a shutdown receiver to disconnect on demand.
 async fn run_vpn_with_token(
     cfg: ResolvedConfig,
     _token: String,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), String> {
-    // Use the QUIC path with WebView auth (token: None forces oidc_login → WebView)
-    let mut cfg = cfg;
-    cfg.token = None; // Force WebView login for DPoP support
+    // Token is already set in cfg.token by the /connect handler
     run_vpn_quic_inner(cfg, Some(shutdown_rx)).await
 }
 
