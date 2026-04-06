@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import {
   ChangeSetRequest,
   ClientRepresentation,
@@ -8,33 +7,14 @@ import {
 } from "./auth/keycloakTypes";
 import { Roles } from "@shared/config/roles";
 import { getAuthOverrideUrl, getRealm, getResource } from "./auth/tidecloakConfig";
-import { requestDPoPProof } from "./dpopSigner";
-
-// ============================================
-// Request-scoped context — stores the authenticated user's ID
-// so TideCloak API calls can request DPoP proofs via WebSocket.
-// ============================================
-
-interface TcRequestContext {
-  token: string;
-  userId: string;
-}
-
-const tcRequestStorage = new AsyncLocalStorage<TcRequestContext>();
+import { generateDPoPProof as headlessGenerateProof, getAccessToken as headlessGetToken } from "./headlessSigner";
 
 /**
- * Middleware: store token and userId in async context for TideCloak calls.
- * Must run AFTER authenticate middleware (needs req.accessToken).
- * Safe to call when not yet authenticated — just passes through.
+ * Middleware (kept for compatibility) — no-op now that headless signer
+ * handles DPoP independently of request context.
  */
-export function withTcDPoP(req: any, res: any, next: any) {
-  const token = req.accessToken as string | undefined;
-  const userId = req.tokenPayload?.sub as string | undefined;
-  if (token && userId) {
-    tcRequestStorage.run({ token, userId }, () => next());
-  } else {
-    next();
-  }
+export function withTcDPoP(_req: any, _res: any, next: any) {
+  next();
 }
 
 /**
@@ -43,15 +23,18 @@ export function withTcDPoP(req: any, res: any, next: any) {
  * Falls back to Bearer token if no signer is available.
  */
 export async function tcAuthHeaders(token: string, url?: string, method?: string): Promise<Record<string, string>> {
-  const ctx = tcRequestStorage.getStore();
-  if (ctx && url && method) {
-    const proof = await requestDPoPProof(ctx.userId, url, method);
-    if (proof) {
-      return {
-        Authorization: `DPoP ${ctx.token}`,
-        DPoP: proof,
-      };
-    }
+  if (url && method) {
+    try {
+      // Use the headless browser's own token + DPoP proof (service account)
+      const headlessToken = await headlessGetToken();
+      const proof = await headlessGenerateProof(url, method, headlessToken);
+      if (proof && headlessToken) {
+        return {
+          Authorization: `DPoP ${headlessToken}`,
+          DPoP: proof,
+        };
+      }
+    } catch { /* fall through to Bearer */ }
   }
   return { Authorization: `Bearer ${token}` };
 }
