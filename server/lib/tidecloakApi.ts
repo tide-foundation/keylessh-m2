@@ -348,13 +348,16 @@ export const createRoleForClient = async (
   return;
 };
 
+/// Look up a role by name without putting the name in the URL path.
+/// Keycloak's GET /roles/{name} breaks on colons/slashes in role names.
+/// Lists all roles for the client and finds by name.
 export const getClientRoleByName = async (
   roleName: string,
   clientuuid: string,
   token: string
 ): Promise<RoleRepresentation> => {
   const response = await fetch(
-    `${getTcUrl()}/clients/${clientuuid}/roles/${roleName}`,
+    `${getTcUrl()}/clients/${clientuuid}/roles`,
     {
       method: "GET",
       headers: {
@@ -364,10 +367,12 @@ export const getClientRoleByName = async (
   );
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(`Error fetching client role by name: ${response.statusText}`);
-    throw new Error(`Error fetching client role by name: ${errorBody}`);
+    throw new Error(`Error fetching client roles: ${errorBody}`);
   }
-  return response.json();
+  const roles: RoleRepresentation[] = await response.json();
+  const role = roles.find(r => r.name === roleName);
+  if (!role) throw new Error(`Role '${roleName}' not found`);
+  return role;
 };
 
 export const GetUsers = async (token: string): Promise<UserRepresentation[]> => {
@@ -525,8 +530,12 @@ export const DeleteRole = async (roleName: string, token: string): Promise<Delet
     getClient(),
     token
   );
+
+  // Look up role by name to get UUID (name in URL path breaks on colons/slashes)
+  const role = await getClientRoleByName(roleName, client!.id!, token);
+
   const response = await fetch(
-    `${getTcUrl()}/clients/${client!.id!}/roles/${roleName}`,
+    `${getTcUrl()}/roles-by-id/${role.id}`,
     {
       method: "DELETE",
       headers: {
@@ -541,14 +550,14 @@ export const DeleteRole = async (roleName: string, token: string): Promise<Delet
     throw new Error(`Error deleting role: ${errorBody}`);
   }
 
-  // Check if the role still exists after deletion
-  // If it does, an approval was created instead of immediate deletion
+  // Invalidate roles cache
+  invalidateCache("clientRoles");
+
+  // Check if the role still exists after deletion (approval created instead of immediate delete)
   try {
     await getClientRoleByName(roleName, client!.id!, token);
-    // Role still exists - approval was created
     return { approvalCreated: true, message: "Approval request created" };
   } catch {
-    // Role doesn't exist - it was deleted immediately
     return { approvalCreated: false };
   }
 };
@@ -566,8 +575,9 @@ export const UpdateRole = async (
     return;
   }
 
+  // Use roles-by-id to avoid colons/slashes in URL path
   const response = await fetch(
-    `${getTcUrl()}/clients/${client!.id!}/roles/${roleRep.name!}`,
+    `${getTcUrl()}/roles-by-id/${role.id}`,
     {
       method: "PUT",
       headers: {
