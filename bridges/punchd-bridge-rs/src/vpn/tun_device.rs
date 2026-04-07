@@ -152,11 +152,10 @@ mod platform {
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to load wintun.dll: {e}")))?
             };
 
-            // Delete any stale punchd adapters to avoid punchd-vpn1, punchd-vpn2, etc.
-            for i in 0..10 {
-                let name = if i == 0 { config.name.clone() } else { format!("punchd-vpn{i}") };
-                if let Ok(stale) = wintun::Adapter::open(&wintun_dll, &name) {
-                    let _ = stale.delete();
+            // Clean up stale adapter with the same name (e.g. from a crashed previous run)
+            if let Ok(stale) = wintun::Adapter::open(&wintun_dll, &config.name) {
+                if let Ok(adapter) = Arc::try_unwrap(stale) {
+                    let _ = adapter.delete();
                 }
             }
 
