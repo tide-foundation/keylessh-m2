@@ -304,11 +304,33 @@ fn rewrite_localhost_in_html(html: &str, port_map: &HashMap<String, String>) -> 
 
 /// Prepend /__b/<name> to absolute paths in href/src/action attributes.
 fn prepend_prefix(html: &str, prefix: &str) -> String {
-    let re = Regex::new(r#"((?:href|src|action|formaction)\s*=\s*["'])(\/(?!\/|__b\/))"#).unwrap();
-    re.replace_all(html, |caps: &regex::Captures| {
-        format!("{}{}{}", &caps[1], prefix, &caps[2])
-    })
-    .to_string()
+    // Replace absolute paths in href/src/action attributes with prefixed paths.
+    // Avoids regex to prevent stack overflow on cross-compiled Windows builds.
+    let mut result = html.to_string();
+    for attr in &["href=\"/", "src=\"/", "action=\"/", "formaction=\"/",
+                   "href='/", "src='/", "action='/", "formaction='/"] {
+        let skip_patterns = [
+            &format!("{}__b/", attr.split('/').next().unwrap_or("")),
+            &format!("{}//", attr.split('/').next().unwrap_or("")),
+        ];
+        // Build the prefixed version
+        let attr_name = &attr[..attr.len() - 1]; // e.g., "href=\"" without trailing /
+        let replacement = format!("{}{}/", attr_name, prefix);
+        // Only replace if not already prefixed or a protocol-relative URL
+        let mut search_from = 0;
+        while let Some(pos) = result[search_from..].find(attr) {
+            let abs_pos = search_from + pos;
+            let after = &result[abs_pos + attr.len()..];
+            // Skip if next char is / (protocol-relative) or starts with __b/
+            if after.starts_with('/') || after.starts_with("_b/") {
+                search_from = abs_pos + attr.len();
+                continue;
+            }
+            result = format!("{}{}{}", &result[..abs_pos], replacement, &result[abs_pos + attr.len() - 1..]);
+            search_from = abs_pos + replacement.len();
+        }
+    }
+    result
 }
 
 /// Build the fetch/XHR interceptor script for path-based backends.
@@ -2096,8 +2118,14 @@ async fn handle_request(
         tracing::debug!("[HTTP] Step 2: prepend_prefix (prefix='{}')", backend_prefix);
 
         if !backend_prefix.is_empty() {
-            // Temporarily skip HTML rewriting to test if this is the crash
-            tracing::debug!("[HTTP] Step 2: skipping HTML rewriting (debug)");
+            html = prepend_prefix(&html, &backend_prefix);
+
+            let patch_script = build_patch_script(&backend_prefix);
+            if html.contains("<head>") {
+                html = html.replacen("<head>", &format!("<head>{patch_script}"), 1);
+            } else {
+                html = format!("{patch_script}{html}");
+            }
         }
 
         tracing::debug!("[HTTP] Step 3: inject upgrade scripts");
