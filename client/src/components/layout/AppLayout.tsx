@@ -163,21 +163,32 @@ export function AppLayout({ children }: AppLayoutProps) {
   const filteredAdminNavGroups = useMemo(() => {
     let groups = adminNavGroups;
 
-    // Hide Punchd gateway tab unless admin or has allowConfigDownload role
-    if (!canAccessGateways) {
+    if (!isAdmin) {
+      // Non-admin users only see items they have access to (e.g. Punchd with allowConfigDownload)
       groups = groups.map(group => ({
         ...group,
-        items: group.items.filter(item => item.url !== "/admin/gateways"),
-      }));
-    }
+        items: group.items.filter(item => {
+          if (item.url === "/admin/gateways") return canAccessGateways;
+          return false; // non-admins can't see other admin items
+        }),
+      })).filter(group => group.items.length > 0);
+    } else {
+      // Hide Punchd gateway tab unless admin or has allowConfigDownload role
+      if (!canAccessGateways) {
+        groups = groups.map(group => ({
+          ...group,
+          items: group.items.filter(item => item.url !== "/admin/gateways"),
+        }));
+      }
 
-    // Hide Settings group if Stripe is not configured
-    if (pricingInfo?.stripeConfigured === false) {
-      groups = groups.filter(group => group.label !== "Settings");
+      // Hide Settings group if Stripe is not configured
+      if (pricingInfo?.stripeConfigured === false) {
+        groups = groups.filter(group => group.label !== "Settings");
+      }
     }
 
     return groups;
-  }, [pricingInfo?.stripeConfigured, canAccessGateways]);
+  }, [isAdmin, pricingInfo?.stripeConfigured, canAccessGateways]);
 
   // Refresh non-TideCloak data when navigating between sections.
   // TideCloak queries (access-approvals, role-approvals, ssh-policies/pending) are excluded
@@ -254,11 +265,11 @@ export function AppLayout({ children }: AppLayoutProps) {
               </SidebarGroupContent>
             </SidebarGroup>
 
-            {isAdmin && (
+            {filteredAdminNavGroups.length > 0 && (
               <div className="my-3 mx-2 border-t border-sidebar-border" />
             )}
 
-            {isAdmin && filteredAdminNavGroups.map((group) => (
+            {filteredAdminNavGroups.map((group) => (
               <SidebarGroup key={group.label} className="mt-2">
                 <SidebarGroupLabel className="text-xs font-medium uppercase tracking-wide text-muted-foreground px-2 py-1.5">
                   {group.label}
