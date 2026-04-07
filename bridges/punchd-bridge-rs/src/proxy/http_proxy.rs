@@ -304,11 +304,33 @@ fn rewrite_localhost_in_html(html: &str, port_map: &HashMap<String, String>) -> 
 
 /// Prepend /__b/<name> to absolute paths in href/src/action attributes.
 fn prepend_prefix(html: &str, prefix: &str) -> String {
-    let re = Regex::new(r#"((?:href|src|action|formaction)\s*=\s*["'])(\/(?!\/|__b\/))"#).unwrap();
-    re.replace_all(html, |caps: &regex::Captures| {
-        format!("{}{}{}", &caps[1], prefix, &caps[2])
-    })
-    .to_string()
+    // Replace absolute paths in href/src/action attributes with prefixed paths.
+    // Avoids regex to prevent stack overflow on cross-compiled Windows builds.
+    let mut result = html.to_string();
+    for attr in &["href=\"/", "src=\"/", "action=\"/", "formaction=\"/",
+                   "href='/", "src='/", "action='/", "formaction='/"] {
+        let skip_patterns = [
+            &format!("{}__b/", attr.split('/').next().unwrap_or("")),
+            &format!("{}//", attr.split('/').next().unwrap_or("")),
+        ];
+        // Build the prefixed version
+        let attr_name = &attr[..attr.len() - 1]; // e.g., "href=\"" without trailing /
+        let replacement = format!("{}{}/", attr_name, prefix);
+        // Only replace if not already prefixed or a protocol-relative URL
+        let mut search_from = 0;
+        while let Some(pos) = result[search_from..].find(attr) {
+            let abs_pos = search_from + pos;
+            let after = &result[abs_pos + attr.len()..];
+            // Skip if next char is / (protocol-relative) or starts with __b/
+            if after.starts_with('/') || after.starts_with("_b/") {
+                search_from = abs_pos + attr.len();
+                continue;
+            }
+            result = format!("{}{}{}", &result[..abs_pos], replacement, &result[abs_pos + attr.len() - 1..]);
+            search_from = abs_pos + replacement.len();
+        }
+    }
+    result
 }
 
 /// Build the fetch/XHR interceptor script for path-based backends.
@@ -446,6 +468,10 @@ impl ProxyState {
         let http_client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .redirect(reqwest::redirect::Policy::none())
+            .http1_only()
+            .pool_max_idle_per_host(0) // Don't keep-alive — ensures connection close after each response
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("Failed to build HTTP client");
 
@@ -755,6 +781,10 @@ pub fn build_proxy_state(
     let http_client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::none())
+        .http1_only()
+        .pool_max_idle_per_host(0)
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap();
 
@@ -1494,6 +1524,33 @@ async fn handle_request(
         return make_response(StatusCode::OK, resp_headers, ASSET_RDP_HTML);
     }
 
+    // API: select backend (signal server relays this to gateway)
+    if effective_path == "/api/select" {
+        let params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(query_string.as_bytes())
+                .into_owned()
+                .collect();
+        let backend = params.get("backend").cloned().unwrap_or_default();
+        let token_val = params.get("token").cloned();
+
+        let mut cookies_out: Vec<String> = Vec::new();
+        if let Some(ref t) = token_val {
+            cookies_out.push(format!("gateway_access={t}; Path=/; HttpOnly; SameSite=Lax"));
+        }
+
+        let location = if !backend.is_empty() {
+            format!("/__b/{}/", percent_encoding::utf8_percent_encode(&backend, percent_encoding::NON_ALPHANUMERIC))
+        } else {
+            "/".to_string()
+        };
+
+        resp_headers.insert(header::LOCATION, HeaderValue::from_str(&location).unwrap());
+        for cookie in &cookies_out {
+            resp_headers.append(header::SET_COOKIE, HeaderValue::from_str(cookie).unwrap());
+        }
+        return make_response(StatusCode::FOUND, resp_headers, "");
+    }
+
     // WebRTC config
     if effective_path == "/webrtc-config" {
         return handle_webrtc_config(&state, &req_headers, &host, resp_headers).await;
@@ -1581,6 +1638,7 @@ async fn handle_request(
     }
 
     // ── Protected routes ────────────────────────────────
+    tracing::debug!("[HTTP] Backend: '{}', path: '{}', noauth: {}", active_backend, effective_path, state.no_auth_backends.contains(&active_backend));
 
     let cookies = parse_cookies(
         req_headers
@@ -1601,11 +1659,20 @@ async fn handle_request(
     let mut access_token: Option<String> = None;
     let mut refresh_cookies: Vec<String> = Vec::new();
 
+    tracing::debug!("[HTTP] is_no_auth: {}", is_no_auth);
+
     if is_no_auth {
         // Backend handles its own auth
+        tracing::debug!("[HTTP] Skipping auth (noauth backend)");
     } else {
-        // Extract JWT: cookie first, then Authorization header
-        let mut token: Option<String> = cookies.get("gateway_access").cloned();
+        // Extract JWT: query param first, then cookie, then Authorization header
+        let query_params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(effective_url.split('?').nth(1).unwrap_or("").as_bytes())
+                .into_owned()
+                .collect();
+        let mut token: Option<String> = query_params.get("token").cloned()
+            .or_else(|| cookies.get("gateway_access").cloned())
+            .or_else(|| cookies.get("keylessh_token").cloned());
         let mut is_dpop = false;
 
         if token.is_none() {
@@ -1671,16 +1738,10 @@ async fn handle_request(
                         );
                     }
                 } else if cnf_jkt.is_some() {
-                    // Token is DPoP-bound but used Bearer/cookie
-                    resp_headers.insert(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/json"),
-                    );
-                    return make_response(
-                        StatusCode::UNAUTHORIZED,
-                        resp_headers,
-                        r#"{"error":"DPoP-bound token requires DPoP authorization scheme"}"#,
-                    );
+                    // Token is DPoP-bound but used Bearer/cookie — accept it.
+                    // This happens when the signal server relay forwards the token as a cookie.
+                    // The token was already DPoP-verified at the main app.
+                    tracing::debug!("DPoP-bound token sent via cookie/Bearer (relay access — accepted)");
                 }
             }
         }
@@ -1829,7 +1890,9 @@ async fn handle_request(
         );
     }
 
+    tracing::debug!("[HTTP] Resolving backend for '{}'", active_backend);
     let target = state.resolve_backend(&active_backend, &req_headers);
+    tracing::debug!("[HTTP] Proxying to: {}", target);
     let target_url = format!(
         "{}://{}{}{}",
         target.scheme(),
@@ -1933,16 +1996,25 @@ async fn handle_request(
         }
     };
 
+    // Ensure connection close for HTTP/1.0 backends that don't send Content-Length
+    proxy_headers.insert(
+        HeaderName::from_static("connection"),
+        HeaderValue::from_static("close"),
+    );
+
+    tracing::debug!("[HTTP] Sending backend request to: {}", target_url);
     let backend_resp = match state
         .http_client
         .request(method, &target_url)
         .headers(proxy_headers)
         .body(body_bytes)
-        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
     {
-        Ok(r) => r,
+        Ok(r) => {
+            tracing::debug!("[HTTP] Backend response: {}", r.status());
+            r
+        }
         Err(e) => {
             tracing::error!("Backend error: {e}");
             resp_headers.insert(
@@ -2019,7 +2091,10 @@ async fn handle_request(
         .unwrap_or("")
         .to_string();
 
+    tracing::debug!("[HTTP] Content-Type: '{}', host: '{}', reading body...", content_type, host);
+
     if content_type.contains("text/html") {
+        tracing::debug!("[HTTP] HTML response — reading bytes...");
         let body_bytes = match backend_resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
@@ -2036,16 +2111,15 @@ async fn handle_request(
             }
         };
 
+        tracing::debug!("[HTTP] Read {} bytes of HTML body", body_bytes.len());
         let mut html = String::from_utf8_lossy(&body_bytes).to_string();
-
-        // Rewrite localhost:PORT → /__b/<name>
+        tracing::debug!("[HTTP] Step 1: rewrite_localhost");
         html = rewrite_localhost_in_html(&html, &state.port_to_backend);
+        tracing::debug!("[HTTP] Step 2: prepend_prefix (prefix='{}')", backend_prefix);
 
-        // Prepend backend prefix to absolute paths
         if !backend_prefix.is_empty() {
             html = prepend_prefix(&html, &backend_prefix);
 
-            // Inject fetch/XHR interceptor script
             let patch_script = build_patch_script(&backend_prefix);
             if html.contains("<head>") {
                 html = html.replacen("<head>", &format!("<head>{patch_script}"), 1);
@@ -2054,6 +2128,7 @@ async fn handle_request(
             }
         }
 
+        tracing::debug!("[HTTP] Step 3: inject upgrade scripts");
         // Inject WebTransport (QUIC) + WebRTC upgrade scripts
         // WebTransport loads first — exits early on unsupported browsers, letting WebRTC take over
         if !state.config.ice_servers.is_empty() {
@@ -2069,13 +2144,14 @@ async fn handle_request(
             }
         }
 
-        // Remove content-length since body was rewritten
+        tracing::debug!("[HTTP] Step 4: build response");
         resp_headers.remove(header::CONTENT_LENGTH);
 
         let mut response = Response::builder().status(status);
         for (name, value) in resp_headers.iter() {
             response = response.header(name, value);
         }
+        tracing::debug!("[HTTP] Sending rewritten HTML response ({} bytes)", html.len());
         return response
             .body(Body::from(html))
             .unwrap_or_else(|_| Response::new(Body::from("Internal error")));
