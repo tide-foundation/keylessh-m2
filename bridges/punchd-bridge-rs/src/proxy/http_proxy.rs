@@ -2069,7 +2069,7 @@ async fn handle_request(
         .unwrap_or("")
         .to_string();
 
-    tracing::debug!("[HTTP] Content-Type: '{}', reading body...", content_type);
+    tracing::debug!("[HTTP] Content-Type: '{}', host: '{}', reading body...", content_type, host);
 
     if content_type.contains("text/html") {
         tracing::debug!("[HTTP] HTML response — reading bytes...");
@@ -2130,6 +2130,7 @@ async fn handle_request(
         for (name, value) in resp_headers.iter() {
             response = response.header(name, value);
         }
+        tracing::debug!("[HTTP] Sending rewritten HTML response ({} bytes)", html.len());
         return response
             .body(Body::from(html))
             .unwrap_or_else(|_| Response::new(Body::from("Internal error")));
