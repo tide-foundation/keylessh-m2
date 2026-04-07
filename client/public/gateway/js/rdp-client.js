@@ -456,7 +456,7 @@
       }
       // Fetch gateway backend auth info from signal server
       try {
-        var gwRes = await fetch(SIGNAL_BASE + "/gateways");
+        var gwRes = await fetch(SIGNAL_BASE + "/api/gateways");
         if (gwRes.ok) {
           var gwData = await gwRes.json();
           var gw = (gwData.gateways || []).find(function(g) { return g.id === gatewayId; });
