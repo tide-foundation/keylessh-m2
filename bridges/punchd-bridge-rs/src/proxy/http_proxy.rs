@@ -2069,7 +2069,10 @@ async fn handle_request(
         .unwrap_or("")
         .to_string();
 
+    tracing::debug!("[HTTP] Content-Type: '{}', reading body...", content_type);
+
     if content_type.contains("text/html") {
+        tracing::debug!("[HTTP] HTML response — reading bytes...");
         let body_bytes = match backend_resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
@@ -2086,6 +2089,7 @@ async fn handle_request(
             }
         };
 
+        tracing::debug!("[HTTP] Read {} bytes of HTML body", body_bytes.len());
         let mut html = String::from_utf8_lossy(&body_bytes).to_string();
 
         // Rewrite localhost:PORT → /__b/<name>
