@@ -872,7 +872,7 @@ async fn handle_http_request(
             }
             Err(e) => {
                 pending_ref.write().await.remove(&rid);
-                tracing::error!("[STUN-Reg] Relay request failed: {}", e);
+                tracing::error!("[STUN-Reg] Relay request failed: {} (timeout={}, connect={}, status={:?}, url={:?})", e, e.is_timeout(), e.is_connect(), e.status(), e.url());
                 let (status, error_msg) = if e.is_timeout() {
                     (504, "Gateway timeout")
                 } else {
