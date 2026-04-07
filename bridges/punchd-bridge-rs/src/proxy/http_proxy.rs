@@ -2091,11 +2091,10 @@ async fn handle_request(
 
         tracing::debug!("[HTTP] Read {} bytes of HTML body", body_bytes.len());
         let mut html = String::from_utf8_lossy(&body_bytes).to_string();
-
-        // Rewrite localhost:PORT → /__b/<name>
+        tracing::debug!("[HTTP] Step 1: rewrite_localhost");
         html = rewrite_localhost_in_html(&html, &state.port_to_backend);
+        tracing::debug!("[HTTP] Step 2: prepend_prefix (prefix='{}')", backend_prefix);
 
-        // Prepend backend prefix to absolute paths
         if !backend_prefix.is_empty() {
             html = prepend_prefix(&html, &backend_prefix);
 
@@ -2108,6 +2107,7 @@ async fn handle_request(
             }
         }
 
+        tracing::debug!("[HTTP] Step 3: inject upgrade scripts");
         // Inject WebTransport (QUIC) + WebRTC upgrade scripts
         // WebTransport loads first — exits early on unsupported browsers, letting WebRTC take over
         if !state.config.ice_servers.is_empty() {
@@ -2123,7 +2123,7 @@ async fn handle_request(
             }
         }
 
-        // Remove content-length since body was rewritten
+        tracing::debug!("[HTTP] Step 4: build response");
         resp_headers.remove(header::CONTENT_LENGTH);
 
         let mut response = Response::builder().status(status);
