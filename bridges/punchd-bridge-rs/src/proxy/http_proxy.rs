@@ -1377,6 +1377,9 @@ async fn handle_request(
     State(shared): State<SharedState>,
     req: Request<Body>,
 ) -> Response {
+    let uri = req.uri().to_string();
+    tracing::debug!("[HTTP] Request: {} {}", req.method(), uri);
+
     let state = shared.load_full();
     let mut resp_headers = HeaderMap::new();
     security_headers(&mut resp_headers, state.use_tls);
