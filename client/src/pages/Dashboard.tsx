@@ -651,9 +651,7 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
       });
       window.open(`/gateway/rdp.html?${rdpParams.toString()}`, "_blank");
     } else {
-      const token = localStorage.getItem("access_token") || "";
       const params = new URLSearchParams({ gateway: endpoint.id, backend: backend.name });
-      if (token) params.set("token", token);
       window.open(`${signalUrl}/api/select?${params.toString()}`, "_blank");
     }
   };
@@ -858,12 +856,9 @@ function GatewaysTab() {
     if (backend.protocol === "ssh" && sshUser) {
       setLocation(`/app/console?gatewayUrl=${encodeURIComponent(gw.url)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(gw.id)}&user=${encodeURIComponent(sshUser)}`);
     } else if (backend.protocol === "rdp") {
-      const token = localStorage.getItem("access_token") || "";
-      window.open(`${gw.url}/rdp/${encodeURIComponent(backend.name)}?token=${encodeURIComponent(token)}`, "_blank");
+      window.open(`${gw.url}/rdp/${encodeURIComponent(backend.name)}`, "_blank");
     } else {
-      const token = localStorage.getItem("access_token") || "";
       const params = new URLSearchParams({ gateway: gw.id, backend: backend.name });
-      if (token) params.set("token", token);
       window.open(`${gw.url}/api/select?${params.toString()}`, "_blank");
     }
   };
@@ -1014,7 +1009,18 @@ function LocalBackendItem({ gw, backend, onConnect }: {
 }
 
 export default function Dashboard() {
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
+  const isAdmin = hasRole("admin");
+  const canAccessGateways = isAdmin || (() => {
+    try {
+      const token = localStorage.getItem("access_token");
+      if (!token) return false;
+      const payload = JSON.parse(atob(token.split(".")[1]));
+      const clientId = payload.azp;
+      const clientRoles = payload.resource_access?.[clientId]?.roles || [];
+      return clientRoles.includes("allowConfigDownload");
+    } catch { return false; }
+  })();
 
   const { data: servers, isLoading: serversLoading, refetch: refetchServers } = useQuery<ServerWithAccess[]>({
     queryKey: ["/api/servers"],
@@ -1194,10 +1200,12 @@ export default function Dashboard() {
             Services
             {allServices.length > 0 && <Badge variant="secondary" className="ml-1 text-xs">{allServices.length}</Badge>}
           </TabsTrigger>
-          <TabsTrigger value="gateways" className="gap-1.5">
-            <Router className="h-4 w-4" />
-            Gateways
-          </TabsTrigger>
+          {canAccessGateways && (
+            <TabsTrigger value="gateways" className="gap-1.5">
+              <Router className="h-4 w-4" />
+              Gateways
+            </TabsTrigger>
+          )}
         </TabsList>
 
         <TabsContent value="services">
@@ -1347,9 +1355,11 @@ export default function Dashboard() {
       </div>
         </TabsContent>
 
-        <TabsContent value="gateways">
-          <GatewaysTab />
-        </TabsContent>
+        {canAccessGateways && (
+          <TabsContent value="gateways">
+            <GatewaysTab />
+          </TabsContent>
+        )}
       </Tabs>
 
       {recentSessions.length > 0 && (
