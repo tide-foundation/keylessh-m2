@@ -211,6 +211,12 @@ export const api = {
         const linkUrl = await tc.getTideLinkUrl(userId, redirectUri || window.location.origin);
         return { linkUrl };
       },
+      getRoles: async (userId: string): Promise<string[]> => {
+        // Use client-specific role-mappings endpoint to get all assigned roles
+        // (the generic /role-mappings endpoint may not return VPN firewall roles)
+        const clientRoles = await tc.getUserClientRoleMappings(userId);
+        return clientRoles.map(r => r.name).filter((n): n is string => !!n);
+      },
       setEnabled: async (userId: string, enabled: boolean) => {
         await tc.setUserEnabled(userId, enabled);
         return { success: true, enabled };

@@ -208,18 +208,30 @@ export default function AdminUsers() {
     },
   });
 
-  const handleEdit = (user: AdminUser) => {
-    const userRoles = Array.isArray(user.role) ? user.role : user.role ? [user.role] : [];
+  const handleEdit = async (user: AdminUser) => {
     setEditingUser(user);
-    setInitialRoles(userRoles);
     setRemovedPendingRoles([]);
+    // Fetch the user's actual role mappings (includes VPN firewall rules
+    // that the bulk role-centric listing skips)
+    const cachedRoles = Array.isArray(user.role) ? user.role : user.role ? [user.role] : [];
+    setInitialRoles(cachedRoles);
     setFormData({
       id: user.id,
       firstName: user.firstName,
       lastName: user.lastName,
       email: user.email,
-      assignedRoles: userRoles,
+      assignedRoles: cachedRoles,
     });
+    try {
+      const actualRoles = await api.admin.users.getRoles(user.id);
+      setInitialRoles(actualRoles);
+      setFormData((prev) => ({
+        ...prev,
+        assignedRoles: actualRoles,
+      }));
+    } catch (err) {
+      console.warn("[AdminUsers] getRoles failed, using cached roles:", err);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
