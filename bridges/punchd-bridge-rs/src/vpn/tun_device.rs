@@ -183,12 +183,12 @@ mod platform {
                 .args(["interface", "ipv4", "set", "subinterface", &config.name, &format!("mtu={mtu_str}"), "store=active"])
                 .status();
 
-            // Don't override the TUN metric — let Windows use the default.
-            // The VPN routes use explicit metrics when installed.
+            // Set network profile to Private (trusted network)
+            let _ = std::process::Command::new("powershell")
+                .args(["-c", &format!("Set-NetConnectionProfile -InterfaceAlias '{}' -NetworkCategory Private", config.name)])
+                .status();
 
-            // Enable forwarding on the TUN interface only.
-            // Note: on Hyper-V Default Switch VMs this may affect NAT.
-            // Use an External Switch if the Default Switch breaks.
+            // Enable forwarding on the TUN interface only
             let _ = std::process::Command::new("netsh")
                 .args(["interface", "ipv4", "set", "interface", &config.name, "forwarding=enabled"])
                 .status();
