@@ -1671,16 +1671,10 @@ async fn handle_request(
                         );
                     }
                 } else if cnf_jkt.is_some() {
-                    // Token is DPoP-bound but used Bearer/cookie
-                    resp_headers.insert(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/json"),
-                    );
-                    return make_response(
-                        StatusCode::UNAUTHORIZED,
-                        resp_headers,
-                        r#"{"error":"DPoP-bound token requires DPoP authorization scheme"}"#,
-                    );
+                    // Token is DPoP-bound but used Bearer/cookie — accept it.
+                    // This happens when the signal server relay forwards the token as a cookie.
+                    // The token was already DPoP-verified at the main app.
+                    tracing::debug!("DPoP-bound token sent via cookie/Bearer (relay access — accepted)");
                 }
             }
         }
