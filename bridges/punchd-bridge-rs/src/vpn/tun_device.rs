@@ -183,11 +183,8 @@ mod platform {
                 .args(["interface", "ipv4", "set", "subinterface", &config.name, &format!("mtu={mtu_str}"), "store=active"])
                 .status();
 
-            // Set metric higher than real interfaces (15) but not extreme,
-            // so TUN-specific routes work but it doesn't steal the default route
-            let _ = std::process::Command::new("netsh")
-                .args(["interface", "ipv4", "set", "interface", &config.name, "metric=500"])
-                .status();
+            // Don't override the TUN metric — let Windows use the default.
+            // The VPN routes use explicit metrics when installed.
 
             // Only enable forwarding on the TUN interface itself.
             // Do NOT touch any other interface — enabling forwarding on Ethernet
