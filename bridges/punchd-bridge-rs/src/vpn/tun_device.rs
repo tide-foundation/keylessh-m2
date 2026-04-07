@@ -189,27 +189,12 @@ mod platform {
                 .args(["interface", "ipv4", "set", "interface", &config.name, "metric=500"])
                 .status();
 
-            // Enable forwarding on TUN + main Ethernet, but NOT on Hyper-V virtual switches
-            // (forwarding on vEthernet breaks Hyper-V Default Switch NAT)
-            let iface_output = std::process::Command::new("netsh")
-                .args(["interface", "ipv4", "show", "interfaces"])
-                .output();
-            if let Ok(out) = iface_output {
-                let text = String::from_utf8_lossy(&out.stdout);
-                for line in text.lines().skip(3) {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 5 && parts[3] == "connected" {
-                        let iface_name = parts[4..].join(" ");
-                        // Skip Hyper-V virtual switches — forwarding on these breaks NAT
-                        if iface_name.starts_with("vEthernet") {
-                            continue;
-                        }
-                        let _ = std::process::Command::new("netsh")
-                            .args(["interface", "ipv4", "set", "interface", &iface_name, "forwarding=enabled"])
-                            .status();
-                    }
-                }
-            }
+            // Only enable forwarding on the TUN interface itself.
+            // Do NOT touch any other interface — enabling forwarding on Ethernet
+            // or vEthernet breaks Hyper-V Default Switch NAT.
+            let _ = std::process::Command::new("netsh")
+                .args(["interface", "ipv4", "set", "interface", &config.name, "forwarding=enabled"])
+                .status();
 
             // Firewall rules for VPN subnet (idempotent — netsh ignores duplicates)
             let subnet = format!("{}/{}", {
