@@ -447,6 +447,7 @@ impl ProxyState {
             .danger_accept_invalid_certs(true)
             .redirect(reqwest::redirect::Policy::none())
             .http1_only()
+            .pool_max_idle_per_host(0) // Don't keep-alive — ensures connection close after each response
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
@@ -759,6 +760,7 @@ pub fn build_proxy_state(
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::none())
         .http1_only()
+        .pool_max_idle_per_host(0)
         .timeout(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
