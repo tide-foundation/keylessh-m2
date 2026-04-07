@@ -139,6 +139,12 @@ pub struct TidecloakConfig {
 pub fn config_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
+        // Service mode: ProgramData\punchd-gateway (MSI installer puts config here)
+        let programdata = PathBuf::from(env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string()))
+            .join("punchd-gateway");
+        if programdata.exists() {
+            return programdata;
+        }
         if let Ok(appdata) = env::var("APPDATA") {
             return PathBuf::from(appdata).join("KeyleSSH");
         }
