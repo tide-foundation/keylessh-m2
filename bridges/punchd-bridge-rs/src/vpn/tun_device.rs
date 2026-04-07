@@ -176,6 +176,11 @@ mod platform {
                 .args(["interface", "ipv4", "set", "subinterface", &config.name, &format!("mtu={mtu_str}"), "store=active"])
                 .status();
 
+            // Set high metric so the TUN doesn't steal default route traffic
+            let _ = std::process::Command::new("netsh")
+                .args(["interface", "ipv4", "set", "interface", &config.name, "metric=9999"])
+                .status();
+
             // Note: do NOT enable forwarding on Windows interfaces.
             // Wintun handles packet forwarding in userspace via the TUN read/write loop.
             // Enabling system-level forwarding breaks Hyper-V Default Switch NAT.
