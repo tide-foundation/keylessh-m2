@@ -1427,9 +1427,11 @@ async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync
 
     // Wait for pairing and gateway's QUIC address
     let gateway_addr: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::new(Mutex::new(None));
+    let gateway_local_addrs: Arc<Mutex<Vec<std::net::SocketAddr>>> = Arc::new(Mutex::new(Vec::new()));
     let gateway_addr_notify = Arc::new(Notify::new());
 
     let gateway_addr_clone = gateway_addr.clone();
+    let gateway_local_addrs_clone = gateway_local_addrs.clone();
     let gateway_addr_notify_clone = gateway_addr_notify.clone();
     let ws_sink_sig = ws_sink.clone();
     let peer_id_clone = peer_id.clone();
@@ -1457,15 +1459,28 @@ async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync
                             let _ = sink.send(Message::Text(msg.to_string())).await;
                         }
                         "quic_address" => {
-                            // Gateway sent its QUIC address
+                            // Gateway sent its QUIC address + optional LAN addresses
                             let addr_str = parsed["address"].as_str();
                             if let Some(addr_str) = addr_str {
                                 if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
                                     tracing::info!("[QUIC-VPN] Gateway native QUIC address: {addr}");
                                     *gateway_addr_clone.lock().await = Some(addr);
-                                    gateway_addr_notify_clone.notify_one();
                                 }
                             }
+                            // Parse LAN addresses for same-NAT connections
+                            if let Some(locals) = parsed["localAddresses"].as_array() {
+                                let mut addrs = Vec::new();
+                                for l in locals {
+                                    if let Some(s) = l.as_str() {
+                                        if let Ok(a) = s.parse::<std::net::SocketAddr>() {
+                                            tracing::info!("[QUIC-VPN] Gateway LAN address: {a}");
+                                            addrs.push(a);
+                                        }
+                                    }
+                                }
+                                *gateway_local_addrs_clone.lock().await = addrs;
+                            }
+                            gateway_addr_notify_clone.notify_one();
                         }
                         "error" => {
                             let message = parsed["message"].as_str().unwrap_or("unknown");
@@ -1488,15 +1503,9 @@ async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync
 
     let gateway_addr = gateway_addr.lock().await
         .ok_or_else(|| "No gateway address received".to_string())?;
-
-    // Send UDP punch packets to the gateway's address (opens NAT pinhole)
-    // The gateway also punches us (via the "punch" signaling message)
-    // Send punch packets to the gateway to open OUR NAT pinhole
-    // This must happen before the gateway's punch arrives, so both NATs are open
-    tracing::info!("[QUIC-VPN] Sending punch packets to {gateway_addr}...");
+    let local_addrs = gateway_local_addrs.lock().await.clone();
 
     // Send our quic_address to the gateway (triggers gateway to punch us)
-    // Then immediately start punching from our side
     {
         let mut sink = ws_sink.lock().await;
         let _ = sink.send(Message::Text(serde_json::json!({
@@ -1507,36 +1516,38 @@ async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync
         }).to_string())).await;
     }
 
-    // Use quinn's rebind trick: the QUIC endpoint can't send raw UDP, but
-    // we can use connect() as a punch — it sends a QUIC Initial packet.
-    // Send multiple rapid connect attempts to punch the NAT:
-    for i in 0..3 {
-        let _ = quic_endpoint.connect(gateway_addr, "punchd-gateway");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    // Small delay to let gateway's return punch arrive
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Try direct QUIC connection (our connect = our punch)
-    tracing::info!("[QUIC-VPN] Connecting QUIC to {gateway_addr}...");
-    let conn = match tokio::time::timeout(
-        Duration::from_secs(5),
-        quic_endpoint.connect(gateway_addr, "punchd-gateway")
-            .map_err(|e| format!("QUIC connect error: {e}"))
-            .expect("QUIC connect setup failed"),
-    ).await {
-        Ok(Ok(c)) => {
-            tracing::info!("[QUIC-VPN] Direct QUIC connection established");
+    // Try connection in order: LAN → direct (reflexive) → TURN
+    let conn = if !local_addrs.is_empty() {
+        // Try LAN addresses first (same-NAT scenario)
+        let mut lan_conn = None;
+        for lan_addr in &local_addrs {
+            tracing::info!("[QUIC-VPN] Trying LAN address: {lan_addr}...");
+            match tokio::time::timeout(
+                Duration::from_secs(3),
+                quic_endpoint.connect(*lan_addr, "punchd-gateway")
+                    .map_err(|e| format!("QUIC connect error: {e}"))
+                    .expect("QUIC connect setup failed"),
+            ).await {
+                Ok(Ok(c)) => {
+                    tracing::info!("[QUIC-VPN] LAN QUIC connection established via {lan_addr}");
+                    lan_conn = Some(c);
+                    break;
+                }
+                Ok(Err(e)) => tracing::debug!("[QUIC-VPN] LAN {lan_addr} failed: {e}"),
+                Err(_) => tracing::debug!("[QUIC-VPN] LAN {lan_addr} timed out"),
+            }
+        }
+        if let Some(c) = lan_conn {
             c
+        } else {
+            tracing::info!("[QUIC-VPN] LAN failed, trying reflexive address {gateway_addr}...");
+            // Fall through to NAT punch + reflexive
+            try_reflexive_then_turn(&quic_endpoint, gateway_addr, &cfg, &peer_id).await?
         }
-        Ok(Err(e)) => {
-            tracing::warn!("[QUIC-VPN] Direct QUIC failed: {e}");
-            try_turn_relay(&cfg, &quic_endpoint, gateway_addr, &peer_id).await?
-        }
-        Err(_) => {
-            tracing::warn!("[QUIC-VPN] Direct QUIC timed out (5s)");
-            try_turn_relay(&cfg, &quic_endpoint, gateway_addr, &peer_id).await?
-        }
+    } else {
+        // No LAN addresses — go straight to NAT punch + reflexive
+        tracing::info!("[QUIC-VPN] Sending punch packets to {gateway_addr}...");
+        try_reflexive_then_turn(&quic_endpoint, gateway_addr, &cfg, &peer_id).await?
     };
 
     tracing::info!("[QUIC-VPN] QUIC connected to gateway");
@@ -1739,6 +1750,43 @@ async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync
 /// 3. Create a new quinn endpoint that connects through the proxy
 ///
 /// quinn -> localhost:proxy -> TURN server -> gateway
+/// Try reflexive (NAT-punched) address, then fall back to TURN relay.
+async fn try_reflexive_then_turn(
+    quic_endpoint: &quinn::Endpoint,
+    gateway_addr: std::net::SocketAddr,
+    cfg: &ResolvedConfig,
+    peer_id: &str,
+) -> Result<quinn::Connection, String> {
+    // NAT punch: send QUIC Initial packets to open pinhole
+    for _ in 0..3 {
+        let _ = quic_endpoint.connect(gateway_addr, "punchd-gateway");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Try direct QUIC to reflexive address
+    tracing::info!("[QUIC-VPN] Connecting QUIC to {gateway_addr}...");
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        quic_endpoint.connect(gateway_addr, "punchd-gateway")
+            .map_err(|e| format!("QUIC connect error: {e}"))
+            .expect("QUIC connect setup failed"),
+    ).await {
+        Ok(Ok(c)) => {
+            tracing::info!("[QUIC-VPN] Direct QUIC connection established");
+            Ok(c)
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("[QUIC-VPN] Direct QUIC failed: {e}");
+            try_turn_relay(cfg, quic_endpoint, gateway_addr, peer_id).await
+        }
+        Err(_) => {
+            tracing::warn!("[QUIC-VPN] Direct QUIC timed out (5s)");
+            try_turn_relay(cfg, quic_endpoint, gateway_addr, peer_id).await
+        }
+    }
+}
+
 async fn try_turn_relay(
     cfg: &ResolvedConfig,
     _quic_endpoint: &quinn::Endpoint, // unused — we create a new endpoint for TURN
