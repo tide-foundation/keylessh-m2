@@ -152,6 +152,9 @@ mod platform {
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to load wintun.dll: {e}")))?
             };
 
+            // Delete any stale adapter with the same name to avoid punchd-vpn1, punchd-vpn2, etc.
+            let _ = wintun::Adapter::delete(&wintun_dll, &config.name, "PunchdVPN");
+
             let adapter = wintun::Adapter::create(&wintun_dll, &config.name, "PunchdVPN", None)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to create adapter: {e}")))?;
 
