@@ -1494,6 +1494,33 @@ async fn handle_request(
         return make_response(StatusCode::OK, resp_headers, ASSET_RDP_HTML);
     }
 
+    // API: select backend (signal server relays this to gateway)
+    if effective_path == "/api/select" {
+        let params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(query_string.as_bytes())
+                .into_owned()
+                .collect();
+        let backend = params.get("backend").cloned().unwrap_or_default();
+        let token_val = params.get("token").cloned();
+
+        let mut cookies_out: Vec<String> = Vec::new();
+        if let Some(ref t) = token_val {
+            cookies_out.push(format!("gateway_access={t}; Path=/; HttpOnly; SameSite=Lax"));
+        }
+
+        let location = if !backend.is_empty() {
+            format!("/__b/{}/", percent_encoding::utf8_percent_encode(&backend, percent_encoding::NON_ALPHANUMERIC))
+        } else {
+            "/".to_string()
+        };
+
+        resp_headers.insert(header::LOCATION, HeaderValue::from_str(&location).unwrap());
+        for cookie in &cookies_out {
+            resp_headers.append(header::SET_COOKIE, HeaderValue::from_str(cookie).unwrap());
+        }
+        return make_response(StatusCode::FOUND, resp_headers, "");
+    }
+
     // WebRTC config
     if effective_path == "/webrtc-config" {
         return handle_webrtc_config(&state, &req_headers, &host, resp_headers).await;
@@ -1604,8 +1631,14 @@ async fn handle_request(
     if is_no_auth {
         // Backend handles its own auth
     } else {
-        // Extract JWT: cookie first, then Authorization header
-        let mut token: Option<String> = cookies.get("gateway_access").cloned();
+        // Extract JWT: query param first, then cookie, then Authorization header
+        let query_params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(effective_url.split('?').nth(1).unwrap_or("").as_bytes())
+                .into_owned()
+                .collect();
+        let mut token: Option<String> = query_params.get("token").cloned()
+            .or_else(|| cookies.get("gateway_access").cloned())
+            .or_else(|| cookies.get("keylessh_token").cloned());
         let mut is_dpop = false;
 
         if token.is_none() {
