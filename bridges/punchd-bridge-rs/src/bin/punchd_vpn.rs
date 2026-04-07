@@ -1,3 +1,5 @@
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 ///! punchd-vpn: VPN client that tunnels IP traffic through a punchd-bridge-rs gateway.
 ///!
 ///! Creates a local TUN interface and routes IP packets through a QUIC P2P
@@ -22,6 +24,58 @@ use tokio_tungstenite::tungstenite::Message;
 
 const VPN_TUNNEL_MAGIC: u8 = 0x04;
 const AGENT_PORT: u16 = 19877;
+
+/// Simple in-memory log buffer for the web UI.
+mod log_buffer {
+    use std::sync::{Mutex, OnceLock};
+
+    static BUFFER: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    const MAX_LINES: usize = 1000;
+
+    pub fn init() {
+        let _ = BUFFER.set(Mutex::new(Vec::with_capacity(MAX_LINES)));
+    }
+
+    pub fn recent_lines() -> Vec<String> {
+        BUFFER.get().map(|b| b.lock().unwrap().clone()).unwrap_or_default()
+    }
+
+    fn push_line(line: String) {
+        if let Some(buf) = BUFFER.get() {
+            let mut b = buf.lock().unwrap();
+            b.push(line);
+            if b.len() > MAX_LINES { b.drain(0..MAX_LINES / 2); }
+        }
+    }
+
+    pub struct BufferLayer;
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for BufferLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            use tracing_subscriber::field::Visit;
+            struct Visitor(String);
+            impl Visit for Visitor {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    if field.name() == "message" {
+                        self.0 = format!("{:?}", value);
+                    }
+                }
+            }
+            let mut v = Visitor(String::new());
+            event.record(&mut v);
+            let level = event.metadata().level();
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            push_line(format!("{secs} {level:>5} {}", v.0));
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "punchd-vpn", about = "VPN client for punchd-bridge gateways")]
@@ -669,12 +723,19 @@ async fn main() {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("punchd_vpn=debug,warn")),
-        )
-        .init();
+    // Init tracing with log buffer for the web UI
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        log_buffer::init();
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("punchd_vpn=debug,warn"));
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(log_buffer::BufferLayer)
+            .init();
+    }
 
     let args = Args::parse();
 
@@ -784,11 +845,16 @@ async fn main() {
 
     vpn_tray::set_logs_callback(|| {
         tracing::info!("[Tray] Show Logs requested");
-        // Open logs in browser (agent health endpoint)
         #[cfg(target_os = "windows")]
         {
             let _ = std::process::Command::new("rundll32")
-                .args(["url.dll,FileProtocolHandler", "http://127.0.0.1:19877/status"])
+                .args(["url.dll,FileProtocolHandler", "http://127.0.0.1:19877/logs/view"])
+                .spawn();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = std::process::Command::new("xdg-open")
+                .arg("http://127.0.0.1:19877/logs/view")
                 .spawn();
         }
     });
@@ -1165,15 +1231,56 @@ async fn run_agent() -> Result<(), String> {
                 }
 
                 // GET /logs or /logs?gatewayId=xxx
-                (method, path) if method == "GET" && path.starts_with("/logs") => {
-                    let gw_filter = path.split("gatewayId=").nth(1).map(|s| s.split('&').next().unwrap_or(s).to_string());
-                    let s = state.lock().await;
+                ("GET", "/logs/view") => {
+                    // Serve HTML log viewer that polls /logs
+                    let html = r#"<!DOCTYPE html>
+<html><head><title>Punchd VPN Logs</title>
+<style>
+body { background: #0a0a0a; color: #d4d4d4; font-family: 'Consolas', monospace; font-size: 13px; margin: 0; padding: 12px; }
+#logs { white-space: pre-wrap; word-break: break-all; }
+.ts { color: #666; } .info { color: #6cc; } .warn { color: #cc6; } .err { color: #c66; }
+h3 { color: #888; margin: 0 0 8px; font-size: 14px; }
+</style></head><body>
+<h3>Punchd VPN</h3><div id="logs"></div>
+<script>
+let seen = 0;
+async function poll() {
+  try {
+    const r = await fetch('/logs');
+    const d = await r.json();
+    const el = document.getElementById('logs');
+    const lines = d.logs || [];
+    if (lines.length > seen) {
+      const newLines = lines.slice(seen);
+      for (const l of newLines) {
+        const div = document.createElement('div');
+        let cls = '';
+        if (l.includes(' INFO ')) cls = 'info';
+        else if (l.includes(' WARN ')) cls = 'warn';
+        else if (l.includes('ERROR')) cls = 'err';
+        div.className = cls;
+        div.textContent = l;
+        el.appendChild(div);
+      }
+      seen = lines.length;
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+  } catch {}
+}
+poll(); setInterval(poll, 1000);
+</script></body></html>"#;
+                    // Return HTML directly
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+                        html.len()
+                    );
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
+                    return;
+                }
 
-                    let logs = if let Some(ref gw_id) = gw_filter {
-                        s.connections.get(gw_id).map(|c| c.logs.clone()).unwrap_or_default()
-                    } else {
-                        s.global_logs.clone()
-                    };
+                (method, path) if method == "GET" && path.starts_with("/logs") => {
+                    // Return tracing log buffer (captures all VPN output)
+                    let logs = log_buffer::recent_lines();
                     ("200 OK", json!({"logs": logs}).to_string())
                 }
 
@@ -1427,9 +1534,11 @@ async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync
 
     // Wait for pairing and gateway's QUIC address
     let gateway_addr: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::new(Mutex::new(None));
+    let gateway_local_addrs: Arc<Mutex<Vec<std::net::SocketAddr>>> = Arc::new(Mutex::new(Vec::new()));
     let gateway_addr_notify = Arc::new(Notify::new());
 
     let gateway_addr_clone = gateway_addr.clone();
+    let gateway_local_addrs_clone = gateway_local_addrs.clone();
     let gateway_addr_notify_clone = gateway_addr_notify.clone();
     let ws_sink_sig = ws_sink.clone();
     let peer_id_clone = peer_id.clone();
@@ -1457,15 +1566,28 @@ async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync
                             let _ = sink.send(Message::Text(msg.to_string())).await;
                         }
                         "quic_address" => {
-                            // Gateway sent its QUIC address
+                            // Gateway sent its QUIC address + optional LAN addresses
                             let addr_str = parsed["address"].as_str();
                             if let Some(addr_str) = addr_str {
                                 if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
                                     tracing::info!("[QUIC-VPN] Gateway native QUIC address: {addr}");
                                     *gateway_addr_clone.lock().await = Some(addr);
-                                    gateway_addr_notify_clone.notify_one();
                                 }
                             }
+                            // Parse LAN addresses for same-NAT connections
+                            if let Some(locals) = parsed["localAddresses"].as_array() {
+                                let mut addrs = Vec::new();
+                                for l in locals {
+                                    if let Some(s) = l.as_str() {
+                                        if let Ok(a) = s.parse::<std::net::SocketAddr>() {
+                                            tracing::info!("[QUIC-VPN] Gateway LAN address: {a}");
+                                            addrs.push(a);
+                                        }
+                                    }
+                                }
+                                *gateway_local_addrs_clone.lock().await = addrs;
+                            }
+                            gateway_addr_notify_clone.notify_one();
                         }
                         "error" => {
                             let message = parsed["message"].as_str().unwrap_or("unknown");
@@ -1488,15 +1610,9 @@ async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync
 
     let gateway_addr = gateway_addr.lock().await
         .ok_or_else(|| "No gateway address received".to_string())?;
-
-    // Send UDP punch packets to the gateway's address (opens NAT pinhole)
-    // The gateway also punches us (via the "punch" signaling message)
-    // Send punch packets to the gateway to open OUR NAT pinhole
-    // This must happen before the gateway's punch arrives, so both NATs are open
-    tracing::info!("[QUIC-VPN] Sending punch packets to {gateway_addr}...");
+    let local_addrs = gateway_local_addrs.lock().await.clone();
 
     // Send our quic_address to the gateway (triggers gateway to punch us)
-    // Then immediately start punching from our side
     {
         let mut sink = ws_sink.lock().await;
         let _ = sink.send(Message::Text(serde_json::json!({
@@ -1507,36 +1623,38 @@ async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync
         }).to_string())).await;
     }
 
-    // Use quinn's rebind trick: the QUIC endpoint can't send raw UDP, but
-    // we can use connect() as a punch — it sends a QUIC Initial packet.
-    // Send multiple rapid connect attempts to punch the NAT:
-    for i in 0..3 {
-        let _ = quic_endpoint.connect(gateway_addr, "punchd-gateway");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    // Small delay to let gateway's return punch arrive
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Try direct QUIC connection (our connect = our punch)
-    tracing::info!("[QUIC-VPN] Connecting QUIC to {gateway_addr}...");
-    let conn = match tokio::time::timeout(
-        Duration::from_secs(5),
-        quic_endpoint.connect(gateway_addr, "punchd-gateway")
-            .map_err(|e| format!("QUIC connect error: {e}"))
-            .expect("QUIC connect setup failed"),
-    ).await {
-        Ok(Ok(c)) => {
-            tracing::info!("[QUIC-VPN] Direct QUIC connection established");
+    // Try connection in order: LAN → direct (reflexive) → TURN
+    let conn = if !local_addrs.is_empty() {
+        // Try LAN addresses first (same-NAT scenario)
+        let mut lan_conn = None;
+        for lan_addr in &local_addrs {
+            tracing::info!("[QUIC-VPN] Trying LAN address: {lan_addr}...");
+            match tokio::time::timeout(
+                Duration::from_secs(3),
+                quic_endpoint.connect(*lan_addr, "punchd-gateway")
+                    .map_err(|e| format!("QUIC connect error: {e}"))
+                    .expect("QUIC connect setup failed"),
+            ).await {
+                Ok(Ok(c)) => {
+                    tracing::info!("[QUIC-VPN] LAN QUIC connection established via {lan_addr}");
+                    lan_conn = Some(c);
+                    break;
+                }
+                Ok(Err(e)) => tracing::debug!("[QUIC-VPN] LAN {lan_addr} failed: {e}"),
+                Err(_) => tracing::debug!("[QUIC-VPN] LAN {lan_addr} timed out"),
+            }
+        }
+        if let Some(c) = lan_conn {
             c
+        } else {
+            tracing::info!("[QUIC-VPN] LAN failed, trying reflexive address {gateway_addr}...");
+            // Fall through to NAT punch + reflexive
+            try_reflexive_then_turn(&quic_endpoint, gateway_addr, &cfg, &peer_id).await?
         }
-        Ok(Err(e)) => {
-            tracing::warn!("[QUIC-VPN] Direct QUIC failed: {e}");
-            try_turn_relay(&cfg, &quic_endpoint, gateway_addr, &peer_id).await?
-        }
-        Err(_) => {
-            tracing::warn!("[QUIC-VPN] Direct QUIC timed out (5s)");
-            try_turn_relay(&cfg, &quic_endpoint, gateway_addr, &peer_id).await?
-        }
+    } else {
+        // No LAN addresses — go straight to NAT punch + reflexive
+        tracing::info!("[QUIC-VPN] Sending punch packets to {gateway_addr}...");
+        try_reflexive_then_turn(&quic_endpoint, gateway_addr, &cfg, &peer_id).await?
     };
 
     tracing::info!("[QUIC-VPN] QUIC connected to gateway");
@@ -1654,6 +1772,11 @@ async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync
 
     tracing::info!("[QUIC-VPN] TUN device created");
 
+    // Pin the gateway's actual IP via the original default gateway so the
+    // QUIC tunnel survives when VPN routes cover the gateway's subnet.
+    let gateway_real_addr = conn.remote_address();
+    pin_gateway_route(gateway_real_addr.ip());
+
     if cfg.default_route {
         setup_routing(&cfg.tun_name, &server_ip.to_string());
     }
@@ -1739,6 +1862,43 @@ async fn run_vpn_quic_inner(cfg: ResolvedConfig, shutdown_rx: Option<tokio::sync
 /// 3. Create a new quinn endpoint that connects through the proxy
 ///
 /// quinn -> localhost:proxy -> TURN server -> gateway
+/// Try reflexive (NAT-punched) address, then fall back to TURN relay.
+async fn try_reflexive_then_turn(
+    quic_endpoint: &quinn::Endpoint,
+    gateway_addr: std::net::SocketAddr,
+    cfg: &ResolvedConfig,
+    peer_id: &str,
+) -> Result<quinn::Connection, String> {
+    // NAT punch: send QUIC Initial packets to open pinhole
+    for _ in 0..3 {
+        let _ = quic_endpoint.connect(gateway_addr, "punchd-gateway");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Try direct QUIC to reflexive address
+    tracing::info!("[QUIC-VPN] Connecting QUIC to {gateway_addr}...");
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        quic_endpoint.connect(gateway_addr, "punchd-gateway")
+            .map_err(|e| format!("QUIC connect error: {e}"))
+            .expect("QUIC connect setup failed"),
+    ).await {
+        Ok(Ok(c)) => {
+            tracing::info!("[QUIC-VPN] Direct QUIC connection established");
+            Ok(c)
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("[QUIC-VPN] Direct QUIC failed: {e}");
+            try_turn_relay(cfg, quic_endpoint, gateway_addr, peer_id).await
+        }
+        Err(_) => {
+            tracing::warn!("[QUIC-VPN] Direct QUIC timed out (5s)");
+            try_turn_relay(cfg, quic_endpoint, gateway_addr, peer_id).await
+        }
+    }
+}
+
 async fn try_turn_relay(
     cfg: &ResolvedConfig,
     _quic_endpoint: &quinn::Endpoint, // unused — we create a new endpoint for TURN
@@ -1814,6 +1974,60 @@ struct VpnConfig {
     netmask: Ipv4Addr,
     mtu: u16,
     routes: Vec<String>,
+}
+
+/// Pin the gateway's real IP via the system default gateway so the QUIC
+/// tunnel isn't broken when VPN routes cover the gateway's subnet.
+fn pin_gateway_route(gateway_ip: std::net::IpAddr) {
+    if gateway_ip.is_loopback() { return; }
+    let ip = gateway_ip.to_string();
+
+    #[cfg(target_os = "windows")]
+    {
+        // Find default gateway from route table
+        let output = std::process::Command::new("route").args(["print", "0.0.0.0"]).output();
+        if let Ok(out) = output {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                // Look for: 0.0.0.0  0.0.0.0  <gateway>  <interface>  <metric>
+                if parts.len() >= 5 && parts[0] == "0.0.0.0" && parts[1] == "0.0.0.0" {
+                    let default_gw = parts[2];
+                    let status = std::process::Command::new("route")
+                        .args(["add", &ip, "MASK", "255.255.255.255", default_gw, "METRIC", "1"])
+                        .status();
+                    match status {
+                        Ok(s) if s.success() => tracing::info!("[VPN] Pinned gateway {ip} via {default_gw}"),
+                        _ => tracing::warn!("[VPN] Failed to pin gateway route for {ip}"),
+                    }
+                    return;
+                }
+            }
+        }
+        tracing::warn!("[VPN] Could not find default gateway to pin route for {ip}");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Get default gateway
+        let output = std::process::Command::new("ip").args(["route", "show", "default"]).output();
+        if let Ok(out) = output {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // "default via 192.168.1.1 dev eth0"
+            if let Some(gw) = text.split_whitespace().nth(2) {
+                let _ = std::process::Command::new("ip")
+                    .args(["route", "add", &format!("{ip}/32"), "via", gw])
+                    .status();
+                tracing::info!("[VPN] Pinned gateway {ip} via {gw}");
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let _ = ip;
+        tracing::warn!("[VPN] Gateway route pinning not implemented on this platform");
+    }
 }
 
 /// Install a route for a LAN subnet through the VPN gateway.

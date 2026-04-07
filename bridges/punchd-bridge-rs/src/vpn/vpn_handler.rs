@@ -825,9 +825,9 @@ pub fn enable_forwarding() {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("reg")
-            .args(["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", "/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", "1", "/f"])
-            .status();
+        // On Windows, wintun handles packet forwarding in userspace (TUN read/write loop).
+        // Do NOT set IPEnableRouter — it breaks Hyper-V Default Switch NAT.
+        tracing::info!("[VPN] Windows: forwarding handled by wintun (no system-level changes needed)");
     }
 }
 
@@ -847,9 +847,7 @@ pub fn disable_forwarding() {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("reg")
-            .args(["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", "/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", "0", "/f"])
-            .status();
+        // No system-level changes to revert on Windows
     }
 }
 
@@ -899,15 +897,10 @@ fn setup_ip_forwarding(_tun_name: &str, gateway_ip: Ipv4Addr, netmask: Ipv4Addr)
 
     #[cfg(target_os = "windows")]
     {
-        // Windows: enable IP routing via registry + ICS
-        let result = std::process::Command::new("reg")
-            .args(["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", "/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", "1", "/f"])
-            .status();
-        match result {
-            Ok(s) if s.success() => tracing::info!("[VPN] IP routing enabled in registry"),
-            _ => tracing::warn!("[VPN] Could not enable IP routing. Enable manually in Windows network settings."),
-        }
-        let _ = subnet; // suppress unused warning
+        // Windows: wintun handles forwarding in userspace via the TUN read/write loop.
+        // Do NOT set IPEnableRouter — it breaks Hyper-V Default Switch NAT.
+        tracing::info!("[VPN] Windows: packet forwarding handled by wintun");
+        let _ = subnet;
     }
 
     #[cfg(target_os = "macos")]

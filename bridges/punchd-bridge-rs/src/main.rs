@@ -16,28 +16,51 @@ pub mod vpn;
 mod webrtc;
 pub mod quic;
 
-#[tokio::main]
-async fn main() {
+const SERVICE_NAME: &str = "PunchdGateway";
+
+fn main() {
+    // Check if running as a Windows service
+    #[cfg(target_os = "windows")]
+    {
+        // Try to start as a Windows service first.
+        // If we're launched by SCM, this succeeds and blocks.
+        // If we're launched from a console, this fails and we fall through.
+        if let Ok(()) = gateway_service::run_as_service() {
+            return;
+        }
+    }
+
+    // Not running as a service — run as a console app
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime");
+    rt.block_on(async {
+        init_logging();
+        run_gateway().await;
+    });
+}
+
+fn init_logging() {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    // Init logging: stderr + broadcast to web UI
-    // Default: INFO for our crate, WARN for dependencies
-    {
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-        use tracing_subscriber::EnvFilter;
-        logstream::init();
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("punchd_bridge_rs=debug,warn")
-        });
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer())
-            .with(logstream::BroadcastLayer)
-            .init();
-    }
 
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::EnvFilter;
+    logstream::init();
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("punchd_bridge_rs=debug,warn")
+    });
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(logstream::BroadcastLayer)
+        .init();
+}
+
+async fn run_gateway() {
     // First-run setup: if no config, serve web UI
     setup::run_setup_if_needed().await;
 
@@ -326,4 +349,87 @@ async fn serve_logs_stream() -> Sse<impl futures_util::Stream<Item = Result<Even
 
 async fn serve_logs_buffer() -> axum::Json<Vec<String>> {
     axum::Json(logstream::recent_lines())
+}
+
+// ── Windows Service support ─────────────────────────────────────
+
+#[cfg(target_os = "windows")]
+mod gateway_service {
+    use super::*;
+    use windows_service::{
+        define_windows_service,
+        service::{
+            ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+            ServiceType,
+        },
+        service_control_handler::{self, ServiceControlHandlerResult},
+        service_dispatcher,
+    };
+
+    define_windows_service!(ffi_service_main, service_main);
+
+    pub fn run_as_service() -> Result<(), String> {
+        service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+            .map_err(|e| format!("Failed to start service dispatcher: {e}"))
+    }
+
+    fn service_main(_arguments: Vec<std::ffi::OsString>) {
+        if let Err(e) = run_service() {
+            eprintln!("[Service] Fatal error: {e}");
+        }
+    }
+
+    fn run_service() -> Result<(), String> {
+        let event_handler = move |control_event| -> ServiceControlHandlerResult {
+            match control_event {
+                ServiceControl::Stop | ServiceControl::Shutdown => {
+                    tracing::info!("[Service] Stop requested");
+                    std::process::exit(0);
+                }
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                _ => ServiceControlHandlerResult::NotImplemented,
+            }
+        };
+
+        let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)
+            .map_err(|e| format!("Failed to register service control handler: {e}"))?;
+
+        // Report running
+        status_handle
+            .set_service_status(ServiceStatus {
+                service_type: ServiceType::OWN_PROCESS,
+                current_state: ServiceState::Running,
+                controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+                exit_code: ServiceExitCode::Win32(0),
+                checkpoint: 0,
+                wait_hint: std::time::Duration::default(),
+                process_id: None,
+            })
+            .map_err(|e| format!("Failed to set service status: {e}"))?;
+
+        // Build tokio runtime and run the gateway
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+
+        rt.block_on(async {
+            init_logging();
+            tracing::info!("[Service] Punchd Gateway service started");
+            run_gateway().await;
+        });
+
+        // Report stopped
+        let _ = status_handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: std::time::Duration::default(),
+            process_id: None,
+        });
+
+        Ok(())
+    }
 }

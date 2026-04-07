@@ -63,6 +63,23 @@ impl StunRegistration {
     }
 }
 
+/// Get all non-loopback IPv4 LAN addresses with the given port.
+fn get_local_addresses(port: u16) -> Vec<String> {
+    let mut addrs = Vec::new();
+    // Use the connect-to-8.8.8.8 trick to find the primary LAN interface
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(local) = socket.local_addr() {
+                let ip = local.ip();
+                if !ip.is_loopback() {
+                    addrs.push(format!("{ip}:{port}"));
+                }
+            }
+        }
+    }
+    addrs
+}
+
 /// Register with the STUN signaling server. Returns a handle that can be
 /// used to close the registration.
 pub fn register(options: StunRegistrationOptions) -> StunRegistration {
@@ -394,11 +411,14 @@ async fn connect_and_run(
                                         Some(addr) => addr.to_string(),
                                         None => format!("0.0.0.0:{quic_port}"),
                                     };
+                                    // Include LAN addresses so same-NAT peers can connect directly
+                                    let local_addrs = get_local_addresses(quic_port);
                                     let _ = signaling_tx.send(serde_json::json!({
                                         "type": "quic_address",
                                         "targetId": client_id,
                                         "fromId": options.gateway_id,
                                         "address": quic_addr,
+                                        "localAddresses": local_addrs,
                                         "certHash": quic_cert_hash,
                                     }));
                                 }

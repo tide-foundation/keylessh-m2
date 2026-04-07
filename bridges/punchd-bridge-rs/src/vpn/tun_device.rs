@@ -152,6 +152,13 @@ mod platform {
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to load wintun.dll: {e}")))?
             };
 
+            // Clean up stale adapter with the same name (e.g. from a crashed previous run)
+            if let Ok(stale) = wintun::Adapter::open(&wintun_dll, &config.name) {
+                if let Ok(adapter) = Arc::try_unwrap(stale) {
+                    let _ = adapter.delete();
+                }
+            }
+
             let adapter = wintun::Adapter::create(&wintun_dll, &config.name, "PunchdVPN", None)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to create adapter: {e}")))?;
 
@@ -176,23 +183,15 @@ mod platform {
                 .args(["interface", "ipv4", "set", "subinterface", &config.name, &format!("mtu={mtu_str}"), "store=active"])
                 .status();
 
-            // Enable forwarding on all interfaces (VPN + LAN)
-            let iface_output = std::process::Command::new("netsh")
-                .args(["interface", "ipv4", "show", "interfaces"])
-                .output();
-            if let Ok(out) = iface_output {
-                let text = String::from_utf8_lossy(&out.stdout);
-                for line in text.lines().skip(3) {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    // Format: Idx  Met  MTU  State  Name
-                    if parts.len() >= 5 && parts[3] == "connected" {
-                        let iface_name = parts[4..].join(" ");
-                        let _ = std::process::Command::new("netsh")
-                            .args(["interface", "ipv4", "set", "interface", &iface_name, "forwarding=enabled"])
-                            .status();
-                    }
-                }
-            }
+            // Don't override the TUN metric — let Windows use the default.
+            // The VPN routes use explicit metrics when installed.
+
+            // Enable forwarding on the TUN interface only.
+            // Note: on Hyper-V Default Switch VMs this may affect NAT.
+            // Use an External Switch if the Default Switch breaks.
+            let _ = std::process::Command::new("netsh")
+                .args(["interface", "ipv4", "set", "interface", &config.name, "forwarding=enabled"])
+                .status();
 
             // Firewall rules for VPN subnet (idempotent — netsh ignores duplicates)
             let subnet = format!("{}/{}", {
