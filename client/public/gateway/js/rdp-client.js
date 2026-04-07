@@ -454,6 +454,23 @@
         console.warn("[RDP] Failed to fetch webrtc-config, continuing without TURN:", e);
         config = {};
       }
+      // Fetch gateway backend auth info from signal server
+      try {
+        var gwRes = await fetch(SIGNAL_BASE + "/gateways");
+        if (gwRes.ok) {
+          var gwData = await gwRes.json();
+          var gw = (gwData.gateways || []).find(function(g) { return g.id === gatewayId; });
+          if (gw && gw.backends) {
+            config.backendAuth = {};
+            gw.backends.forEach(function(b) {
+              if (b.auth) config.backendAuth[b.name] = b.auth;
+            });
+            console.log("[RDP] Backend auth info:", config.backendAuth);
+          }
+        }
+      } catch (e) {
+        console.warn("[RDP] Failed to fetch gateway info:", e);
+      }
       var wsProto = SIGNAL_BASE.startsWith("https") ? "wss" : "ws";
       var signalHost = SIGNAL_BASE.replace(/^https?:\/\//, "");
       config.signalingUrl = wsProto + "://" + signalHost;
