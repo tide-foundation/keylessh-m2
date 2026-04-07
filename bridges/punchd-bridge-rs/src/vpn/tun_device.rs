@@ -183,9 +183,10 @@ mod platform {
                 .args(["interface", "ipv4", "set", "subinterface", &config.name, &format!("mtu={mtu_str}"), "store=active"])
                 .status();
 
-            // Set high metric so the TUN doesn't steal default route traffic
+            // Set metric higher than real interfaces (15) but not extreme,
+            // so TUN-specific routes work but it doesn't steal the default route
             let _ = std::process::Command::new("netsh")
-                .args(["interface", "ipv4", "set", "interface", &config.name, "metric=9999"])
+                .args(["interface", "ipv4", "set", "interface", &config.name, "metric=500"])
                 .status();
 
             // Enable forwarding only on the TUN interface (not all interfaces).
