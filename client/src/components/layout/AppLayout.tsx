@@ -107,6 +107,16 @@ export function AppLayout({ children }: AppLayoutProps) {
   const { toast } = useToast();
   const [location] = useLocation();
   const isAdmin = hasRole("admin");
+  const canAccessGateways = isAdmin || (() => {
+    try {
+      const token = localStorage.getItem("access_token");
+      if (!token) return false;
+      const payload = JSON.parse(atob(token.split(".")[1]));
+      const clientId = payload.azp;
+      const clientRoles = payload.resource_access?.[clientId]?.roles || [];
+      return clientRoles.includes("allowConfigDownload");
+    } catch { return false; }
+  })();
   const [isBrowserOnline, setIsBrowserOnline] = useState(() => navigator.onLine);
 
   // Check if Stripe is configured to determine if License page should be shown
@@ -149,13 +159,25 @@ export function AppLayout({ children }: AppLayoutProps) {
     return accessCount + roleCount + policyCount;
   }, [accessApprovals, roleApprovals, pendingPolicies]);
 
-  // Filter out Settings group if Stripe is not configured
+  // Filter nav items based on permissions and config
   const filteredAdminNavGroups = useMemo(() => {
-    if (pricingInfo?.stripeConfigured === false) {
-      return adminNavGroups.filter(group => group.label !== "Settings");
+    let groups = adminNavGroups;
+
+    // Hide Punchd gateway tab unless admin or has allowConfigDownload role
+    if (!canAccessGateways) {
+      groups = groups.map(group => ({
+        ...group,
+        items: group.items.filter(item => item.url !== "/admin/gateways"),
+      }));
     }
-    return adminNavGroups;
-  }, [pricingInfo?.stripeConfigured]);
+
+    // Hide Settings group if Stripe is not configured
+    if (pricingInfo?.stripeConfigured === false) {
+      groups = groups.filter(group => group.label !== "Settings");
+    }
+
+    return groups;
+  }, [pricingInfo?.stripeConfigured, canAccessGateways]);
 
   // Refresh non-TideCloak data when navigating between sections.
   // TideCloak queries (access-approvals, role-approvals, ssh-policies/pending) are excluded
