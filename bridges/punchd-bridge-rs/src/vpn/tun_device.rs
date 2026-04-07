@@ -181,9 +181,11 @@ mod platform {
                 .args(["interface", "ipv4", "set", "interface", &config.name, "metric=9999"])
                 .status();
 
-            // Note: do NOT enable forwarding on Windows interfaces.
-            // Wintun handles packet forwarding in userspace via the TUN read/write loop.
-            // Enabling system-level forwarding breaks Hyper-V Default Switch NAT.
+            // Enable forwarding only on the TUN interface (not all interfaces).
+            // Enabling on all interfaces breaks Hyper-V Default Switch NAT.
+            let _ = std::process::Command::new("netsh")
+                .args(["interface", "ipv4", "set", "interface", &config.name, "forwarding=enabled"])
+                .status();
 
             // Firewall rules for VPN subnet (idempotent — netsh ignores duplicates)
             let subnet = format!("{}/{}", {
