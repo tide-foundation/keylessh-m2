@@ -202,69 +202,23 @@ export async function getUsersWithRoles(
     return _usersWithRolesCache.entry.data;
   }
 
-  // --- Round 1: fire everything we can in parallel ---
-  const appClientIdP = getClientId();
+  // --- Round 1: fetch users + realm-management client in parallel ---
   const usersP = users ? Promise.resolve(users) : getUsers();
+  const rmClientP = getClientByClientId(REALM_MGMT);
+  const [allUsers, rmClient] = await Promise.all([usersP, rmClientP]);
 
-  // Resolve app client + realm-management client in parallel with users
-  const [allUsers, appClientId] = await Promise.all([usersP, appClientIdP]);
+  // --- Round 2: fetch admin members only (no per-role member listing needed) ---
+  const adminUsers = rmClient?.id
+    ? await tcFetch<UserRepresentation[]>(
+        `/clients/${rmClient.id}/roles/${encodeURIComponent(ADMIN_ROLE)}/users`
+      ).catch(() => [] as UserRepresentation[])
+    : [] as UserRepresentation[];
 
-  // Now look up both clients and the role list in parallel
-  const [appClient, rmClient] = await Promise.all([
-    getClientByClientId(appClientId),
-    getClientByClientId(REALM_MGMT),
-  ]);
-
-  // --- Round 2: fetch role list + admin members in parallel ---
-  const [roles, adminUsers] = await Promise.all([
-    appClient?.id
-      ? tcFetch<RoleRepresentation[]>(`/clients/${appClient.id}/roles`).catch(() => [] as RoleRepresentation[])
-      : [] as RoleRepresentation[],
-    rmClient?.id
-      ? tcFetch<UserRepresentation[]>(
-          `/clients/${rmClient.id}/roles/${encodeURIComponent(ADMIN_ROLE)}/users`
-        ).catch(() => [] as UserRepresentation[])
-      : [] as UserRepresentation[],
-  ]);
-
-  // --- Round 3: fetch members for each role in parallel ---
-  const userRolesMap = new Map<string, string[]>();
-
-  if (appClient?.id && roles.length > 0) {
-    const roleUserPairs = await Promise.all(
-      roles
-        .filter((role) => {
-          // Skip member listing for VPN firewall roles (colons/slashes break the URL path)
-          const name = role.name || "";
-          return !(name.includes(":allow:") || name.includes(":deny:"));
-        })
-        .map(async (role) => {
-          const members = await tcFetch<UserRepresentation[]>(
-            `/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`
-          ).catch(() => []);
-          return { roleName: role.name!, userIds: members.map(u => u.id!) };
-        })
-    );
-
-    for (const { roleName, userIds } of roleUserPairs) {
-      for (const uid of userIds) {
-        const existing = userRolesMap.get(uid) || [];
-        existing.push(roleName);
-        userRolesMap.set(uid, existing);
-      }
-    }
-  }
-
-  // Merge admin role members
-  for (const u of adminUsers) {
-    const existing = userRolesMap.get(u.id!) || [];
-    existing.push(ADMIN_ROLE);
-    userRolesMap.set(u.id!, existing);
-  }
+  const adminSet = new Set(adminUsers.map(u => u.id!));
 
   const result = allUsers.map(u => ({
     ...u,
-    clientRoles: userRolesMap.get(u.id!) || [],
+    clientRoles: adminSet.has(u.id!) ? [ADMIN_ROLE] : [],
   }));
 
   _usersWithRolesCache.entry = { data: result, expiry: Date.now() + CACHE_TTL };
@@ -313,6 +267,13 @@ export async function setUserEnabled(userId: string, enabled: boolean): Promise<
 
 export async function getUserRoleMappings(userId: string): Promise<MappingsRepresentation> {
   return tcFetch<MappingsRepresentation>(`/users/${userId}/role-mappings`);
+}
+
+export async function getUserClientRoleMappings(userId: string): Promise<RoleRepresentation[]> {
+  const clientId = await getClientId();
+  const client = await getClientByClientId(clientId);
+  if (!client?.id) return [];
+  return tcFetch<RoleRepresentation[]>(`/users/${userId}/role-mappings/clients/${client.id}`);
 }
 
 export async function getTideLinkUrl(userId: string, redirectUri: string): Promise<string> {
