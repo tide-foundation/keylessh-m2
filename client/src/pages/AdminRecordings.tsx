@@ -28,7 +28,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Video, Search, Server, Trash2, Download, Play, HardDrive } from "lucide-react";
+import { Video, Search, Server, Trash2, Download, Play, HardDrive, Monitor, Terminal } from "lucide-react";
 import { useState } from "react";
 import { api, type RecordingSummary, type RecordingsListResponse, type RecordingDetails } from "@/lib/api";
 import { queryClient } from "@/lib/queryClient";
@@ -36,6 +36,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import { RecordingPlayer } from "@/components/RecordingPlayer";
+import { RdpReplayPlayer } from "@/components/RdpReplayPlayer";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -203,9 +204,22 @@ export default function AdminRecordings() {
                           <p className="text-xs text-muted-foreground truncate">{recording.userEmail}</p>
                         </div>
                       </div>
-                      <Badge variant="outline" className="font-mono shrink-0">
-                        {recording.sshUser}
-                      </Badge>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {recording.recordingType === "rdp" ? (
+                          <Badge variant="outline" className="gap-1 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400 dark:border-blue-800">
+                            <Monitor className="h-3 w-3" />
+                            RDP
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className="gap-1">
+                            <Terminal className="h-3 w-3" />
+                            SSH
+                          </Badge>
+                        )}
+                        <Badge variant="outline" className="font-mono">
+                          {recording.sshUser}
+                        </Badge>
+                      </div>
                     </div>
                     <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
                       <span>{formatDate(recording.startedAt)}</span>
@@ -250,8 +264,9 @@ export default function AdminRecordings() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>Server</TableHead>
+                    <TableHead>Type</TableHead>
                     <TableHead className="hidden lg:table-cell">User</TableHead>
-                    <TableHead>SSH User</TableHead>
+                    <TableHead>Session User</TableHead>
                     <TableHead>Date</TableHead>
                     <TableHead className="hidden xl:table-cell">Duration</TableHead>
                     <TableHead className="hidden xl:table-cell">Size</TableHead>
@@ -273,6 +288,19 @@ export default function AdminRecordings() {
                             </p>
                           </div>
                         </div>
+                      </TableCell>
+                      <TableCell>
+                        {recording.recordingType === "rdp" ? (
+                          <Badge variant="outline" className="gap-1 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400 dark:border-blue-800">
+                            <Monitor className="h-3 w-3" />
+                            RDP
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className="gap-1">
+                            <Terminal className="h-3 w-3" />
+                            SSH
+                          </Badge>
+                        )}
                       </TableCell>
                       <TableCell className="hidden lg:table-cell">
                         <div className="space-y-0.5">
@@ -405,7 +433,11 @@ export default function AdminRecordings() {
           </DialogHeader>
           {playingRecording && (
             <div className="flex-1 min-h-0 overflow-y-auto -mx-3 px-3 sm:-mx-4 sm:px-4 md:-mx-6 md:px-6">
-              <RecordingPlayer recording={playingRecording} />
+              {playingRecording.recordingType === "rdp" ? (
+                <RdpReplayPlayer recording={playingRecording} />
+              ) : (
+                <RecordingPlayer recording={playingRecording} />
+              )}
             </div>
           )}
         </DialogContent>

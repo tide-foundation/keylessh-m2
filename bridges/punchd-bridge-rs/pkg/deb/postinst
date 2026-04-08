@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+# Create config directory
+mkdir -p /etc/punchd-vpn
+
+#DEBHELPER#
+
+echo ""
+echo "Punchd VPN installed."
+echo "Configure: /etc/punchd-vpn/vpn-config.toml"
+echo "Start:     systemctl start punchd-vpn"
+echo "Logs:      journalctl -u punchd-vpn -f"

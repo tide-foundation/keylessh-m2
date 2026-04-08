@@ -109,6 +109,7 @@ export function getHomeOrkUrl(): string {
   return typedTcData()["homeOrkUrl"] || "";
 }
 
+
 export function getJWK(): JSONWebKeySet | null {
   if (
     !typedTcData().jwk ||

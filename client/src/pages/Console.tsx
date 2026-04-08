@@ -61,6 +61,12 @@ export default function Console() {
   const searchParams = new URLSearchParams(search);
   const sshUser = searchParams.get("user") || "root";
 
+  // Gateway SSH mode: connect through punchd gateway instead of direct bridge
+  const gatewayUrl = searchParams.get("gatewayUrl");
+  const gatewayBackend = searchParams.get("backend");
+  const gatewayId = searchParams.get("gateway");
+  const isGatewayMode = !!gatewayUrl;
+
   const { toast } = useToast();
   const authConfig = useAuthConfig();
 
@@ -85,6 +91,7 @@ export default function Console() {
     {
       queryKey: ["/api/servers", params.serverId],
       staleTime: 30_000,
+      enabled: !isGatewayMode, // Skip server fetch in gateway mode
     }
   );
 
@@ -92,18 +99,21 @@ export default function Console() {
     queryKey: ["/api/ssh/access-status"],
     queryFn: api.ssh.getAccessStatus,
     staleTime: 60_000,
+    enabled: !isGatewayMode,
   });
 
-  const isSshBlocked = sshAccessStatus?.blocked === true;
+  const isSshBlocked = isGatewayMode ? false : (sshAccessStatus?.blocked === true);
 
   // SSH session hook
   const { connect, disconnect, send, resize, setDimensions, status, error } =
     useSSHSession({
-      host: server?.host || "",
-      port: server?.port || 22,
-      serverId: params.serverId || "",
+      host: isGatewayMode ? (gatewayBackend || "") : (server?.host || ""),
+      port: isGatewayMode ? 22 : (server?.port || 22),
+      serverId: isGatewayMode ? (gatewayBackend || "") : (params.serverId || ""),
       username: sshUser,
       onData: writeToTerminal,
+      gatewayUrl: isGatewayMode ? gatewayUrl! : undefined,
+      gatewayId: isGatewayMode ? gatewayId! : undefined,
     });
 
   const prevStatusRef = useRef<SSHConnectionStatus>("disconnected");
@@ -302,7 +312,7 @@ export default function Console() {
       xtermRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [send, resize, setDimensions, serverLoading]);
+  }, [send, resize, setDimensions, serverLoading, isGatewayMode]);
 
   // After connecting / closing dialog, re-fit multiple times (helps when first fit ran before fonts/layout were ready)
   useEffect(() => {
@@ -324,7 +334,7 @@ export default function Console() {
   // Only auto-show if user hasn't manually dismissed it
   useEffect(() => {
     if (
-      server &&
+      (server || isGatewayMode) &&
       status === "disconnected" &&
       !error &&
       !showKeyDialog &&
@@ -377,7 +387,7 @@ export default function Console() {
 
   const StatusIcon = statusConfig[status].icon;
 
-  if (serverLoading) {
+  if (serverLoading && !isGatewayMode) {
     return (
       <div className="h-full flex flex-col">
         <div className="h-12 px-4 flex items-center justify-between border-b border-border">

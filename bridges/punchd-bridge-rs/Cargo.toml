@@ -18,6 +18,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 sha2 = "0.10.9"
+md5 = "0.7"
 hmac = "0.12"
 sha1 = "0.10.6"
 ring = "0.17"
@@ -32,6 +33,8 @@ rustls-pemfile = "2"
 tokio-native-tls = "0.3"
 native-tls = "0.2"
 webrtc = "0.12"
+quinn = "0.11"
+wtransport = { version = "0.7", features = ["self-signed"] }
 bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -43,9 +46,54 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 serde_urlencoded = "0.7"
 aes = "0.8"
 aes-gcm = "0.10"
+clap = { version = "4", features = ["derive"] }
+notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
+arc-swap = "1"
+ipnet = "2"
+wry = { version = "0.55", optional = true }
+tao = { version = "0.35", optional = true }
+
+[features]
+default = []
+webview = ["wry", "tao"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tun = { version = "0.7", features = ["async"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tun = { version = "0.7", features = ["async"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wintun = "0.5"
+windows-service = "0.7"
+rfd = "0.15"
+
+[[bin]]
+name = "punchd-bridge-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "punchd-vpn"
+path = "src/bin/punchd_vpn.rs"
+
 
 [build-dependencies]
 winresource = "0.1"
+
+[package.metadata.deb]
+name = "punchd-vpn"
+maintainer = "KeyleSSH <support@keylessh.com>"
+copyright = "2026 KeyleSSH"
+depends = "$auto, iproute2, libwebkit2gtk-4.1-0, libgtk-3-0"
+section = "net"
+priority = "optional"
+assets = [
+    ["target/release/punchd-vpn", "usr/bin/", "755"],
+    ["pkg/punchd-vpn.service", "etc/systemd/system/", "644"],
+]
+conf-files = ["/etc/punchd-vpn/vpn-config.toml"]
+maintainer-scripts = "pkg/deb"
+systemd-units = { unit-name = "punchd-vpn", enable = true, start = false }
 
 [profile.release]
 strip = true

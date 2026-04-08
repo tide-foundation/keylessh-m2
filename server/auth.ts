@@ -28,6 +28,7 @@ import { getResource, getAuthOverrideUrl, getRealm } from "./lib/auth/tidecloakC
 // Extended Request interface with user information
 export interface AuthenticatedRequest extends Request {
   user?: OIDCUser;
+  clientRoles?: string[];
   accessToken?: string;
   tokenPayload?: TokenPayload;
 }
@@ -231,6 +232,14 @@ export async function authenticate(
     req.user = extractUserFromPayload(payload);
     req.accessToken = token;
     req.tokenPayload = payload;
+
+    // Collect all client roles for downstream middleware
+    const allClientRoles: string[] = [];
+    for (const [, v] of Object.entries(payload.resource_access || {})) {
+      if (Array.isArray(v?.roles)) allClientRoles.push(...v.roles);
+    }
+    req.clientRoles = allClientRoles;
+
     next();
   } catch (error) {
     console.error("[Auth] Token verification failed:", error);
@@ -255,6 +264,25 @@ export function requireAdmin(
   }
 
   next();
+}
+
+// Middleware to allow admin OR users with allowConfigDownload role (read-only config access)
+export function requireAdminOrConfigDownload(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) {
+  if (!req.user) {
+    res.status(401).json({ message: "Authentication required" });
+    return;
+  }
+
+  if (req.user.role === "admin" || req.clientRoles?.includes("allowConfigDownload")) {
+    next();
+    return;
+  }
+
+  res.status(403).json({ message: "Admin or allowConfigDownload role required" });
 }
 
 // Middleware to require policy creator permissions
@@ -354,25 +382,66 @@ export class TidecloakAdmin {
       if (rolesRes.ok) {
         const roles: RoleRepresentation[] = await rolesRes.json();
 
-        // For each role, fetch its users — all in parallel (R is small)
+        // For each role, fetch its users
+        // Skip VPN firewall roles (colons/slashes break URL path)
         await Promise.all(
-          roles.map(async (role) => {
-            try {
-              const usersRes = await fetch(
-                `${tcUrl}/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`,
-                { headers: { Authorization: `Bearer ${token}` } }
-              );
-              if (usersRes.ok) {
-                const roleUsers: UserRepresentation[] = await usersRes.json();
-                for (const u of roleUsers) {
-                  const existing = userRolesMap.get(u.id!) || [];
-                  existing.push(role.name!);
-                  userRolesMap.set(u.id!, existing);
+          roles
+            .filter((role) => {
+              const name = role.name || "";
+              return !(name.includes(":allow:") || name.includes(":deny:"));
+            })
+            .map(async (role) => {
+              try {
+                const usersRes = await fetch(
+                  `${tcUrl}/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`,
+                  { headers: { Authorization: `Bearer ${token}` } }
+                );
+                if (usersRes.ok) {
+                  const roleUsers: UserRepresentation[] = await usersRes.json();
+                  for (const u of roleUsers) {
+                    const existing = userRolesMap.get(u.id!) || [];
+                    existing.push(role.name!);
+                    userRolesMap.set(u.id!, existing);
+                  }
                 }
-              }
-            } catch { /* skip failed role lookup */ }
-          })
+              } catch { /* skip failed role lookup */ }
+            })
         );
+
+        // For VPN firewall roles, get assignments via user role-mappings instead
+        const fwRoles = roles.filter((r) => {
+          const name = r.name || "";
+          return name.includes(":allow:") || name.includes(":deny:");
+        });
+        if (fwRoles.length > 0) {
+          // Get all users and check their role-mappings
+          const usersRes = await fetch(`${tcUrl}/users?briefRepresentation=true`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (usersRes.ok) {
+            const allUsers: UserRepresentation[] = await usersRes.json();
+            await Promise.all(
+              allUsers.map(async (user) => {
+                try {
+                  const mappingsRes = await fetch(
+                    `${tcUrl}/users/${user.id}/role-mappings/clients/${appClient.id}`,
+                    { headers: { Authorization: `Bearer ${token}` } }
+                  );
+                  if (mappingsRes.ok) {
+                    const mappedRoles: RoleRepresentation[] = await mappingsRes.json();
+                    for (const mr of mappedRoles) {
+                      if (fwRoles.some((fw) => fw.id === mr.id)) {
+                        const existing = userRolesMap.get(user.id!) || [];
+                        existing.push(mr.name!);
+                        userRolesMap.set(user.id!, existing);
+                      }
+                    }
+                  }
+                } catch { /* skip */ }
+              })
+            );
+          }
+        }
       }
     }
 

@@ -6,47 +6,67 @@ mod auth;
 mod config;
 mod logstream;
 mod proxy;
+pub mod recording;
 mod rdcleanpath;
 mod setup;
 mod stun;
 mod tls;
 mod tray;
+pub mod vpn;
 mod webrtc;
+pub mod quic;
 
-#[tokio::main]
-async fn main() {
+const SERVICE_NAME: &str = "PunchdGateway";
+
+fn main() {
+    // Check if running as a Windows service
+    #[cfg(target_os = "windows")]
+    {
+        // Try to start as a Windows service first.
+        // If we're launched by SCM, this succeeds and blocks.
+        // If we're launched from a console, this fails and we fall through.
+        if let Ok(()) = gateway_service::run_as_service() {
+            return;
+        }
+    }
+
+    // Not running as a service — run as a console app
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime");
+    rt.block_on(async {
+        init_logging();
+        run_gateway().await;
+    });
+}
+
+fn init_logging() {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    // Init logging: stderr + broadcast to web UI
-    // Default: INFO for our crate, WARN for dependencies
-    {
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-        use tracing_subscriber::EnvFilter;
-        logstream::init();
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("punchd_gateway=info,warn")
-        });
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer())
-            .with(logstream::BroadcastLayer)
-            .init();
-    }
 
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::EnvFilter;
+    logstream::init();
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("punchd_bridge_rs=debug,warn")
+    });
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(logstream::BroadcastLayer)
+        .init();
+}
+
+async fn run_gateway() {
     // First-run setup: if no config, serve web UI
     setup::run_setup_if_needed().await;
 
     // Load config
     let config = config::load_config();
     let tc_config = config::load_tidecloak_config();
-    // TC_CLIENT_ID overrides only role lookups, not OIDC client_id
-    let tc_client_id = config.tc_client_id.clone().unwrap_or_else(|| tc_config.resource.clone());
-    if tc_client_id != tc_config.resource {
-        tracing::info!("TC_CLIENT_ID role override: {} (OIDC client: {})", tc_client_id, tc_config.resource);
-    }
-
     // Auth
     let extra_issuers = config
         .auth_server_public_url
@@ -72,9 +92,8 @@ async fn main() {
         &tc_config,
         auth.clone(),
         tls_cert.is_some(),
-        &tc_client_id,
     );
-    let app = proxy::http_proxy::build_router(proxy_state.clone());
+    let (app, shared_state) = proxy::http_proxy::build_router(proxy_state.clone());
 
     // Bind HTTP(S) server
     let addr = format!("0.0.0.0:{}", config.listen_port);
@@ -91,6 +110,11 @@ async fn main() {
         .route("/logs/stream", axum::routing::get(serve_logs_stream))
         .route("/logs/buffer", axum::routing::get(serve_logs_buffer));
 
+    // VPN state — always enabled, auto-configures IP forwarding when a client connects
+    let vpn_state = Arc::new(tokio::sync::Mutex::new(
+        vpn::vpn_handler::VpnState::new("10.66.0.0/24", true),
+    ));
+
     // STUN registration
     let local_addr = std::env::var("GATEWAY_ADDRESS").unwrap_or_else(|_| {
         hostname::get()
@@ -98,7 +122,7 @@ async fn main() {
             .to_string_lossy()
             .to_string()
     });
-    let _stun_reg = stun::stun_client::register(stun::stun_client::StunRegistrationOptions {
+    let stun_reg = stun::stun_client::register(stun::stun_client::StunRegistrationOptions {
         stun_server_url: config.stun_server_url.clone(),
         gateway_id: config.gateway_id.clone(),
         addresses: vec![format!("{}:{}", local_addr, config.listen_port)],
@@ -136,17 +160,86 @@ async fn main() {
             if hosts_tc_locally {
                 meta["realm"] = serde_json::json!(tc_config.realm);
             }
+            if let Ok(public_url) = std::env::var("PUBLIC_URL") {
+                meta["publicUrl"] = serde_json::json!(public_url);
+            }
             meta
         },
         backends: config.backends.clone(),
         auth: Some(auth.clone()),
-        tc_client_id: Some(tc_client_id.clone()),
+        vpn_state: Some(vpn_state.clone()),
+        quic_port: config.quic_port,
     });
+
+    // Watch config files for changes — hot-reload backends, auth, VPN settings
+    {
+        let shared = shared_state.clone();
+        let use_tls = tls_cert.is_some();
+        config::on_config_change(move || {
+            tracing::info!("[Config] Hot-reloading config...");
+            let new_config = config::load_config();
+            let new_tc_config = config::load_tidecloak_config();
+            let new_extra_issuers: Vec<String> = new_config.auth_server_public_url.iter()
+                .chain(new_config.tc_internal_url.iter())
+                .cloned().collect();
+            let new_auth = Arc::new(auth::tidecloak::TidecloakAuth::new(&new_tc_config, &new_extra_issuers));
+
+            proxy::http_proxy::reload_state(&shared, &new_config, &new_tc_config, new_auth, use_tls);
+
+            // Re-register with signal server so it picks up new backends
+            let hosts_tc_locally = match &new_config.tc_internal_url {
+                None => true,
+                Some(url) => {
+                    let u = url.to_lowercase();
+                    u.contains("localhost") || u.contains("127.0.0.1") || u.contains("[::1]")
+                }
+            };
+            let mut meta = serde_json::json!({
+                "displayName": new_config.display_name,
+                "description": new_config.description,
+                "backends": new_config.backends.iter().map(|b| {
+                    let mut entry = serde_json::json!({
+                        "name": b.name,
+                        "protocol": b.protocol,
+                    });
+                    if b.auth == crate::config::BackendAuth::EdDSA {
+                        entry["auth"] = serde_json::json!("eddsa");
+                    }
+                    entry
+                }).collect::<Vec<_>>(),
+            });
+            if hosts_tc_locally {
+                meta["realm"] = serde_json::json!(new_tc_config.realm);
+            }
+            stun_reg.update_metadata(meta);
+        });
+    }
+    config::watch_config_and_restart();
 
     // System tray icon
     let logs_url = format!("http://localhost:{}/logs", config.health_port);
     let gateway_url = format!("{scheme}://localhost:{}", config.listen_port);
     tray::spawn_tray(logs_url, gateway_url);
+
+    // Enable VPN IP forwarding on startup (tray can toggle it off)
+    let vpn_start_enabled = std::env::var("VPN_ENABLED")
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true); // default: enabled
+    if vpn_start_enabled {
+        vpn::vpn_handler::enable_forwarding();
+        tracing::info!("[VPN] IP forwarding enabled");
+    }
+
+    // VPN toggle callback — enables/disables IP forwarding from the system tray
+    tray::set_vpn_callback(|enabled| {
+        if enabled {
+            tracing::info!("[VPN] VPN enabled via system tray");
+            vpn::vpn_handler::enable_forwarding();
+        } else {
+            tracing::info!("[VPN] VPN disabled via system tray");
+            vpn::vpn_handler::disable_forwarding();
+        }
+    });
 
     // Startup banner
     tracing::info!("Punchd Gateway (local-facing)");
@@ -167,6 +260,7 @@ async fn main() {
     }
     tracing::info!("STUN Server: {}", config.stun_server_url);
     tracing::info!("Gateway ID: {}", config.gateway_id);
+    tracing::info!("QUIC Port: {}", config.quic_port);
 
     // Start servers
     let _health_handle = tokio::spawn(async move {
@@ -255,4 +349,87 @@ async fn serve_logs_stream() -> Sse<impl futures_util::Stream<Item = Result<Even
 
 async fn serve_logs_buffer() -> axum::Json<Vec<String>> {
     axum::Json(logstream::recent_lines())
+}
+
+// ── Windows Service support ─────────────────────────────────────
+
+#[cfg(target_os = "windows")]
+mod gateway_service {
+    use super::*;
+    use windows_service::{
+        define_windows_service,
+        service::{
+            ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+            ServiceType,
+        },
+        service_control_handler::{self, ServiceControlHandlerResult},
+        service_dispatcher,
+    };
+
+    define_windows_service!(ffi_service_main, service_main);
+
+    pub fn run_as_service() -> Result<(), String> {
+        service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+            .map_err(|e| format!("Failed to start service dispatcher: {e}"))
+    }
+
+    fn service_main(_arguments: Vec<std::ffi::OsString>) {
+        if let Err(e) = run_service() {
+            eprintln!("[Service] Fatal error: {e}");
+        }
+    }
+
+    fn run_service() -> Result<(), String> {
+        let event_handler = move |control_event| -> ServiceControlHandlerResult {
+            match control_event {
+                ServiceControl::Stop | ServiceControl::Shutdown => {
+                    tracing::info!("[Service] Stop requested");
+                    std::process::exit(0);
+                }
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                _ => ServiceControlHandlerResult::NotImplemented,
+            }
+        };
+
+        let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)
+            .map_err(|e| format!("Failed to register service control handler: {e}"))?;
+
+        // Report running
+        status_handle
+            .set_service_status(ServiceStatus {
+                service_type: ServiceType::OWN_PROCESS,
+                current_state: ServiceState::Running,
+                controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+                exit_code: ServiceExitCode::Win32(0),
+                checkpoint: 0,
+                wait_hint: std::time::Duration::default(),
+                process_id: None,
+            })
+            .map_err(|e| format!("Failed to set service status: {e}"))?;
+
+        // Build tokio runtime and run the gateway
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+
+        rt.block_on(async {
+            init_logging();
+            tracing::info!("[Service] Punchd Gateway service started");
+            run_gateway().await;
+        });
+
+        // Report stopped
+        let _ = status_handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: std::time::Duration::default(),
+            process_id: None,
+        });
+
+        Ok(())
+    }
 }

@@ -17,6 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::auth::tidecloak::TidecloakAuth;
 use crate::config::BackendEntry;
+use crate::vpn::vpn_handler::VpnState;
 use crate::webrtc::peer_handler::{PeerHandler, PeerHandlerOptions};
 
 const ALLOWED_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
@@ -24,7 +25,7 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
 const MAX_RESPONSE_SIZE: usize = 50 * 1024 * 1024; // 50MB
 const MAX_SINGLE_WS: usize = 512 * 1024; // 512KB
 const CHUNK_SIZE: usize = 256 * 1024; // 256KB
-const PING_INTERVAL: Duration = Duration::from_secs(30);
+const PING_INTERVAL: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct StunRegistrationOptions {
@@ -40,12 +41,14 @@ pub struct StunRegistrationOptions {
     pub metadata: serde_json::Value,
     pub backends: Vec<BackendEntry>,
     pub auth: Option<Arc<TidecloakAuth>>,
-    pub tc_client_id: Option<String>,
+    pub vpn_state: Option<Arc<Mutex<VpnState>>>,
+    pub quic_port: u16,
 }
 
 #[allow(dead_code)]
 pub struct StunRegistration {
     shutdown_tx: mpsc::Sender<()>,
+    re_register_tx: mpsc::UnboundedSender<serde_json::Value>,
 }
 
 impl StunRegistration {
@@ -53,16 +56,193 @@ impl StunRegistration {
     pub fn close(&self) {
         let _ = self.shutdown_tx.try_send(());
     }
+
+    /// Send updated metadata to the signal server (re-register with new backends etc.)
+    pub fn update_metadata(&self, metadata: serde_json::Value) {
+        let _ = self.re_register_tx.send(metadata);
+    }
+}
+
+/// Allocate a TURN relay on behalf of the gateway so VPN clients behind
+/// port-restricted NAT can reach the gateway through the relay.
+/// Returns the TURN relay address that the client should connect to.
+async fn allocate_gateway_turn_relay(
+    turn_server: &str,
+    turn_secret: &str,
+    gateway_id: &str,
+    client_addr: std::net::SocketAddr,
+    opts: Arc<StunRegistrationOptions>,
+) -> Result<std::net::SocketAddr, String> {
+    use crate::quic::turn_client;
+
+    let (username, credential) = turn_client::generate_credentials(turn_secret, gateway_id);
+
+    let turn_socket = Arc::new(
+        tokio::net::UdpSocket::bind("0.0.0.0:0").await
+            .map_err(|e| format!("TURN socket bind: {e}"))?
+    );
+
+    let allocation = turn_client::allocate(
+        turn_socket.clone(),
+        turn_server,
+        &username,
+        &credential,
+        client_addr,
+    ).await?;
+
+    let relay_addr = allocation.relay_addr();
+    tracing::info!("[QUIC] Gateway TURN relay allocated: {relay_addr}");
+
+    // The TURN proxy normally forwards between a local quinn client and the TURN server.
+    // For the gateway, we need the reverse: forward between the TURN server and
+    // the existing quinn server endpoint on the QUIC port.
+    // We use start_turn_proxy which creates 127.0.0.1:X, then bridge it to 127.0.0.1:quic_port
+    // so the existing quinn endpoint receives the client's QUIC packets.
+    let (proxy_addr, shutdown_tx) = turn_client::start_turn_proxy(allocation).await?;
+    // Keep the shutdown handle alive so the proxy doesn't exit
+    std::mem::forget(shutdown_tx);
+    tracing::info!("[QUIC] Gateway TURN proxy on {proxy_addr}");
+
+    // Bridge: forward UDP between proxy and the main QUIC endpoint
+    let quic_local: std::net::SocketAddr = format!("127.0.0.1:{}", opts.quic_port).parse().unwrap();
+    let bridge = Arc::new(
+        tokio::net::UdpSocket::bind("127.0.0.1:0").await
+            .map_err(|e| format!("Bridge socket: {e}"))?
+    );
+
+    // proxy → bridge → quinn server
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        let proxy = proxy_addr;
+        let quinn = quic_local;
+        // Connect to proxy so it knows our address
+        let _ = bridge.send_to(b"init", proxy).await;
+        loop {
+            match bridge.recv_from(&mut buf).await {
+                Ok((n, from)) if n > 0 => {
+                    if from == proxy {
+                        let _ = bridge.send_to(&buf[..n], quinn).await;
+                    } else {
+                        let _ = bridge.send_to(&buf[..n], proxy).await;
+                    }
+                }
+                _ => break,
+            }
+        }
+    });
+
+    // Return the external relay address that the client should connect to
+    Ok(relay_addr)
+}
+
+/// Get all non-loopback IPv4 LAN addresses with the given port.
+fn get_local_addresses(port: u16) -> Vec<String> {
+    let mut addrs = Vec::new();
+    // Use the connect-to-8.8.8.8 trick to find the primary LAN interface
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(local) = socket.local_addr() {
+                let ip = local.ip();
+                if !ip.is_loopback() {
+                    addrs.push(format!("{ip}:{port}"));
+                }
+            }
+        }
+    }
+    addrs
 }
 
 /// Register with the STUN signaling server. Returns a handle that can be
 /// used to close the registration.
 pub fn register(options: StunRegistrationOptions) -> StunRegistration {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+    let (re_register_tx, mut re_register_rx) = mpsc::unbounded_channel::<serde_json::Value>();
     let options = Arc::new(options);
 
     tokio::spawn(async move {
         let mut reconnect_delay_ms: u64 = 1000;
+
+        // Bind ONE UDP socket for STUN + QUIC (native quinn, no wtransport)
+        // Browsers use WebRTC, so wtransport is not needed.
+        let quic_port = options.quic_port;
+        let std_socket = std::net::UdpSocket::bind(format!("0.0.0.0:{quic_port}"))
+            .expect(&format!("Failed to bind QUIC port {quic_port}"));
+        std_socket.set_nonblocking(true).expect("Failed to set nonblocking");
+
+        // Keep a clone for sending UDP punch packets
+        let punch_socket = std_socket.try_clone()
+            .expect("Failed to clone UDP socket for hole-punching");
+
+        // STUN resolution on the same socket
+        let stun_server = options.ice_servers.first().cloned().unwrap_or_default();
+        let quic_public_addr = if !stun_server.is_empty() {
+            let stun_clone = std_socket.try_clone().expect("Clone error");
+            let tokio_sock = tokio::net::UdpSocket::from_std(stun_clone).expect("Tokio socket error");
+            match crate::quic::transport::stun_resolve(&tokio_sock, &stun_server).await {
+                Ok(addr) => {
+                    tracing::info!("[STUN] Reflexive address: {addr}");
+                    Some(addr)
+                }
+                Err(e) => {
+                    tracing::warn!("[STUN] Resolution failed: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // VPN and browser QUIC share the same address now
+        let vpn_public_addr = quic_public_addr;
+
+        // Create quinn endpoint on the SAME socket (preserves STUN NAT pinhole)
+        let (server_config, quic_cert_hash_raw) = crate::quic::transport::make_server_config();
+        let quic_cert_hash = quic_cert_hash_raw;
+        let runtime = quinn::default_runtime().expect("No runtime");
+        match quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            Some(server_config),
+            runtime.wrap_udp_socket(std_socket).expect("Wrap error"),
+            runtime,
+        ) {
+            Ok(endpoint) => {
+                tracing::info!("[QUIC] Native QUIC endpoint listening on 0.0.0.0:{quic_port}");
+                let opts = options.clone();
+                tokio::spawn(async move {
+                    loop {
+                        match endpoint.accept().await {
+                            Some(incoming) => {
+                                let opts = opts.clone();
+                                tokio::spawn(async move {
+                                    match incoming.await {
+                                        Ok(conn) => {
+                                            let remote = conn.remote_address();
+                                            tracing::info!("[QUIC] Native VPN client connected from {remote}");
+                                            let handler = crate::quic::peer_handler::QuicPeerHandler::new(
+                                                crate::quic::peer_handler::QuicPeerHandlerOptions {
+                                                    listen_port: opts.listen_port,
+                                                    use_tls: opts.use_tls,
+                                                    gateway_id: opts.gateway_id.clone(),
+                                                    send_signaling: tokio::sync::mpsc::unbounded_channel().0,
+                                                    backends: opts.backends.clone(),
+                                                    auth: opts.auth.clone(),
+                                                    vpn_state: opts.vpn_state.clone(),
+                                                },
+                                            );
+                                            handler.handle_connection(conn, remote.to_string()).await;
+                                        }
+                                        Err(e) => tracing::error!("[QUIC] VPN connection failed: {e}"),
+                                    }
+                                });
+                            }
+                            None => break,
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::error!("[QUIC] Failed to start QUIC endpoint on port {quic_port}: {e}");
+            }
+        }
 
         loop {
             // Check for shutdown before attempting connection
@@ -76,7 +256,7 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
                 options.stun_server_url
             );
 
-            match connect_and_run(&options, &mut shutdown_rx).await {
+            match connect_and_run(&options, &mut shutdown_rx, &mut re_register_rx, quic_port, &quic_public_addr, &vpn_public_addr, &quic_cert_hash, &punch_socket).await {
                 ConnectionResult::Shutdown => {
                     tracing::info!("[STUN-Reg] Shutdown — exiting");
                     break;
@@ -105,9 +285,11 @@ pub fn register(options: StunRegistrationOptions) -> StunRegistration {
 
             reconnect_delay_ms = (reconnect_delay_ms * 2).min(30000);
         }
+
+        // WebTransport server runs in background and doesn't need explicit cleanup
     });
 
-    StunRegistration { shutdown_tx }
+    StunRegistration { shutdown_tx, re_register_tx }
 }
 
 enum ConnectionResult {
@@ -125,6 +307,12 @@ fn is_streaming_content_type(ct: &str) -> bool {
 async fn connect_and_run(
     options: &Arc<StunRegistrationOptions>,
     shutdown_rx: &mut mpsc::Receiver<()>,
+    re_register_rx: &mut mpsc::UnboundedReceiver<serde_json::Value>,
+    quic_port: u16,
+    quic_public_addr: &Option<std::net::SocketAddr>,
+    vpn_public_addr: &Option<std::net::SocketAddr>,
+    quic_cert_hash: &str,
+    punch_socket: &std::net::UdpSocket,
 ) -> ConnectionResult {
     // Connect to the STUN signaling server
     let connect_result = if options.stun_server_url.starts_with("wss://") {
@@ -178,7 +366,7 @@ async fn connect_and_run(
             send_signaling: signaling_tx.clone(),
             backends: options.backends.clone(),
             auth: options.auth.clone(),
-            tc_client_id: options.tc_client_id.clone(),
+            vpn_state: options.vpn_state.clone(),
         });
         tracing::info!("[STUN-Reg] WebRTC peer handler ready");
         Some(Arc::new(ph))
@@ -237,7 +425,7 @@ async fn connect_and_run(
         }
     });
 
-    // Main message loop
+    // Main message loop (QUIC endpoint + accept loop are managed by register())
     let result = loop {
         tokio::select! {
             ws_msg = ws_stream.next() => {
@@ -259,11 +447,56 @@ async fn connect_and_run(
                             }
                             "paired" => {
                                 if let Some(client) = parsed.get("client") {
-                                    let client_id = client["id"].as_str().unwrap_or("unknown");
-                                    tracing::info!("[STUN-Reg] Paired with client: {}", client_id);
+                                    let client_id = client["id"].as_str().unwrap_or("unknown").to_string();
+                                    let _client_token = client["token"].as_str().unwrap_or("").to_string();
+                                    let client_reflexive = client["reflexiveAddress"].as_str().unwrap_or("").to_string();
+                                    tracing::info!("[STUN-Reg] Paired with client: {} (reflexive: {})", client_id, client_reflexive);
+
+                                    // UDP hole-punch: send packets to client's reflexive address
+                                    // to open NAT pinhole before client tries WebTransport
+                                    if !client_reflexive.is_empty() {
+                                        if let Ok(client_addr) = client_reflexive.parse::<std::net::SocketAddr>() {
+                                            tracing::info!("[STUN] Sending UDP punch to {client_addr}");
+                                            // Send a few packets to open the NAT pinhole
+                                            for _ in 0..3 {
+                                                let _ = punch_socket.send_to(b"punch", client_addr);
+                                            }
+                                        } else {
+                                            // reflexiveAddress might be just an IP without port — use a dummy port
+                                            let addr_with_port = if client_reflexive.contains(':') {
+                                                client_reflexive.clone()
+                                            } else {
+                                                format!("{}:1", client_reflexive)
+                                            };
+                                            if let Ok(client_addr) = addr_with_port.parse::<std::net::SocketAddr>() {
+                                                tracing::info!("[STUN] Sending UDP punch to {client_addr} (IP only)");
+                                                for _ in 0..3 {
+                                                    let _ = punch_socket.send_to(b"punch", client_addr);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Send QUIC address: use STUN reflexive address if available,
+                                    // otherwise 0.0.0.0 (signal server replaces with PUBLIC_URL or source IP)
+                                    let quic_addr = match &quic_public_addr {
+                                        Some(addr) => addr.to_string(),
+                                        None => format!("0.0.0.0:{quic_port}"),
+                                    };
+                                    // Include LAN addresses so same-NAT peers can connect directly
+                                    let local_addrs = get_local_addresses(quic_port);
+                                    let _ = signaling_tx.send(serde_json::json!({
+                                        "type": "quic_address",
+                                        "targetId": client_id,
+                                        "fromId": options.gateway_id,
+                                        "address": quic_addr,
+                                        "localAddresses": local_addrs,
+                                        "certHash": quic_cert_hash,
+                                    }));
                                 }
                             }
                             "candidate" => {
+                                // WebRTC ICE candidate (legacy/fallback)
                                 if let (Some(from_id), Some(candidate)) =
                                     (parsed["fromId"].as_str(), parsed.get("candidate"))
                                 {
@@ -275,6 +508,78 @@ async fn connect_and_run(
                                         if !cand_str.is_empty() {
                                             ph.handle_candidate(from_id, cand_str, mid).await;
                                         }
+                                    }
+                                }
+                            }
+                            "quic_address" => {
+                                // Client sent their QUIC address — punch to open NAT pinhole
+                                if let (Some(from_id), Some(addr)) =
+                                    (parsed["fromId"].as_str(), parsed["address"].as_str())
+                                {
+                                    tracing::info!("[QUIC] Client {from_id} QUIC address: {addr}");
+                                    // Send UDP punch packets to the client's address
+                                    let addr_clean = addr
+                                        .replace("::ffff:", "")
+                                        .replace('[', "")
+                                        .replace(']', "");
+                                    if let Ok(target) = addr_clean.parse::<std::net::SocketAddr>() {
+                                        tracing::info!("[STUN] Punching client {from_id} at {target}");
+                                        for _ in 0..5 {
+                                            let _ = punch_socket.send_to(b"punch", target);
+                                        }
+
+                                        // Allocate TURN relay for this client so they can reach us
+                                        // through TURN even behind port-restricted NAT
+                                        if let (Some(turn_server), Some(turn_secret)) =
+                                            (options.turn_server.as_deref(), options.turn_secret.as_deref())
+                                        {
+                                            let from_id = from_id.to_string();
+                                            let turn_server = turn_server.to_string();
+                                            let turn_secret = turn_secret.to_string();
+                                            let gateway_id = options.gateway_id.clone();
+                                            let signaling_tx = signaling_tx.clone();
+                                            let opts = options.clone();
+                                            tokio::spawn(async move {
+                                                match allocate_gateway_turn_relay(
+                                                    &turn_server, &turn_secret, &gateway_id, target, opts,
+                                                ).await {
+                                                    Ok(relay_addr) => {
+                                                        tracing::info!("[QUIC] TURN relay for client {from_id}: {relay_addr}");
+                                                        // Tell client they can reach us via this relay
+                                                        let _ = signaling_tx.send(json!({
+                                                            "type": "quic_address",
+                                                            "targetId": from_id,
+                                                            "fromId": gateway_id,
+                                                            "address": relay_addr.to_string(),
+                                                            "turnRelay": true,
+                                                        }));
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!("[QUIC] Failed to allocate TURN relay for {from_id}: {e}");
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            "punch" => {
+                                // Signal server requests UDP hole-punch to a browser's address
+                                // (coordinated via the QUIC relay sidecar)
+                                if let Some(target) = parsed["targetAddress"].as_str() {
+                                    // Normalize: strip IPv6 prefix and brackets
+                                    // e.g. "[::ffff:122.199.56.35]:61967" → "122.199.56.35:61967"
+                                    let target = target
+                                        .replace("::ffff:", "")
+                                        .replace('[', "")
+                                        .replace(']', "");
+                                    if let Ok(addr) = target.parse::<std::net::SocketAddr>() {
+                                        tracing::info!("[STUN] Coordinated punch to {addr}");
+                                        for _ in 0..5 {
+                                            let _ = punch_socket.send_to(b"punch", addr);
+                                        }
+                                    } else {
+                                        tracing::warn!("[STUN] Invalid punch target: {target}");
                                     }
                                 }
                             }
@@ -313,6 +618,9 @@ async fn connect_and_run(
                             _ => {}
                         }
                     }
+                    Some(Ok(Message::Binary(_))) => {
+                        // Binary messages not used (QUIC relay removed for browser connections)
+                    }
                     Some(Ok(Message::Pong(_))) => {
                         // Pong received — connection alive
                     }
@@ -327,6 +635,23 @@ async fn connect_and_run(
             }
             _ = shutdown_rx.recv() => {
                 break ConnectionResult::Shutdown;
+            }
+            Some(new_metadata) = re_register_rx.recv() => {
+                // Re-register with updated metadata (e.g. new backends after config hot-reload)
+                let register_msg = json!({
+                    "type": "register",
+                    "role": "gateway",
+                    "id": options.gateway_id,
+                    "secret": options.api_secret,
+                    "addresses": options.addresses,
+                    "metadata": new_metadata,
+                });
+                let mut sink = ws_sink.lock().await;
+                if let Err(e) = sink.send(Message::Text(serde_json::to_string(&register_msg).unwrap().into())).await {
+                    tracing::warn!("[STUN-Reg] Re-register failed: {e}");
+                } else {
+                    tracing::info!("[STUN-Reg] Re-registered with updated metadata");
+                }
             }
         }
     };
@@ -672,7 +997,7 @@ async fn handle_http_request(
             }
             Err(e) => {
                 pending_ref.write().await.remove(&rid);
-                tracing::error!("[STUN-Reg] Relay request failed: {}", e);
+                tracing::error!("[STUN-Reg] Relay request failed: {} (timeout={}, connect={}, status={:?}, url={:?})", e, e.is_timeout(), e.is_connect(), e.status(), e.url());
                 let (status, error_msg) = if e.is_timeout() {
                     (504, "Gateway timeout")
                 } else {

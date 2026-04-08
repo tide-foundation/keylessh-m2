@@ -1,9 +1,7 @@
 import { createServer as createHttpServer, request as httpRequest } from "http";
 import { createServer as createHttpsServer, request as httpsRequest } from "https";
 import { WebSocketServer, WebSocket } from "ws";
-import { jwtVerify, createLocalJWKSet, createRemoteJWKSet, JWTPayload } from "jose";
-import { readFileSync, existsSync } from "fs";
-import { join } from "path";
+import { readFileSync } from "fs";
 import { timingSafeEqual, createHmac, randomBytes } from "crypto";
 import { createRegistry, type ConnectionType, type GatewayMetadata } from "./signaling/registry.js";
 import { pairClient, pairClientWithGateway, forwardCandidate, forwardSdp } from "./signaling/pairing.js";
@@ -17,8 +15,6 @@ import { createHttpRelay, handleHttpResponse, handleHttpResponseStart, handleHtt
  *
  * Environment variables:
  * - PORT: Port to listen on (default: 9090)
- * - client_adapter: JSON string of tidecloak.json config (highest priority)
- * - TIDECLOAK_CONFIG_B64: Base64-encoded config
  * - API_SECRET: Shared secret for gateway registration authentication
  * - ICE_SERVERS: Comma-separated STUN server URLs (e.g. "stun:relay.example.com:3478")
  * - TURN_SERVER: TURN server URL for WebRTC relay fallback (e.g. "turn:relay.example.com:3478")
@@ -28,8 +24,6 @@ import { createHttpRelay, handleHttpResponse, handleHttpResponseStart, handleHtt
  */
 
 const PORT = parseInt(process.env.PORT || "9090");
-const CLIENT_ADAPTER = process.env.client_adapter;
-const CONFIG_B64 = process.env.TIDECLOAK_CONFIG_B64;
 const API_SECRET = process.env.API_SECRET || "";
 const ICE_SERVERS = process.env.ICE_SERVERS ? process.env.ICE_SERVERS.split(",") : [];
 const TURN_SERVER = process.env.TURN_SERVER || "";
@@ -44,124 +38,22 @@ const TRUSTED_PROXIES = process.env.TRUSTED_PROXIES
   ? new Set(process.env.TRUSTED_PROXIES.split(",").map(p => p.trim()))
   : null; // null = never trust X-Forwarded-For
 
-// ── TideCloak config + JWKS ──────────────────────────────────────
-
-function resolveConfigPath(): string | null {
-  const candidates = [
-    join(process.cwd(), "data", "tidecloak.json"),
-    join(process.cwd(), "..", "data", "tidecloak.json"),
-  ];
-  for (const p of candidates) {
-    if (existsSync(p)) return p;
-  }
-  return null;
-}
-
-interface TidecloakConfig {
-  realm: string;
-  "auth-server-url": string;
-  resource: string;
-  jwk: {
-    keys: Array<{
-      kid: string;
-      kty: string;
-      alg: string;
-      use: string;
-      crv: string;
-      x: string;
-    }>;
-  };
-}
-
-let tcConfig: TidecloakConfig | null = null;
-let JWKS: ReturnType<typeof createLocalJWKSet> | null = null;
-let remoteJWKS: ReturnType<typeof createRemoteJWKSet> | null = null;
-
-function loadConfig(): boolean {
-  try {
-    let configData: string;
-
-    if (CLIENT_ADAPTER) {
-      configData = CLIENT_ADAPTER;
-      console.log("[Signal] Loading config from client_adapter env variable");
-    } else if (CONFIG_B64) {
-      configData = Buffer.from(CONFIG_B64, "base64").toString("utf-8");
-      console.log("[Signal] Loading config from TIDECLOAK_CONFIG_B64");
-    } else {
-      const configPath = resolveConfigPath();
-      if (!configPath) {
-        console.error("[Signal] No tidecloak.json found in data directory");
-        return false;
-      }
-      configData = readFileSync(configPath, "utf-8");
-      console.log(`[Signal] Loading config from ${configPath}`);
-    }
-
-    tcConfig = JSON.parse(configData) as TidecloakConfig;
-
-    if (!tcConfig.jwk?.keys?.length) {
-      console.error("[Signal] No JWKS keys found in config");
-      return false;
-    }
-
-    JWKS = createLocalJWKSet(tcConfig.jwk);
-    const baseUrl = tcConfig["auth-server-url"].replace(/\/$/, "");
-    const jwksUrl = new URL(`${baseUrl}/realms/${tcConfig.realm}/protocol/openid-connect/certs`);
-    remoteJWKS = createRemoteJWKSet(jwksUrl);
-    console.log("[Signal] JWKS loaded successfully");
-    console.log(`[Signal] Remote JWKS fallback: ${jwksUrl}`);
-    return true;
-  } catch (err) {
-    console.error("[Signal] Failed to load config:", err);
-    return false;
-  }
-}
-
-async function verifyToken(token: string): Promise<JWTPayload | null> {
-  if (!JWKS || !tcConfig) return null;
-
-  try {
-    const issuer = `${tcConfig["auth-server-url"].replace(/\/+$/, "")}/realms/${tcConfig.realm}`;
-
-    // Try local JWKS first, fall back to remote if key not found
-    let payload: JWTPayload;
-    try {
-      ({ payload } = await jwtVerify(token, JWKS, { issuer }));
-    } catch (localErr: any) {
-      if (localErr?.code === "ERR_JWKS_NO_MATCHING_KEY" && remoteJWKS) {
-        ({ payload } = await jwtVerify(token, remoteJWKS, { issuer }));
-      } else {
-        throw localErr;
-      }
-    }
-
-    if (payload.azp !== tcConfig.resource) {
-      console.log(`[Signal] AZP mismatch: expected ${tcConfig.resource}, got ${payload.azp}`);
-      return null;
-    }
-
-    return payload;
-  } catch (err) {
-    console.log("[Signal] JWT verification failed:", err);
-    return null;
-  }
-}
-
-// Load config on startup
-if (!loadConfig()) {
-  console.error("[Signal] Failed to load TideCloak config. Exiting.");
-  process.exit(1);
-}
-
 // ── TideCloak Reverse Proxy (cookie jar) ─────────────────────────
 // Proxies /realms/* and /resources/* to TideCloak, storing TC cookies
 // server-side so the Tide auth flow stays on the signal server's origin.
-// This prevents cookie loss when ork1.tideprotocol.com redirects back.
+// Gateways handle actual JWT verification — the signal server just proxies.
 
-const tcAuthServerUrl = tcConfig!["auth-server-url"].replace(/\/$/, "");
-const tcProxyUrl = new URL(tcAuthServerUrl);
-const tcProxyIsHttps = tcProxyUrl.protocol === "https:";
+const tcAuthServerUrl = (process.env.TIDECLOAK_URL || "").replace(/\/$/, "");
+const tcProxyEnabled = !!tcAuthServerUrl;
+const tcProxyUrl = tcProxyEnabled ? new URL(tcAuthServerUrl) : null!;
+const tcProxyIsHttps = tcProxyEnabled && tcProxyUrl.protocol === "https:";
 const makeTcRequest = tcProxyIsHttps ? httpsRequest : httpRequest;
+
+if (tcProxyEnabled) {
+  console.log(`[Signal] TideCloak proxy: ${tcAuthServerUrl}`);
+} else {
+  console.log("[Signal] TideCloak proxy disabled (no TIDECLOAK_URL set)");
+}
 
 interface TcSession { cookies: Map<string, string>; lastAccess: number; }
 const tcCookieJar = new Map<string, TcSession>();
@@ -242,16 +134,14 @@ function proxyTideCloak(
 ): void {
   const tcSess = getTcSessionId(req.headers.cookie);
 
-  // Build proxy headers — strip forwarding so TC sees plain request
   const proxyHeaders = { ...req.headers } as Record<string, string | string[] | undefined>;
   proxyHeaders.host = tcProxyUrl.host;
   delete proxyHeaders["x-forwarded-proto"];
   delete proxyHeaders["x-forwarded-host"];
   delete proxyHeaders["x-forwarded-for"];
   delete proxyHeaders["x-forwarded-port"];
-  delete proxyHeaders["accept-encoding"]; // so we can rewrite body
+  delete proxyHeaders["accept-encoding"];
 
-  // Inject stored TC cookies
   const jarCookies = getTcCookieHeader(tcSess.id);
   if (jarCookies) {
     const existing = (proxyHeaders.cookie as string) || "";
@@ -265,12 +155,11 @@ function proxyTideCloak(
       path: req.url,
       method: req.method,
       headers: proxyHeaders,
-      rejectUnauthorized: false, // allow self-signed in dev
+      rejectUnauthorized: false,
     },
-    (tcRes) => {
+    (tcRes: import("http").IncomingMessage) => {
       const headers = { ...tcRes.headers } as Record<string, string | string[] | undefined>;
 
-      // Rewrite Location header (plain + URL-encoded versions)
       if (headers.location && typeof headers.location === "string") {
         headers.location = headers.location
           .replaceAll(tcProxyUrl.origin, publicOrigin)
@@ -284,10 +173,8 @@ function proxyTideCloak(
       delete headers["content-security-policy"];
       delete headers["content-security-policy-report-only"];
 
-      // Store TC cookies server-side
       storeTcCookies(tcSess.id, headers["set-cookie"] as string | string[] | undefined);
 
-      // Replace TC's Set-Cookie with our tc_sess cookie
       const tcSessCookie = `tc_sess=${tcSess.id}; HttpOnly; Path=/; Max-Age=${TC_SESS_MAX_AGE}; SameSite=None; Secure`;
       if (headers["set-cookie"] || tcSess.isNew) {
         headers["set-cookie"] = [tcSessCookie];
@@ -304,7 +191,6 @@ function proxyTideCloak(
         tcRes.on("end", () => {
           if (res.headersSent) return;
           let body = Buffer.concat(chunks).toString("utf-8");
-          // Rewrite all TideCloak URLs to signal server origin
           body = body.replaceAll(tcProxyUrl.origin, publicOrigin);
           body = body.replaceAll(
             tcProxyUrl.origin.replaceAll("/", "\\/"),
@@ -314,7 +200,6 @@ function proxyTideCloak(
             encodeURIComponent(tcProxyUrl.origin),
             encodeURIComponent(publicOrigin),
           );
-          // Also rewrite auth-server-url if different from origin
           if (tcAuthServerUrl !== tcProxyUrl.origin) {
             body = body.replaceAll(tcAuthServerUrl, publicOrigin);
             body = body.replaceAll(
@@ -337,7 +222,7 @@ function proxyTideCloak(
     },
   );
 
-  tcReq.on("error", (err) => {
+  tcReq.on("error", (err: Error) => {
     console.error("[Signal] TC proxy error:", err.message);
     if (!res.headersSent) {
       res.writeHead(502, { "Content-Type": "application/json" });
@@ -348,7 +233,7 @@ function proxyTideCloak(
   req.pipe(tcReq);
 }
 
-console.log(`[Signal] TideCloak proxy: ${tcAuthServerUrl}`);
+// ── Cookie helper ────────────────────────────────────────────────
 
 function parseCookie(header: string | undefined, name: string): string | null {
   if (!header) return null;
@@ -409,7 +294,12 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
   }
 
   // ── WebRTC config (STUN/TURN credentials for P2P upgrade) ────
+  // Allow cross-origin — keylessh RDP page fetches this from a different domain
   if (path === "/webrtc-config" && req.method === "GET") {
+    if (origin) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
     const host = req.headers.host || "localhost";
     const webrtcConfig: Record<string, unknown> = {
       signalingUrl: `${useTls ? "wss" : "ws"}://${host}`,
@@ -527,14 +417,10 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
     const cookies: string[] = [
       `gateway_relay=${encodeURIComponent(gatewayId)}; Path=/; HttpOnly; SameSite=None; Secure`,
     ];
-    // If a valid KeyleSSH JWT is provided, set it as gateway_access cookie
-    // so the gateway accepts the user without triggering its own login flow.
+    // Pass token through as cookies — gateway handles verification
     if (token) {
-      const payload = await verifyToken(token);
-      if (payload) {
-        // Token is valid — set as gateway_access (HttpOnly, forwarded by relay)
-        cookies.push(`gateway_access=${token}; Path=/; HttpOnly; SameSite=None; Secure`);
-      }
+      cookies.push(`gateway_access=${token}; Path=/; HttpOnly; SameSite=None; Secure`);
+      cookies.push(`keylessh_token=${token}; Path=/; SameSite=None; Secure`);
     }
     const redirect = params.get("redirect");
     const location = redirect
@@ -561,9 +447,8 @@ const requestHandler = async (req: import("http").IncomingMessage, res: import("
   }
 
   // ── TideCloak reverse proxy (/realms/*, /resources/*) ─────────
-  // If a registered gateway serves this realm, relay to it instead of
-  // proxying to the signal server's own TideCloak instance.
-  if (path.startsWith("/realms/") || path.startsWith("/resources/")) {
+  // If a gateway serves this realm, relay to it; otherwise proxy to TideCloak directly.
+  if (tcProxyEnabled && (path.startsWith("/realms/") || path.startsWith("/resources/"))) {
     const realmMatch = path.match(/\/(?:realms|resources)\/([^/]+)\//);
     if (realmMatch) {
       const realmGateway = registry.getGatewayByRealm(realmMatch[1]);
@@ -596,10 +481,169 @@ const server = useTls
 // ── WebSocket Server (signaling on any path) ────────────────────
 
 const signalWss = new WebSocketServer({ noServer: true, maxPayload: 5 * 1024 * 1024 });
+const sshWss = new WebSocketServer({ noServer: true, maxPayload: 1 * 1024 * 1024 });
+const relayWss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
 
 server.on("upgrade", (req, socket, head) => {
-  signalWss.handleUpgrade(req, socket, head, (ws) => {
-    signalWss.emit("connection", ws, req);
+  const url = req.url || "";
+  if (url.startsWith("/ws/ssh")) {
+    sshWss.handleUpgrade(req, socket, head, (ws) => {
+      sshWss.emit("connection", ws, req);
+    });
+  } else if (url.startsWith("/ws/quic-relay")) {
+    relayWss.handleUpgrade(req, socket, head, (ws) => {
+      relayWss.emit("connection", ws, req);
+    });
+  } else {
+    signalWss.handleUpgrade(req, socket, head, (ws) => {
+      signalWss.emit("connection", ws, req);
+    });
+  }
+});
+
+// ── QUIC Relay Handler ───────────────────────────────────────────
+// Connects the relay sidecar to the target gateway for stream forwarding.
+// Also triggers coordinated hole-punching: when the relay reports the browser's
+// source address, we tell the gateway to send UDP punch packets to that address.
+
+interface RelaySession {
+  sidecarWs: WebSocket;
+  gatewayWs?: WebSocket;
+  clientAddr: string;
+  gatewayId?: string;
+}
+const relaySessions = new Map<string, RelaySession>();
+
+relayWss.on("connection", (ws: WebSocket, req) => {
+  const url = new URL(req.url || "", `http://${req.headers.host}`);
+  const sessionId = url.searchParams.get("session") || "";
+  const clientAddr = url.searchParams.get("clientAddr") || "";
+
+  if (!sessionId) {
+    ws.close(4000, "Missing session ID");
+    return;
+  }
+
+  console.log(`[Relay] Sidecar connected: session=${sessionId} clientAddr=${clientAddr}`);
+
+  // Find the target gateway — use gatewayId from sidecar query param
+  const targetGatewayId = url.searchParams.get("gateway") || "";
+  const gateway = targetGatewayId
+    ? registry.getGateway(targetGatewayId)
+    : registry.getAvailableGateway();
+  if (!gateway) {
+    console.log(`[Relay] No gateway available for session ${sessionId}`);
+    ws.close(4004, "No gateway available");
+    return;
+  }
+
+  const session: RelaySession = { sidecarWs: ws, clientAddr, gatewayId: gateway.id };
+  relaySessions.set(sessionId, session);
+  console.log(`[Relay] Session ${sessionId} → gateway ${gateway.id}`);
+
+  ws.on("message", (data, isBinary) => {
+    if (!isBinary) {
+      // JSON control message from sidecar
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === "client_address") {
+          session.clientAddr = msg.address;
+          console.log(`[Relay] Browser address for session ${sessionId}: ${msg.address}`);
+
+          // Tell the target gateway to punch
+          safeSend(gateway.ws, {
+            type: "punch",
+            targetAddress: msg.address,
+            sessionId,
+          });
+        }
+      } catch {}
+      return;
+    }
+
+    // Binary frame from sidecar (browser → gateway): forward via gateway signaling WS
+    // Wrap as a relay_data message with session ID prefix
+    const sessionIdBuf = Buffer.from(sessionId);
+    const frame = Buffer.concat([
+      Buffer.from([0x52]), // 'R' magic byte for relay frames
+      Buffer.from([(sessionIdBuf.length >> 8) & 0xff, sessionIdBuf.length & 0xff]),
+      sessionIdBuf,
+      Buffer.from(data as ArrayBuffer),
+    ]);
+    if (gateway.ws.readyState === gateway.ws.OPEN) {
+      gateway.ws.send(frame);
+    }
+  });
+
+  ws.on("close", () => {
+    relaySessions.delete(sessionId);
+    // Tell gateway session ended
+    safeSend(gateway.ws, { type: "relay_close", sessionId });
+    console.log(`[Relay] Session ${sessionId} sidecar disconnected`);
+  });
+});
+
+// ── SSH WebSocket Proxy ────────────────────────────────────────
+// Proxies /ws/ssh?host=X&port=Y&token=Z to the gateway's /ws/ssh endpoint
+sshWss.on("connection", (clientWs: WebSocket, req) => {
+  const url = new URL(req.url || "", `http://${req.headers.host}`);
+  const gatewayId = url.searchParams.get("gatewayId") || "";
+  const queryString = url.search; // includes the leading '?'
+
+  // Find gateway
+  const gateway = gatewayId
+    ? registry.getGateway(gatewayId)
+    : registry.getAvailableGateway();
+
+  if (!gateway) {
+    clientWs.close(4004, "No gateway available");
+    return;
+  }
+
+  // Connect to gateway's /ws/ssh endpoint using its public IP
+  const gwPublicIp = (gateway.ws as any)._publicIp;
+  const gwPort = gateway.addresses[0]?.split(":").pop() || "7891";
+  if (!gwPublicIp) {
+    clientWs.close(4004, "Gateway has no public address");
+    return;
+  }
+
+  const gwWsUrl = `ws://${gwPublicIp}:${gwPort}/ws/ssh${queryString}`;
+  console.log(`[SSH-Proxy] Connecting to gateway: ${gwWsUrl}`);
+
+  const gwWs = new WebSocket(gwWsUrl);
+
+  gwWs.on("open", () => {
+    console.log(`[SSH-Proxy] Connected to gateway ${gateway.id}`);
+  });
+
+  // Bridge: client → gateway
+  clientWs.on("message", (data, isBinary) => {
+    if (gwWs.readyState === gwWs.OPEN) {
+      gwWs.send(data, { binary: isBinary });
+    }
+  });
+
+  // Bridge: gateway → client
+  gwWs.on("message", (data: Buffer, isBinary: boolean) => {
+    if (clientWs.readyState === clientWs.OPEN) {
+      clientWs.send(data, { binary: isBinary });
+    }
+  });
+
+  // Close propagation
+  clientWs.on("close", (code, reason) => {
+    gwWs.close(code, reason);
+  });
+
+  gwWs.on("close", (code, reason) => {
+    clientWs.close(code, reason);
+  });
+
+  clientWs.on("error", () => gwWs.close());
+  gwWs.on("error", (err) => {
+    console.error(`[SSH-Proxy] Gateway connection error: ${err.message}`);
+    clientWs.close(4002, "Gateway connection failed");
   });
 });
 
@@ -648,6 +692,13 @@ signalWss.on("connection", (ws: WebSocket, req) => {
   let messageCount = 0;
   const rateLimitInterval = setInterval(() => { messageCount = 0; }, 1000);
 
+  // Server-side ping keepalive (15s) to prevent Azure/proxy idle timeouts
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === ws.OPEN) {
+      ws.ping();
+    }
+  }, 15000);
+
   ws.on("message", (data) => {
     if (!gatewayWebSockets.has(ws)) {
       messageCount++;
@@ -655,6 +706,23 @@ signalWss.on("connection", (ws: WebSocket, req) => {
         ws.close(1008, "Rate limit exceeded");
         return;
       }
+    }
+
+    // Check for binary relay frames from gateway (magic byte 0x52 = 'R')
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+    if (buf.length >= 4 && buf[0] === 0x52) {
+      // Relay frame: [0x52][sessionId_len:u16][sessionId][stream frame data]
+      const sidLen = (buf[1] << 8) | buf[2];
+      const sid = buf.subarray(3, 3 + sidLen).toString();
+      const frameData = buf.subarray(3 + sidLen);
+      const session = relaySessions.get(sid);
+      if (session?.sidecarWs?.readyState === 1) { // WebSocket.OPEN
+        console.log(`[Relay] Forwarding ${frameData.length}b response to sidecar for session ${sid.substring(0, 8)}`);
+        session.sidecarWs.send(frameData);
+      } else {
+        console.log(`[Relay] No sidecar for session ${sid.substring(0, 8)} (state: ${session?.sidecarWs?.readyState})`);
+      }
+      return;
     }
 
     let msg: SignalMessage;
@@ -674,6 +742,10 @@ signalWss.on("connection", (ws: WebSocket, req) => {
       case "sdp_offer":
       case "sdp_answer":
         handleSdp(ws, msg);
+        break;
+      case "quic_address":
+        // QUIC transport: forward endpoint address + cert hash between peers
+        handleQuicAddress(ws, msg);
         break;
       case "http_response":
         handleHttpResponse(msg as unknown as {
@@ -711,7 +783,7 @@ signalWss.on("connection", (ws: WebSocket, req) => {
         }
         break;
       case "admin_action":
-        handleAdminAction(ws, msg);
+        safeSend(ws, { type: "error", message: "Admin actions not supported" });
         break;
       default:
         safeSend(ws, { type: "error", message: `Unknown message type: ${msg.type}` });
@@ -720,6 +792,7 @@ signalWss.on("connection", (ws: WebSocket, req) => {
 
   ws.on("close", () => {
     clearInterval(rateLimitInterval);
+    clearInterval(pingInterval);
     gatewayWebSockets.delete(ws);
     const info = registry.getInfoByWs(ws);
     if (info?.type === "gateway") {
@@ -736,6 +809,7 @@ signalWss.on("connection", (ws: WebSocket, req) => {
 
   ws.on("error", () => {
     clearInterval(rateLimitInterval);
+    clearInterval(pingInterval);
     gatewayWebSockets.delete(ws);
     const info = registry.getInfoByWs(ws);
     if (info?.type === "gateway") {
@@ -773,6 +847,11 @@ async function handleRegister(ws: WebSocket, msg: SignalMessage, clientIp: strin
 
     registry.registerGateway(msg.id, msg.addresses || [], ws, msg.metadata);
     gatewayWebSockets.add(ws);
+    // Store the gateway's public IP/URL for SSH proxy and QUIC address resolution
+    // Prefer explicit publicUrl from metadata (ACI outbound IP ≠ inbound IP),
+    // fall back to connection source IP
+    const explicitUrl = msg.metadata?.publicUrl as string | undefined;
+    (ws as any)._publicIp = explicitUrl || clientIp.replace(/^::ffff:/, "");
     safeSend(ws, { type: "registered", role: "gateway", id: msg.id });
   } else if (msg.role === "client") {
     // Signal server is a dumb relay — gateway handles auth.
@@ -810,38 +889,37 @@ function handleCandidate(ws: WebSocket, msg: SignalMessage): void {
   forwardCandidate(registry, fromId, msg.targetId, msg.candidate);
 }
 
-async function handleAdminAction(ws: WebSocket, msg: SignalMessage): Promise<void> {
-  // Verify admin JWT
-  if (msg.token) {
-    const payload = await verifyToken(msg.token);
-    if (!payload) {
-      safeSend(ws, { type: "error", message: "Invalid or insufficient permissions" });
-      return;
-    }
-  } else {
-    safeSend(ws, { type: "error", message: "Authentication required" });
+function handleQuicAddress(ws: WebSocket, msg: SignalMessage): void {
+  if (!msg.targetId) {
+    safeSend(ws, { type: "error", message: "Missing targetId for quic_address" });
     return;
   }
+  const fromId = msg.fromId || "unknown";
+  let address = (msg as any).address as string || "";
 
-  if (!msg.action || !msg.targetId) {
-    safeSend(ws, { type: "error", message: "Missing action or targetId" });
-    return;
+  // Replace 0.0.0.0 with the sender's actual public IP
+  const senderIp = (ws as any)._publicIp;
+  if (senderIp && address.startsWith("0.0.0.0:")) {
+    address = address.replace("0.0.0.0", senderIp);
   }
 
-  let success = false;
-  if (msg.action === "disconnect_client") {
-    success = registry.forceDisconnectClient(msg.targetId);
-  } else if (msg.action === "drain_gateway") {
-    success = registry.drainGateway(msg.targetId);
+  // Forward the full quic_address message to the target peer
+  const target = registry.getClient(msg.targetId) || registry.getGateway(msg.targetId);
+  if (target) {
+    // Include relay URL with gatewayId so relay routes to correct gateway
+    const relayHost = process.env.RELAY_HOST || "punchd.keylessh.com";
+    const relayPort = process.env.RELAY_PORT || "7893";
+    safeSend(target.ws, {
+      type: "quic_address",
+      fromId,
+      address,
+      certHash: (msg as any).certHash,
+      relayUrl: `${relayHost}:${relayPort}`,
+      gatewayId: fromId,
+    });
   }
-
-  safeSend(ws, {
-    type: "admin_result",
-    action: msg.action,
-    targetId: msg.targetId,
-    success,
-  });
 }
+
 
 function safeSend(ws: WebSocket, data: unknown): void {
   try {

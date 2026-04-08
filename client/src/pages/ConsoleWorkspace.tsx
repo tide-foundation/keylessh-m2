@@ -10,7 +10,15 @@ import { Label } from "@/components/ui/label";
 import { Plus, Terminal, X } from "lucide-react";
 import { TerminalSession } from "@/components/TerminalSession";
 
-type ConsoleTab = { id: string; serverId: string; sshUser: string };
+type ConsoleTab = {
+  id: string;
+  serverId: string;
+  sshUser: string;
+  gatewayUrl?: string;
+  gatewayId?: string;
+  backend?: string;
+  autoConnect?: boolean;
+};
 
 function newId() {
   // Prefer crypto.randomUUID when available; fallback to timestamp+random.
@@ -53,7 +61,9 @@ export default function ConsoleWorkspace() {
 
   useEffect(() => {
     try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(tabs));
+      // Strip autoConnect before persisting — it's a one-shot flag
+      const toStore = tabs.map(({ autoConnect, ...rest }) => rest);
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(toStore));
     } catch {
       // ignore
     }
@@ -95,10 +105,33 @@ export default function ConsoleWorkspace() {
     });
   };
 
-  // Support opening a new tab via URL query: /app/console?serverId=...&user=...
+  // Support opening a new tab via URL query
+  // Old: /app/console?serverId=...&user=...
+  // New: /app/console?gatewayUrl=...&gateway=...&backend=...&user=...
   useEffect(() => {
-    const serverId = searchParams.get("serverId");
+    const gatewayUrl = searchParams.get("gatewayUrl");
+    const gateway = searchParams.get("gateway");
+    const backend = searchParams.get("backend");
     const sshUser = searchParams.get("user");
+
+    if (gatewayUrl && gateway && backend && sshUser) {
+      // Gateway SSH mode — autoConnect since user clicked from Dashboard
+      const tabId = newId();
+      setTabs((prev) => [...prev, {
+        id: tabId,
+        serverId: backend,
+        sshUser,
+        gatewayUrl,
+        gatewayId: gateway,
+        backend,
+        autoConnect: true,
+      }]);
+      setActiveTabId(tabId);
+      setLocation("/app/console");
+      return;
+    }
+
+    const serverId = searchParams.get("serverId");
     if (!serverId || !sshUser) return;
 
     addTab(serverId, sshUser);
@@ -209,6 +242,9 @@ export default function ConsoleWorkspace() {
                 sshUser={tab.sshUser}
                 isActive={activeTabId === tab.id}
                 onCloseTab={() => closeTab(tab.id)}
+                gatewayUrl={tab.gatewayUrl}
+                gatewayId={tab.gatewayId}
+                autoConnect={tab.autoConnect}
               />
             </TabsContent>
           ))}

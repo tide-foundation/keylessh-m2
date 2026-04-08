@@ -13,6 +13,12 @@ const getKeycloakAuthServer = () => getAuthOverrideUrl();
 const getRealm_ = () => getRealm();
 const getClient = () => getResource();
 
+/// Determine which TideCloak client a role belongs to.
+function getClientForRole(roleName: string): string {
+  if (roleName === Roles.Admin) return REALM_MGMT;
+  return getClient();
+}
+
 const getTcUrl = () => `${getKeycloakAuthServer()}/admin/realms/${getRealm_()}`;
 const getNonAdminTcUrl = () => `${getKeycloakAuthServer()}/realms/${getRealm_()}`;
 
@@ -384,13 +390,11 @@ export const GrantUserRole = async (
   roleName: string,
   token: string
 ): Promise<void> => {
-  const client =
-    roleName === Roles.Admin
-      ? await getClientByClientId(REALM_MGMT, token)
-      : await getClientByClientId(getClient(), token);
+  const targetClientId = getClientForRole(roleName);
+  const client = await getClientByClientId(targetClientId, token);
 
   if (client === null || client?.id === undefined) {
-    throw new Error(`Could not grant user role, client ${getClient()} does not exist`);
+    throw new Error(`Could not grant user role, client ${targetClientId} does not exist`);
   }
 
   const role =
@@ -588,13 +592,11 @@ export const RemoveUserRole = async (
   roleName: string,
   token: string
 ): Promise<void> => {
-  const client =
-    roleName === Roles.Admin
-      ? await getClientByClientId(REALM_MGMT, token)
-      : await getClientByClientId(getClient(), token);
+  const targetClientId = getClientForRole(roleName);
+  const client = await getClientByClientId(targetClientId, token);
 
   if (client === null || client?.id === undefined) {
-    throw new Error(`Could not remove user role, client ${getClient()} does not exist`);
+    throw new Error(`Could not remove user role, client ${targetClientId} does not exist`);
   }
 
   const role =
@@ -690,15 +692,12 @@ export const GetTideLinkUrl = async (
 export const GetAllRoles = async (
   token: string
 ): Promise<RoleRepresentation[]> => {
-  // Get client roles
   const clientRoles = await getClientRoles(token);
 
-  // Get admin role
   try {
     const adminRole = await getTideRealmAdminRole(token);
     return [...clientRoles, adminRole];
   } catch {
-    // If admin role fetch fails, just return client roles
     return clientRoles;
   }
 };

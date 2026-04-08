@@ -202,63 +202,23 @@ export async function getUsersWithRoles(
     return _usersWithRolesCache.entry.data;
   }
 
-  // --- Round 1: fire everything we can in parallel ---
-  const appClientIdP = getClientId();
+  // --- Round 1: fetch users + realm-management client in parallel ---
   const usersP = users ? Promise.resolve(users) : getUsers();
+  const rmClientP = getClientByClientId(REALM_MGMT);
+  const [allUsers, rmClient] = await Promise.all([usersP, rmClientP]);
 
-  // Resolve app client + realm-management client in parallel with users
-  const [allUsers, appClientId] = await Promise.all([usersP, appClientIdP]);
+  // --- Round 2: fetch admin members only (no per-role member listing needed) ---
+  const adminUsers = rmClient?.id
+    ? await tcFetch<UserRepresentation[]>(
+        `/clients/${rmClient.id}/roles/${encodeURIComponent(ADMIN_ROLE)}/users`
+      ).catch(() => [] as UserRepresentation[])
+    : [] as UserRepresentation[];
 
-  // Now look up both clients and the role list in parallel
-  const [appClient, rmClient] = await Promise.all([
-    getClientByClientId(appClientId),
-    getClientByClientId(REALM_MGMT),
-  ]);
-
-  // --- Round 2: fetch role list + admin members in parallel ---
-  const [roles, adminUsers] = await Promise.all([
-    appClient?.id
-      ? tcFetch<RoleRepresentation[]>(`/clients/${appClient.id}/roles`).catch(() => [] as RoleRepresentation[])
-      : [] as RoleRepresentation[],
-    rmClient?.id
-      ? tcFetch<UserRepresentation[]>(
-          `/clients/${rmClient.id}/roles/${encodeURIComponent(ADMIN_ROLE)}/users`
-        ).catch(() => [] as UserRepresentation[])
-      : [] as UserRepresentation[],
-  ]);
-
-  // --- Round 3: fetch members for each role in parallel ---
-  const userRolesMap = new Map<string, string[]>();
-
-  if (appClient?.id && roles.length > 0) {
-    const roleUserPairs = await Promise.all(
-      roles.map(async (role) => {
-        const members = await tcFetch<UserRepresentation[]>(
-          `/clients/${appClient.id}/roles/${encodeURIComponent(role.name!)}/users`
-        ).catch(() => []);
-        return { roleName: role.name!, userIds: members.map(u => u.id!) };
-      })
-    );
-
-    for (const { roleName, userIds } of roleUserPairs) {
-      for (const uid of userIds) {
-        const existing = userRolesMap.get(uid) || [];
-        existing.push(roleName);
-        userRolesMap.set(uid, existing);
-      }
-    }
-  }
-
-  // Merge admin role members
-  for (const u of adminUsers) {
-    const existing = userRolesMap.get(u.id!) || [];
-    existing.push(ADMIN_ROLE);
-    userRolesMap.set(u.id!, existing);
-  }
+  const adminSet = new Set(adminUsers.map(u => u.id!));
 
   const result = allUsers.map(u => ({
     ...u,
-    clientRoles: userRolesMap.get(u.id!) || [],
+    clientRoles: adminSet.has(u.id!) ? [ADMIN_ROLE] : [],
   }));
 
   _usersWithRolesCache.entry = { data: result, expiry: Date.now() + CACHE_TTL };
@@ -309,6 +269,13 @@ export async function getUserRoleMappings(userId: string): Promise<MappingsRepre
   return tcFetch<MappingsRepresentation>(`/users/${userId}/role-mappings`);
 }
 
+export async function getUserClientRoleMappings(userId: string): Promise<RoleRepresentation[]> {
+  const clientId = await getClientId();
+  const client = await getClientByClientId(clientId);
+  if (!client?.id) return [];
+  return tcFetch<RoleRepresentation[]>(`/users/${userId}/role-mappings/clients/${client.id}`);
+}
+
 export async function getTideLinkUrl(userId: string, redirectUri: string): Promise<string> {
   const clientId = await getClientId();
   return tcFetch<string>(
@@ -353,6 +320,7 @@ export async function getTideRealmAdminRole(): Promise<RoleRepresentation> {
 
 export async function getAllRoles(): Promise<RoleRepresentation[]> {
   const clientRoles = await getClientRoles();
+
   try {
     const adminRole = await getTideRealmAdminRole();
     return [...clientRoles, adminRole];
@@ -362,9 +330,9 @@ export async function getAllRoles(): Promise<RoleRepresentation[]> {
 }
 
 export async function createRole(data: { name: string; description?: string }): Promise<void> {
-  const clientId = await getClientId();
-  const client = await getClientByClientId(clientId);
-  if (!client) throw new Error("Client not found");
+  const clientIdStr = await getClientId();
+  const client = await getClientByClientId(clientIdStr);
+  if (!client) throw new Error(`Client '${clientIdStr}' not found`);
 
   await tcFetch(`/clients/${client.id}/roles`, {
     method: "POST",
@@ -375,9 +343,9 @@ export async function createRole(data: { name: string; description?: string }): 
 }
 
 export async function updateRole(roleRep: { name: string; description?: string }): Promise<void> {
-  const clientId = await getClientId();
-  const client = await getClientByClientId(clientId);
-  if (!client) throw new Error("Client not found");
+  const clientIdStr = await getClientId();
+  const client = await getClientByClientId(clientIdStr);
+  if (!client) throw new Error(`Client '${clientIdStr}' not found`);
 
   await tcFetch(`/clients/${client.id}/roles/${roleRep.name}`, {
     method: "PUT",
@@ -388,33 +356,56 @@ export async function updateRole(roleRep: { name: string; description?: string }
 }
 
 export async function deleteRole(roleName: string): Promise<{ approvalCreated: boolean; message?: string }> {
-  const clientId = await getClientId();
-  const client = await getClientByClientId(clientId);
-  if (!client) throw new Error("Client not found");
+  const clientIdStr = await getClientId();
+  const client = await getClientByClientId(clientIdStr);
+  if (!client) throw new Error(`Client '${clientIdStr}' not found`);
 
-  await tcFetch(`/clients/${client.id}/roles/${roleName}`, { method: "DELETE" });
+  // Use role ID for deletion (role name with colons/slashes breaks URL path)
+  const role = await findRoleByName(client.id, roleName);
+  await tcFetch(`/roles-by-id/${role.id}`, { method: "DELETE" });
   invalidateRolesCache();
 
   // Check if role still exists (approval created instead of immediate delete)
   try {
-    await tcFetch(`/clients/${client.id}/roles/${roleName}`);
+    await findRoleByName(client.id, roleName);
     return { approvalCreated: true, message: "Approval request created" };
   } catch {
     return { approvalCreated: false };
   }
 }
 
+/** Determine which TideCloak client a role belongs to. */
+async function getClientIdForRole(roleName: string): Promise<string> {
+  if (roleName === ADMIN_ROLE) return REALM_MGMT;
+  return await getClientId();
+}
+
+/// Look up a role by name without putting the name in the URL path.
+/// Keycloak's GET /roles/{name} breaks on colons/slashes in role names.
+/// Uses the cached roles list from getClientRoles().
+async function findRoleByName(_clientUuid: string, roleName: string): Promise<RoleRepresentation> {
+  let roles = await getClientRoles();
+  let role = roles.find((r) => r.name === roleName);
+  if (!role) {
+    // Cache miss — invalidate and retry
+    invalidateRolesCache();
+    roles = await getClientRoles();
+    role = roles.find((r) => r.name === roleName);
+    if (!role) throw new Error(`Role '${roleName}' not found`);
+  }
+  return role;
+}
+
 export async function grantUserRole(userId: string, roleName: string): Promise<void> {
   const isAdmin = roleName === ADMIN_ROLE;
-  const client = isAdmin
-    ? await getClientByClientId(REALM_MGMT)
-    : await getClientByClientId(await getClientId());
+  const targetClientId = await getClientIdForRole(roleName);
+  const client = await getClientByClientId(targetClientId);
 
-  if (!client?.id) throw new Error("Client not found");
+  if (!client?.id) throw new Error(`Client '${targetClientId}' not found`);
 
   const role = isAdmin
     ? await getTideRealmAdminRole()
-    : await tcFetch<RoleRepresentation>(`/clients/${client.id}/roles/${roleName}`);
+    : await findRoleByName(client.id, roleName);
 
   await tcFetch(`/users/${userId}/role-mappings/clients/${client.id}`, {
     method: "POST",
@@ -426,15 +417,14 @@ export async function grantUserRole(userId: string, roleName: string): Promise<v
 
 export async function removeUserRole(userId: string, roleName: string): Promise<void> {
   const isAdmin = roleName === ADMIN_ROLE;
-  const client = isAdmin
-    ? await getClientByClientId(REALM_MGMT)
-    : await getClientByClientId(await getClientId());
+  const targetClientId = await getClientIdForRole(roleName);
+  const client = await getClientByClientId(targetClientId);
 
-  if (!client?.id) throw new Error("Client not found");
+  if (!client?.id) throw new Error(`Client '${targetClientId}' not found`);
 
   const role = isAdmin
     ? await getTideRealmAdminRole()
-    : await tcFetch<RoleRepresentation>(`/clients/${client.id}/roles/${roleName}`);
+    : await findRoleByName(client.id, roleName);
 
   await tcFetch(`/users/${userId}/role-mappings/clients/${client.id}`, {
     method: "DELETE",

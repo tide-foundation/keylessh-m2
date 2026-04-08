@@ -13,7 +13,7 @@ import AuthRedirect from "@/pages/AuthRedirect";
 import Dashboard from "@/pages/Dashboard";
 import ConsoleWorkspace from "@/pages/ConsoleWorkspace";
 import AdminDashboard from "@/pages/AdminDashboard";
-import AdminServers from "@/pages/AdminServers";
+// AdminServers removed — SSH servers are now gateway backends
 import AdminUsers from "@/pages/AdminUsers";
 import AdminRoles from "@/pages/AdminRoles";
 import AdminApprovals from "@/pages/AdminApprovals";
@@ -21,8 +21,9 @@ import AdminSessions from "@/pages/AdminSessions";
 import AdminLogs from "@/pages/AdminLogs";
 import AdminLicense from "@/pages/AdminLicense";
 import AdminRecordings from "@/pages/AdminRecordings";
-import AdminBridges from "@/pages/AdminBridges";
+// AdminBridges removed — SSH goes through gateway now
 import AdminSignalServers from "@/pages/AdminSignalServers";
+import AdminGateways from "@/pages/AdminGateways";
 import NotFound from "@/pages/not-found";
 import { Loader2, Terminal } from "lucide-react";
 
@@ -93,6 +94,16 @@ function AuthenticatedApp() {
   const [, setLocation] = useLocation();
   const [showRetry, setShowRetry] = useState(false);
   const isAdmin = hasRole("admin");
+  const canAccessGateways = isAdmin || (() => {
+    try {
+      const token = localStorage.getItem("access_token");
+      if (!token) return false;
+      const payload = JSON.parse(atob(token.split(".")[1]));
+      const clientId = payload.azp;
+      const clientRoles = payload.resource_access?.[clientId]?.roles || [];
+      return clientRoles.includes("allowConfigDownload");
+    } catch { return false; }
+  })();
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -141,14 +152,11 @@ function AuthenticatedApp() {
           <Route path="/admin">
             {isAdmin ? <AdminDashboard /> : <Redirect to="/app" />}
           </Route>
-          <Route path="/admin/servers">
-            {isAdmin ? <AdminServers /> : <Redirect to="/app" />}
-          </Route>
-          <Route path="/admin/bridges">
-            {isAdmin ? <AdminBridges /> : <Redirect to="/app" />}
-          </Route>
           <Route path="/admin/signal-servers">
             {isAdmin ? <AdminSignalServers /> : <Redirect to="/app" />}
+          </Route>
+          <Route path="/admin/gateways">
+            {canAccessGateways ? <AdminGateways /> : <Redirect to="/app" />}
           </Route>
           <Route path="/admin/users">
             {isAdmin ? <AdminUsers /> : <Redirect to="/app" />}

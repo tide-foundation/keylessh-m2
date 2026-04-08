@@ -24,7 +24,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, CreditCard, Video, Zap, Sun, Moon, Network, Radio } from "lucide-react";
+import { Server, Users, Activity, LogOut, Shield, ChevronDown, Layers, ScrollText, KeyRound, CheckSquare, RefreshCw, CreditCard, Video, Zap, Sun, Moon, Network, Radio, Router } from "lucide-react";
 
 function KeyleSSHLogo({ className = "" }: { className?: string }) {
   return (
@@ -74,9 +74,8 @@ const adminNavGroups = [
     label: "Infrastructure",
     items: [
       { title: "Overview", url: "/admin", icon: Shield },
-      { title: "Servers", url: "/admin/servers", icon: Server },
-      { title: "Bridges", url: "/admin/bridges", icon: Network },
       { title: "Signal Servers", url: "/admin/signal-servers", icon: Radio },
+      { title: "Punchd", url: "/admin/gateways", icon: Router },
       { title: "Sessions", url: "/admin/sessions", icon: Activity },
     ],
   },
@@ -108,6 +107,16 @@ export function AppLayout({ children }: AppLayoutProps) {
   const { toast } = useToast();
   const [location] = useLocation();
   const isAdmin = hasRole("admin");
+  const canAccessGateways = isAdmin || (() => {
+    try {
+      const token = localStorage.getItem("access_token");
+      if (!token) return false;
+      const payload = JSON.parse(atob(token.split(".")[1]));
+      const clientId = payload.azp;
+      const clientRoles = payload.resource_access?.[clientId]?.roles || [];
+      return clientRoles.includes("allowConfigDownload");
+    } catch { return false; }
+  })();
   const [isBrowserOnline, setIsBrowserOnline] = useState(() => navigator.onLine);
 
   // Check if Stripe is configured to determine if License page should be shown
@@ -150,13 +159,36 @@ export function AppLayout({ children }: AppLayoutProps) {
     return accessCount + roleCount + policyCount;
   }, [accessApprovals, roleApprovals, pendingPolicies]);
 
-  // Filter out Settings group if Stripe is not configured
+  // Filter nav items based on permissions and config
   const filteredAdminNavGroups = useMemo(() => {
-    if (pricingInfo?.stripeConfigured === false) {
-      return adminNavGroups.filter(group => group.label !== "Settings");
+    let groups = adminNavGroups;
+
+    if (!isAdmin) {
+      // Non-admin users only see items they have access to (e.g. Punchd with allowConfigDownload)
+      groups = groups.map(group => ({
+        ...group,
+        items: group.items.filter(item => {
+          if (item.url === "/admin/gateways") return canAccessGateways;
+          return false; // non-admins can't see other admin items
+        }),
+      })).filter(group => group.items.length > 0);
+    } else {
+      // Hide Punchd gateway tab unless admin or has allowConfigDownload role
+      if (!canAccessGateways) {
+        groups = groups.map(group => ({
+          ...group,
+          items: group.items.filter(item => item.url !== "/admin/gateways"),
+        }));
+      }
+
+      // Hide Settings group if Stripe is not configured
+      if (pricingInfo?.stripeConfigured === false) {
+        groups = groups.filter(group => group.label !== "Settings");
+      }
     }
-    return adminNavGroups;
-  }, [pricingInfo?.stripeConfigured]);
+
+    return groups;
+  }, [isAdmin, pricingInfo?.stripeConfigured, canAccessGateways]);
 
   // Refresh non-TideCloak data when navigating between sections.
   // TideCloak queries (access-approvals, role-approvals, ssh-policies/pending) are excluded
@@ -233,11 +265,11 @@ export function AppLayout({ children }: AppLayoutProps) {
               </SidebarGroupContent>
             </SidebarGroup>
 
-            {isAdmin && (
+            {filteredAdminNavGroups.length > 0 && (
               <div className="my-3 mx-2 border-t border-sidebar-border" />
             )}
 
-            {isAdmin && filteredAdminNavGroups.map((group) => (
+            {filteredAdminNavGroups.map((group) => (
               <SidebarGroup key={group.label} className="mt-2">
                 <SidebarGroupLabel className="text-xs font-medium uppercase tracking-wide text-muted-foreground px-2 py-1.5">
                   {group.label}

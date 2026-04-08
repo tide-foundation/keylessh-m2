@@ -8,8 +8,9 @@ ARG VS_BUILDTOOLS_URI=https://aka.ms/vs/17/release/vs_buildtools.exe
 ARG WIX_VERSION=6.0.2
 ARG CMAKE_VERSION=4.3.0
 ARG NINJA_VERSION=1.13.0
+ARG RUST_VERSION=stable
 
-ENV PATH="C:\tools\cmake\bin;C:\tools\ninja;C:\Users\ContainerAdministrator\.dotnet\tools;C:\Program Files\dotnet;C:\Windows\System32;C:\Windows"
+ENV PATH="C:\Users\ContainerAdministrator\.cargo\bin;C:\tools\cmake\bin;C:\tools\ninja;C:\tools\mingw64\bin;C:\Users\ContainerAdministrator\.dotnet\tools;C:\Program Files\dotnet;C:\Windows\System32;C:\Windows"
 
 WORKDIR C:/TEMP
 
@@ -18,7 +19,7 @@ RUN echo shell-ok && where cmd && dotnet --info
 USER ContainerAdministrator
 RUN setx /M TEMP "C:\TEMP" && setx /M TMP "C:\TEMP"
 
-RUN echo Install Visual Studio Build Tools - this is the command shape that worked
+RUN echo Install Visual Studio Build Tools (for TideSSP C compilation)
 RUN curl -SL --output C:\TEMP\vs_buildtools.exe %VS_BUILDTOOLS_URI% `
  && start /w C:\TEMP\vs_buildtools.exe --quiet --wait --norestart --nocache `
       --installPath "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools" `
@@ -49,14 +50,29 @@ RUN dotnet tool install --global wix --version %WIX_VERSION% `
  && wix extension add --global WixToolset.UI.wixext/%WIX_VERSION% `
  && wix extension add --global WixToolset.Util.wixext/%WIX_VERSION%
 
-RUN echo Prove the MSVC toolchain exists
-RUN dir "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools" `
- && dir "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC" `
- && call "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 `
- && where cl `
- && cl
+RUN echo Install Rust with GNU target (static binary, no vcruntime needed)
+RUN curl -SL --output C:\TEMP\rustup-init.exe https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe `
+ && C:\TEMP\rustup-init.exe -y --default-toolchain %RUST_VERSION% `
+ && del /q C:\TEMP\rustup-init.exe
+RUN rustup target add x86_64-pc-windows-gnu
+RUN rustc --version && cargo --version
 
-RUN echo Generate runtime build script inside the image
+RUN echo Install MinGW-w64 (GNU linker for Rust cross-compilation)
+RUN curl -SL --output C:\TEMP\mingw.7z https://github.com/niXman/mingw-builds-binaries/releases/download/14.2.0-rt_v12-rev1/x86_64-14.2.0-release-posix-seh-ucrt-rt_v12-rev1.7z `
+ && mkdir C:\tools\mingw-extract `
+ && tar -xf C:\TEMP\mingw.7z -C C:\tools\mingw-extract `
+ && move C:\tools\mingw-extract\mingw64 C:\tools\mingw64 `
+ && rmdir /s /q C:\tools\mingw-extract `
+ && del /q C:\TEMP\mingw.7z
+RUN where gcc && gcc --version
+
+RUN echo Prove toolchains exist
+RUN call "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 `
+ && where cl && cl
+
+RUN echo Generate runtime build scripts inside the image
+
+RUN echo --- build.cmd: TideSSP only (mount tide-ssp at C:\src) ---
 RUN > C:\build.cmd echo @echo off `
  && >> C:\build.cmd echo setlocal `
  && >> C:\build.cmd echo call "%%ProgramFiles(x86)%%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 `
@@ -67,6 +83,18 @@ RUN > C:\build.cmd echo @echo off `
  && >> C:\build.cmd echo call installer\build.bat `
  && >> C:\build.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
  && >> C:\build.cmd echo endlocal
+
+RUN echo --- workstationbuild.cmd: TideSSP + PunchdEndpoint (mount repo root at C:\src) ---
+RUN > C:\workstationbuild.cmd echo @echo off `
+ && >> C:\workstationbuild.cmd echo setlocal `
+ && >> C:\workstationbuild.cmd echo call "%%ProgramFiles(x86)%%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 `
+ && >> C:\workstationbuild.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
+ && >> C:\workstationbuild.cmd echo cd /d C:\src\tide-ssp `
+ && >> C:\workstationbuild.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
+ && >> C:\workstationbuild.cmd echo if exist build rmdir /s /q build `
+ && >> C:\workstationbuild.cmd echo call installer\workstationbuild.bat `
+ && >> C:\workstationbuild.cmd echo if errorlevel 1 exit /b %%errorlevel%% `
+ && >> C:\workstationbuild.cmd echo endlocal
 
 WORKDIR C:/work
 

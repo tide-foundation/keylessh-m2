@@ -1,26 +1,31 @@
 import { useAuth } from "@/contexts/AuthContext";
 import { useIsFetching, useQuery } from "@tanstack/react-query";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle, X, Globe, ExternalLink, Search, LayoutGrid, List, Monitor } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Server, Terminal, Clock, Activity, ArrowRight, HelpCircle, AlertCircle, X, Globe, ExternalLink, Search, LayoutGrid, List, Monitor, Network, Plus, Trash2, Router, Wifi, WifiOff, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Input } from "@/components/ui/input";
 import type { ServerWithAccess, ActiveSession } from "@shared/schema";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
+import { VpnPanel } from "@/components/VpnPanel";
 import { IAMService } from "@tidecloak/js";
 import { appFetch } from "@/lib/appFetch";
 import { api, type GatewayEndpoint } from "@/lib/api";
 
 type ServiceItem =
-  | { kind: "ssh"; server: ServerWithAccess }
+  | { kind: "ssh"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; accessible?: boolean } }
   | { kind: "web"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible?: boolean } }
-  | { kind: "rdp"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible?: boolean } };
+  | { kind: "rdp"; endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible?: boolean } }
+  | { kind: "custom"; endpoint: GatewayEndpoint };
 
 function ServerCard({ server, sshBlocked }: { server: ServerWithAccess; sshBlocked?: boolean }) {
   const [selectedUser, setSelectedUser] = useState<string>(server.allowedSshUsers[0] || "");
@@ -155,32 +160,46 @@ function ServerCardSkeleton() {
   );
 }
 
-function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string; accessible?: boolean } }) {
+function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; backend: { name: string; protocol?: string; sshUsernames?: string[]; accessible?: boolean } }) {
   const accessible = backend.accessible !== false;
-  const isDisabled = !accessible || !endpoint.online;
+  const isSsh = backend.protocol === "ssh";
+  const sshUsernames = (backend as any).sshUsernames || [];
+  const [selectedSshUser, setSelectedSshUser] = useState<string>(sshUsernames[0] || "");
+  const isDisabled = !accessible || !endpoint.online || (isSsh && !selectedSshUser);
+  const [, setLocation] = useLocation();
   const handleConnect = () => {
-    const url = endpoint.signalServerUrl.replace(/\/$/, "");
-    const token = localStorage.getItem("access_token") || "";
-    const params = new URLSearchParams({
-      gateway: endpoint.id,
-      backend: backend.name,
-    });
-    if (token) params.set("token", token);
-    window.open(`${url}/api/select?${params.toString()}`, "_blank");
+    if (isSsh) {
+      // SSH: open console with gateway routing + selected username
+      const baseUrl = endpoint.directUrl || endpoint.signalServerUrl.replace(/\/$/, "");
+      setLocation(`/app/console?gatewayUrl=${encodeURIComponent(baseUrl)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(endpoint.id)}&user=${encodeURIComponent(selectedSshUser)}`);
+    } else {
+      // Web endpoint: open via signal server relay
+      const url = endpoint.signalServerUrl.replace(/\/$/, "");
+      const token = localStorage.getItem("access_token") || "";
+      const params = new URLSearchParams({
+        gateway: endpoint.id,
+        backend: backend.name,
+      });
+      if (token) params.set("token", token);
+      window.open(`${url}/api/select?${params.toString()}`, "_blank");
+    }
   };
+
+  const IconComponent = isSsh ? Terminal : Globe;
+  const colorVar = isSsh ? "--neon-cyan" : "--neon-purple";
 
   return (
     <Card className="group cyber-card hover-neon-glow">
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(--neon-purple)/0.15)] border border-[hsl(var(--neon-purple)/0.3)] group-hover:border-[hsl(var(--neon-purple)/0.5)] transition-colors">
-              <Globe className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
+            <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(${colorVar})/0.15)] border border-[hsl(var(${colorVar})/0.3)] group-hover:border-[hsl(var(${colorVar})/0.5)] transition-colors`}>
+              <IconComponent className={`h-5 w-5 text-[hsl(var(${colorVar}))]`} />
             </div>
             <div>
               <CardTitle className="text-base">{backend.name}</CardTitle>
               <CardDescription className="text-xs">
-                {endpoint.displayName}
+                {endpoint.displayName} {isSsh && <Badge variant="outline" className="ml-1 text-[10px] px-1 py-0">SSH</Badge>}
               </CardDescription>
             </div>
           </div>
@@ -207,23 +226,35 @@ function GatewayEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint;
         {!accessible && (
           <p className="text-xs text-muted-foreground">
             No access to this endpoint. Ask an admin to grant a role like{" "}
-            <span className="font-mono">dest:{endpoint.id}:{backend.name}</span>.
+            <span className="font-mono">{backend.protocol === "ssh" ? "ssh" : "dest"}:{endpoint.id}:{backend.name}{backend.protocol === "ssh" ? ":username" : ""}</span>.
           </p>
+        )}
+
+        {isSsh && sshUsernames.length > 0 && (
+          <Select value={selectedSshUser} onValueChange={setSelectedSshUser}>
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="Select user" />
+            </SelectTrigger>
+            <SelectContent>
+              {sshUsernames.map((u: string) => (
+                <SelectItem key={u} value={u}>{u}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         )}
 
         {isDisabled ? (
           <Button className="w-full gap-2" disabled>
-            <ExternalLink className="h-4 w-4" />
-            Connect
-            <ArrowRight className="h-4 w-4" />
+            {isSsh ? <Terminal className="h-4 w-4" /> : <ExternalLink className="h-4 w-4" />}
+            {isSsh ? (selectedSshUser ? `SSH as ${selectedSshUser}` : "SSH") : "Connect"}
           </Button>
         ) : (
           <Button
             className="w-full gap-2 btn-primary-glow"
             onClick={handleConnect}
           >
-            <ExternalLink className="h-4 w-4" />
-            Connect
+            {isSsh ? <Terminal className="h-4 w-4" /> : <ExternalLink className="h-4 w-4" />}
+            {isSsh ? `SSH as ${selectedSshUser}` : "Connect"}
             <ArrowRight className="h-4 w-4" />
           </Button>
         )}
@@ -239,14 +270,13 @@ function RdpEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; bac
   const usernames = backend.rdpUsernames || [];
   const [selectedUser, setSelectedUser] = useState<string>(usernames[0] || "");
   const handleConnect = () => {
-    const url = endpoint.signalServerUrl.replace(/\/$/, "");
-    const token = localStorage.getItem("access_token") || "";
+    const signalUrl = endpoint.signalServerUrl.replace(/\/$/, "");
     const params = new URLSearchParams({
+      signalUrl,
       gateway: endpoint.id,
       backend: backend.name,
     });
-    if (token) params.set("token", token);
-    window.open(`${url}/api/select?${params.toString()}&redirect=${encodeURIComponent(`/rdp?backend=${encodeURIComponent(backend.name)}`)}`, "_blank");
+    window.open(`/gateway/rdp.html?${params.toString()}`, "_blank");
   };
 
   return (
@@ -327,72 +357,281 @@ function RdpEndpointCard({ endpoint, backend }: { endpoint: GatewayEndpoint; bac
   );
 }
 
-function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?: boolean }) {
-  const [selectedUser, setSelectedUser] = useState<string>(
-    item.kind === "ssh" ? item.server.allowedSshUsers[0] || "" : ""
+function CustomConnectionCard({ endpoint }: { endpoint: GatewayEndpoint }) {
+  const [, setLocation] = useLocation();
+  const [open, setOpen] = useState(false);
+  const [protocol, setProtocol] = useState<"rdp" | "ssh" | "web">("rdp");
+  const [host, setHost] = useState("");
+  const [port, setPort] = useState("3389");
+  const [sshUser, setSshUser] = useState("");
+  const [noAuth, setNoAuth] = useState(false);
+  const [eddsa, setEddsa] = useState(false);
+  const [stripAuth, setStripAuth] = useState(false);
+
+  const defaultPort = protocol === "rdp" ? "3389" : protocol === "ssh" ? "22" : "443";
+
+  const handleConnect = () => {
+    if (!host.trim()) return;
+    const url = endpoint.directUrl || endpoint.signalServerUrl.replace(/\/$/, "");
+    const token = localStorage.getItem("access_token") || "";
+    const target = `${host.trim()}:${port || defaultPort}`;
+    const flags = [
+      noAuth ? "noauth" : "",
+      eddsa ? "eddsa" : "",
+      stripAuth ? "stripauth" : "",
+    ].filter(Boolean).join(";");
+
+    if (protocol === "ssh") {
+      const user = sshUser.trim() || "root";
+      const backendName = `ssh://${target}`;
+      setLocation(`/app/console?gatewayUrl=${encodeURIComponent(url)}&backend=${encodeURIComponent(backendName)}&gateway=${encodeURIComponent(endpoint.id)}&user=${encodeURIComponent(user)}`);
+      setOpen(false);
+      return;
+    }
+
+    const params = new URLSearchParams({
+      gateway: endpoint.id,
+      backend: "__custom__",
+      customTarget: target,
+      customProtocol: protocol,
+    });
+    if (flags) params.set("customFlags", flags);
+    if (token) params.set("token", token);
+
+    if (protocol === "rdp") {
+      const rdpParams = new URLSearchParams({
+        signalUrl: url,
+        gateway: endpoint.id,
+        backend: "__custom__",
+        host: target,
+      });
+      if (flags) rdpParams.set("customFlags", flags);
+      window.open(`/gateway/rdp.html?${rdpParams.toString()}`, "_blank");
+    } else {
+      window.open(`${url}/api/select?${params.toString()}`, "_blank");
+    }
+    setOpen(false);
+  };
+
+  return (
+    <>
+      <Card className="group cyber-card hover-neon-glow border-dashed">
+        <CardHeader className="pb-3">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted/50 border border-dashed border-muted-foreground/30 group-hover:border-muted-foreground/50 transition-colors">
+                <Network className="h-5 w-5 text-muted-foreground" />
+              </div>
+              <div>
+                <CardTitle className="text-base">{endpoint.displayName || endpoint.id}</CardTitle>
+                <CardDescription className="text-xs">
+                  Custom Connection &middot; Connect to any IP
+                </CardDescription>
+              </div>
+            </div>
+            {endpoint.online && (
+              <Badge variant="outline" className="gap-1.5 label-success">
+                <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
+                Online
+              </Badge>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Button
+            className="w-full gap-2"
+            variant="outline"
+            disabled={!endpoint.online}
+            onClick={() => setOpen(true)}
+          >
+            <Network className="h-4 w-4" />
+            Connect to IP
+            <ArrowRight className="h-4 w-4" />
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Custom Connection</DialogTitle>
+            <DialogDescription>
+              Connect to a device on {endpoint.displayName}'s network
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Protocol</Label>
+              <Select value={protocol} onValueChange={(v) => {
+                const p = v as "rdp" | "ssh" | "web";
+                setProtocol(p);
+                setPort(p === "rdp" ? "3389" : p === "ssh" ? "22" : "443");
+              }}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ssh">
+                    <div className="flex items-center gap-2">
+                      <Terminal className="h-3.5 w-3.5" /> SSH
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="rdp">
+                    <div className="flex items-center gap-2">
+                      <Monitor className="h-3.5 w-3.5" /> Remote Desktop (RDP)
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="web">
+                    <div className="flex items-center gap-2">
+                      <Globe className="h-3.5 w-3.5" /> Web / HTTP
+                    </div>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="col-span-2 space-y-2">
+                <Label>Host / IP Address</Label>
+                <Input
+                  value={host}
+                  onChange={(e) => setHost(e.target.value)}
+                  placeholder="192.168.0.5"
+                  autoFocus
+                  onKeyDown={(e) => e.key === "Enter" && handleConnect()}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Port</Label>
+                <Input
+                  value={port}
+                  onChange={(e) => setPort(e.target.value)}
+                  placeholder={protocol === "rdp" ? "3389" : "443"}
+                />
+              </div>
+            </div>
+          </div>
+
+          {(protocol === "ssh" || (protocol === "rdp" && eddsa)) && (
+            <div className="space-y-2">
+              <Label>{protocol === "ssh" ? "SSH Username" : "RDP Username"}</Label>
+              <Input
+                value={sshUser}
+                onChange={(e) => setSshUser(e.target.value)}
+                placeholder={protocol === "ssh" ? "root" : "Administrator"}
+                onKeyDown={(e) => e.key === "Enter" && handleConnect()}
+              />
+            </div>
+          )}
+
+          {(protocol === "rdp" || protocol === "web") && (
+            <div className="space-y-2">
+              <Label className="text-xs text-muted-foreground">Connection Options</Label>
+              <div className="flex flex-wrap gap-4">
+                {protocol === "rdp" && (
+                  <label className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="checkbox" checked={eddsa} onChange={(e) => setEddsa(e.target.checked)} className="rounded" />
+                    Passwordless (EdDSA)
+                  </label>
+                )}
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input type="checkbox" checked={noAuth} onChange={(e) => setNoAuth(e.target.checked)} className="rounded" />
+                  No Auth
+                </label>
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input type="checkbox" checked={stripAuth} onChange={(e) => setStripAuth(e.target.checked)} className="rounded" />
+                  Strip Auth
+                </label>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button onClick={handleConnect} disabled={!host.trim() || (protocol === "ssh" && !sshUser.trim())}>
+              {protocol === "rdp" ? (
+                <><Monitor className="h-4 w-4 mr-2" /> Connect RDP</>
+              ) : protocol === "ssh" ? (
+                <><Terminal className="h-4 w-4 mr-2" /> SSH as {sshUser || "..."}</>
+              ) : (
+                <><Globe className="h-4 w-4 mr-2" /> Connect</>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
+}
+
+function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?: boolean }) {
+  const [selectedUser, setSelectedUser] = useState<string>("");
 
   if (item.kind === "ssh") {
-    const { server } = item;
-    const hasAnySshUser = server.allowedSshUsers.length > 0;
-    const isDisabled = !server.enabled || server.status === "offline" || !selectedUser || sshBlocked;
+    const { endpoint, backend } = item;
+    const accessible = backend.accessible !== false;
+    const isDisabled = !accessible || !endpoint.online;
+
+    const handleSshConnect = () => {
+      // Route through gateway's direct URL or signal server
+      const baseUrl = endpoint.directUrl || endpoint.signalServerUrl.replace(/\/$/, "");
+      const token = localStorage.getItem("access_token") || "";
+      const params = new URLSearchParams({
+        gateway: endpoint.id,
+        backend: backend.name,
+        token,
+      });
+      // Open SSH terminal pointing to the gateway's /ws/ssh endpoint
+      window.location.href = `/app/console?gatewayUrl=${encodeURIComponent(baseUrl)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(endpoint.id)}`;
+    };
 
     return (
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3 px-4 hover-elevate rounded-md group">
         <div className="flex items-center gap-3 min-w-0">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(--neon-cyan)/0.15)] border border-[hsl(var(--neon-cyan)/0.3)]">
-            <Server className="h-5 w-5 text-[hsl(var(--neon-cyan))]" />
+            <Terminal className="h-5 w-5 text-[hsl(var(--neon-cyan))]" />
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-medium truncate">{server.name}</p>
-            <p className="text-xs text-muted-foreground font-mono truncate">
-              {server.host}:{server.port}
+            <p className="text-sm font-medium truncate">{backend.name}</p>
+            <p className="text-xs text-muted-foreground truncate">
+              {endpoint.displayName} &middot; SSH
             </p>
           </div>
         </div>
         <div className="flex items-center gap-3 pl-13 sm:pl-0">
-          {server.status === "online" ? (
+          {endpoint.online ? (
             <Badge variant="outline" className="gap-1.5 label-success shrink-0">
               <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-green))] animate-pulse" />
               Online
             </Badge>
-          ) : server.status === "offline" ? (
+          ) : (
             <Badge variant="outline" className="gap-1.5 label-danger shrink-0">
               <span className="h-2 w-2 rounded-full bg-[hsl(var(--neon-red))]" />
               Offline
             </Badge>
-          ) : (
-            <Badge variant="outline" className="gap-1.5 shrink-0">
-              <HelpCircle className="h-3 w-3" />
-              Unknown
-            </Badge>
           )}
-          {hasAnySshUser && (
-            <Select value={selectedUser} onValueChange={setSelectedUser}>
-              <SelectTrigger className="w-[120px] h-9">
-                <SelectValue placeholder="User" />
-              </SelectTrigger>
-              <SelectContent>
-                {server.allowedSshUsers.map((user) => (
-                  <SelectItem key={user} value={user}>{user}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
-          {isDisabled ? (
-            <Button size="sm" disabled className="gap-1.5 min-h-[36px]">
-              <Terminal className="h-4 w-4" />
-              {sshBlocked ? "Disabled" : "Connect"}
-            </Button>
-          ) : (
-            <Link href={`/app/console?serverId=${encodeURIComponent(server.id)}&user=${encodeURIComponent(selectedUser)}`}>
-              <Button size="sm" className="gap-1.5 btn-primary-glow min-h-[36px]">
-                <Terminal className="h-4 w-4" />
-                Connect
-              </Button>
-            </Link>
-          )}
+          <Button size="sm" disabled={isDisabled} onClick={handleSshConnect} className={isDisabled ? "gap-1.5 min-h-[36px]" : "gap-1.5 btn-primary-glow min-h-[36px]"}>
+            <Terminal className="h-4 w-4" />
+            Connect
+          </Button>
         </div>
+      </div>
+    );
+  }
+
+  // Custom connection — render inline with just gateway name
+  if (item.kind === "custom") {
+    return (
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3 px-4 hover-elevate rounded-md group">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted/50 border border-dashed border-muted-foreground/30">
+            <Network className="h-5 w-5 text-muted-foreground" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-medium truncate">{item.endpoint.displayName || item.endpoint.id}</p>
+            <p className="text-xs text-muted-foreground truncate">Custom Connection &middot; Connect to any IP</p>
+          </div>
+        </div>
+        <CustomConnectionCard endpoint={item.endpoint} />
       </div>
     );
   }
@@ -403,14 +642,18 @@ function ServiceListItem({ item, sshBlocked }: { item: ServiceItem; sshBlocked?:
   const accessible = backend.accessible !== false;
   const isDisabled = !accessible || !endpoint.online;
   const handleConnect = () => {
-    const url = endpoint.signalServerUrl.replace(/\/$/, "");
-    const token = localStorage.getItem("access_token") || "";
-    const params = new URLSearchParams({ gateway: endpoint.id, backend: backend.name });
-    if (token) params.set("token", token);
+    const signalUrl = endpoint.signalServerUrl.replace(/\/$/, "");
     if (isRdp) {
-      params.set("redirect", `/rdp?backend=${encodeURIComponent(backend.name)}`);
+      const rdpParams = new URLSearchParams({
+        signalUrl,
+        gateway: endpoint.id,
+        backend: backend.name,
+      });
+      window.open(`/gateway/rdp.html?${rdpParams.toString()}`, "_blank");
+    } else {
+      const params = new URLSearchParams({ gateway: endpoint.id, backend: backend.name });
+      window.open(`${signalUrl}/api/select?${params.toString()}`, "_blank");
     }
-    window.open(`${url}/api/select?${params.toString()}`, "_blank");
   };
 
   const Icon = isRdp ? Monitor : Globe;
@@ -513,8 +756,271 @@ function SessionItem({ session, onTerminate }: { session: ActiveSession; onTermi
   );
 }
 
+// ── Local Gateways (offline/LAN mode) ─────────────────────────────
+
+const LOCAL_GW_STORAGE_KEY = "keylessh.localGateways.v1";
+
+interface LocalGateway {
+  id: string;
+  name: string;
+  url: string;  // e.g. https://192.168.0.10:7891
+  online?: boolean;
+  backends?: { name: string; protocol?: string; sshUsernames?: string[]; rdpUsernames?: string[] }[];
+  lastChecked?: number;
+}
+
+function loadLocalGateways(): LocalGateway[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_GW_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveLocalGateways(gateways: LocalGateway[]) {
+  localStorage.setItem(LOCAL_GW_STORAGE_KEY, JSON.stringify(gateways));
+}
+
+async function probeGateway(url: string): Promise<{ online: boolean; backends: LocalGateway["backends"]; id?: string; name?: string }> {
+  try {
+    const base = url.replace(/\/$/, "");
+    const resp = await fetch(`${base}/api/info`, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return { online: false, backends: [] };
+    const info = await resp.json();
+    const backends = info.backends || [];
+    return { online: true, backends, id: info.gatewayId, name: info.displayName };
+  } catch {
+    return { online: false, backends: [] };
+  }
+}
+
+function GatewaysTab() {
+  const [, setLocation] = useLocation();
+  const [gateways, setGateways] = useState<LocalGateway[]>(loadLocalGateways);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addUrl, setAddUrl] = useState("");
+  const [addName, setAddName] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [probing, setProbing] = useState<string | null>(null);
+
+  // Persist on change
+  useEffect(() => { saveLocalGateways(gateways); }, [gateways]);
+
+  // Probe all gateways on mount
+  useEffect(() => {
+    gateways.forEach((gw) => {
+      probeGateway(gw.url).then((result) => {
+        setGateways((prev) => prev.map((g) =>
+          g.id === gw.id ? { ...g, online: result.online, backends: result.backends, lastChecked: Date.now() } : g
+        ));
+      });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleAdd = async () => {
+    if (!addUrl.trim()) return;
+    setAdding(true);
+    const result = await probeGateway(addUrl.trim());
+    const id = result.id || `local-${Date.now()}`;
+    const name = addName.trim() || result.name || new URL(addUrl.trim()).hostname;
+    setGateways((prev) => [...prev, {
+      id,
+      name,
+      url: addUrl.trim().replace(/\/$/, ""),
+      online: result.online,
+      backends: result.backends,
+      lastChecked: Date.now(),
+    }]);
+    setAddUrl("");
+    setAddName("");
+    setAdding(false);
+    setAddOpen(false);
+  };
+
+  const handleRemove = (id: string) => {
+    setGateways((prev) => prev.filter((g) => g.id !== id));
+  };
+
+  const handleProbe = async (id: string) => {
+    const gw = gateways.find((g) => g.id === id);
+    if (!gw) return;
+    setProbing(id);
+    const result = await probeGateway(gw.url);
+    setGateways((prev) => prev.map((g) =>
+      g.id === id ? { ...g, online: result.online, backends: result.backends, lastChecked: Date.now() } : g
+    ));
+    setProbing(null);
+  };
+
+  const handleConnect = (gw: LocalGateway, backend: { name: string; protocol?: string; sshUsernames?: string[] }, sshUser?: string) => {
+    if (backend.protocol === "ssh" && sshUser) {
+      setLocation(`/app/console?gatewayUrl=${encodeURIComponent(gw.url)}&backend=${encodeURIComponent(backend.name)}&gateway=${encodeURIComponent(gw.id)}&user=${encodeURIComponent(sshUser)}`);
+    } else if (backend.protocol === "rdp") {
+      window.open(`${gw.url}/rdp/${encodeURIComponent(backend.name)}`, "_blank");
+    } else {
+      const params = new URLSearchParams({ gateway: gw.id, backend: backend.name });
+      window.open(`${gw.url}/api/select?${params.toString()}`, "_blank");
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-base sm:text-lg font-medium flex items-center gap-2 text-foreground">
+          <Router className="h-5 w-5 text-[hsl(var(--neon-purple))]" />
+          Local Gateways
+        </h2>
+        <Button size="sm" onClick={() => setAddOpen(true)} className="gap-1.5">
+          <Plus className="h-4 w-4" />
+          Add Gateway
+        </Button>
+      </div>
+
+      <p className="text-sm text-muted-foreground">
+        Connect to gateways on your local network or offline gateways that aren't registered with a signal server.
+      </p>
+
+      {gateways.length === 0 && (
+        <Card>
+          <CardContent className="py-8 text-center text-muted-foreground">
+            <Router className="h-10 w-10 mx-auto mb-3 opacity-30" />
+            <p className="text-sm">No local gateways added yet.</p>
+            <p className="text-xs mt-1">Add a gateway URL to connect directly without a signal server.</p>
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {gateways.map((gw) => (
+          <Card key={gw.id} className="cyber-card">
+            <CardHeader className="pb-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border ${gw.online ? "bg-[hsl(var(--neon-green)/0.15)] border-[hsl(var(--neon-green)/0.3)]" : "bg-muted border-border"}`}>
+                    {gw.online ? <Wifi className="h-5 w-5 text-[hsl(var(--neon-green))]" /> : <WifiOff className="h-5 w-5 text-muted-foreground" />}
+                  </div>
+                  <div className="min-w-0">
+                    <CardTitle className="text-base truncate">{gw.name}</CardTitle>
+                    <CardDescription className="font-mono text-xs truncate">{gw.url}</CardDescription>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleProbe(gw.id)} disabled={probing === gw.id} title="Refresh">
+                    <RefreshCw className={`h-4 w-4 ${probing === gw.id ? "animate-spin" : ""}`} />
+                  </Button>
+                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => handleRemove(gw.id)} title="Remove">
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {!gw.online && (
+                <Badge variant="secondary" className="text-xs">Offline</Badge>
+              )}
+              {gw.online && gw.backends && gw.backends.length > 0 && (
+                <div className="space-y-2">
+                  {gw.backends.map((backend) => (
+                    <LocalBackendItem key={backend.name} gw={gw} backend={backend} onConnect={handleConnect} />
+                  ))}
+                </div>
+              )}
+              {gw.online && (!gw.backends || gw.backends.length === 0) && (
+                <p className="text-xs text-muted-foreground">No backends configured on this gateway.</p>
+              )}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      {/* Add Gateway Dialog */}
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add Local Gateway</DialogTitle>
+            <DialogDescription>
+              Enter the URL of a gateway on your local network.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="gw-url">Gateway URL</Label>
+              <Input
+                id="gw-url"
+                placeholder="https://192.168.0.10:7891"
+                value={addUrl}
+                onChange={(e) => setAddUrl(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="gw-name">Display Name (optional)</Label>
+              <Input
+                id="gw-name"
+                placeholder="Office Gateway"
+                value={addName}
+                onChange={(e) => setAddName(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAddOpen(false)}>Cancel</Button>
+            <Button onClick={handleAdd} disabled={adding || !addUrl.trim()}>
+              {adding ? "Connecting..." : "Add Gateway"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function LocalBackendItem({ gw, backend, onConnect }: {
+  gw: LocalGateway;
+  backend: NonNullable<LocalGateway["backends"]>[number];
+  onConnect: (gw: LocalGateway, backend: any, sshUser?: string) => void;
+}) {
+  const isSsh = backend.protocol === "ssh";
+  const sshUsernames = backend.sshUsernames || [];
+  const [selectedUser, setSelectedUser] = useState(sshUsernames[0] || "");
+
+  return (
+    <div className="flex items-center gap-2 p-2 rounded-md bg-muted/50">
+      {isSsh ? <Terminal className="h-4 w-4 text-[hsl(var(--neon-cyan))] shrink-0" /> : <Globe className="h-4 w-4 text-[hsl(var(--neon-purple))] shrink-0" />}
+      <span className="text-sm flex-1 truncate">{backend.name}</span>
+      <Badge variant="outline" className="text-xs">{backend.protocol || "http"}</Badge>
+      {isSsh && sshUsernames.length > 0 && (
+        <Select value={selectedUser} onValueChange={setSelectedUser}>
+          <SelectTrigger className="w-[100px] h-7 text-xs">
+            <SelectValue placeholder="User" />
+          </SelectTrigger>
+          <SelectContent>
+            {sshUsernames.map((u) => (
+              <SelectItem key={u} value={u}>{u}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
+      <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => onConnect(gw, backend, selectedUser)} disabled={isSsh && !selectedUser}>
+        Connect
+      </Button>
+    </div>
+  );
+}
+
 export default function Dashboard() {
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
+  const isAdmin = hasRole("admin");
+  const canAccessGateways = isAdmin || (() => {
+    try {
+      const token = localStorage.getItem("access_token");
+      if (!token) return false;
+      const payload = JSON.parse(atob(token.split(".")[1]));
+      const clientId = payload.azp;
+      const clientRoles = payload.resource_access?.[clientId]?.roles || [];
+      return clientRoles.includes("allowConfigDownload");
+    } catch { return false; }
+  })();
 
   const { data: servers, isLoading: serversLoading, refetch: refetchServers } = useQuery<ServerWithAccess[]>({
     queryKey: ["/api/servers"],
@@ -574,30 +1080,34 @@ export default function Dashboard() {
 
   const allServices: ServiceItem[] = useMemo(() => {
     const items: ServiceItem[] = [];
-    for (const server of servers ?? []) {
-      items.push({ kind: "ssh", server });
-    }
     for (const endpoint of gatewayEndpoints ?? []) {
       const backends = endpoint.backends?.length > 0 ? endpoint.backends : [{ name: "Default", accessible: true }];
       for (const backend of backends) {
-        const kind = backend.protocol === "rdp" ? "rdp" : "web";
-        items.push(kind === "rdp"
-          ? { kind: "rdp", endpoint, backend }
-          : { kind: "web", endpoint, backend });
+        if (backend.protocol === "ssh") {
+          items.push({ kind: "ssh", endpoint, backend });
+        } else {
+          const kind = backend.protocol === "rdp" ? "rdp" : "web";
+          items.push(kind === "rdp"
+            ? { kind: "rdp", endpoint, backend }
+            : { kind: "web", endpoint, backend });
+        }
+      }
+      // Add a "Custom Connection" card for each online gateway
+      if (endpoint.online) {
+        items.push({ kind: "custom", endpoint });
       }
     }
-    // Sort: accessible/connectable items first
+    // Sort: accessible/connectable items first, custom cards last
     items.sort((a, b) => {
-      const aOk = a.kind === "ssh"
-        ? (a.server.allowedSshUsers.length > 0 && a.server.status === "online") ? 0 : 1
-        : (a.backend.accessible !== false ? 0 : 1);
-      const bOk = b.kind === "ssh"
-        ? (b.server.allowedSshUsers.length > 0 && b.server.status === "online") ? 0 : 1
-        : (b.backend.accessible !== false ? 0 : 1);
-      return aOk - bOk;
+      const rank = (item: ServiceItem) => {
+        if (item.kind === "custom") return 2; // custom cards at end
+        if (item.kind === "ssh") return (item.backend.accessible !== false && item.endpoint.online) ? 0 : 1;
+        return item.backend.accessible !== false ? 0 : 1;
+      };
+      return rank(a) - rank(b);
     });
     return items;
-  }, [servers, gatewayEndpoints]);
+  }, [gatewayEndpoints]);
 
   const sshCount = useMemo(() => allServices.filter((i) => i.kind === "ssh").length, [allServices]);
   const webCount = useMemo(() => allServices.filter((i) => i.kind === "web").length, [allServices]);
@@ -606,17 +1116,19 @@ export default function Dashboard() {
   const filteredServices = useMemo(() => {
     let list = allServices;
     if (typeFilter !== "all") {
-      list = list.filter((item) => item.kind === typeFilter);
+      list = list.filter((item) => item.kind === typeFilter || item.kind === "custom");
     }
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter((item) => {
         if (item.kind === "ssh") {
-          const s = item.server;
-          return s.name.toLowerCase().includes(q)
-            || s.host.toLowerCase().includes(q)
-            || s.environment.toLowerCase().includes(q)
-            || s.tags?.some((t) => t.toLowerCase().includes(q));
+          return item.backend.name.toLowerCase().includes(q)
+            || item.endpoint.displayName.toLowerCase().includes(q);
+        }
+        if (item.kind === "custom") {
+          return "custom".includes(q)
+            || item.endpoint.displayName.toLowerCase().includes(q)
+            || item.endpoint.signalServerName.toLowerCase().includes(q);
         }
         const { endpoint, backend } = item;
         return endpoint.displayName.toLowerCase().includes(q)
@@ -659,6 +1171,9 @@ export default function Dashboard() {
         </Alert>
       )}
 
+      {/* VPN Control Panel */}
+      <VpnPanel />
+
       {activeSessions.length > 0 && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
@@ -678,6 +1193,22 @@ export default function Dashboard() {
         </div>
       )}
 
+      <Tabs defaultValue="services" className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="services" className="gap-1.5">
+            <Server className="h-4 w-4" />
+            Services
+            {allServices.length > 0 && <Badge variant="secondary" className="ml-1 text-xs">{allServices.length}</Badge>}
+          </TabsTrigger>
+          {canAccessGateways && (
+            <TabsTrigger value="gateways" className="gap-1.5">
+              <Router className="h-4 w-4" />
+              Gateways
+            </TabsTrigger>
+          )}
+        </TabsList>
+
+        <TabsContent value="services">
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-base sm:text-lg font-medium flex items-center gap-2 text-foreground">
@@ -781,9 +1312,11 @@ export default function Dashboard() {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {filteredServices.map((item) =>
                 item.kind === "ssh" ? (
-                  <ServerCard key={item.server.id} server={item.server} sshBlocked={isSshBlocked} />
+                  <GatewayEndpointCard key={`ssh-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
                 ) : item.kind === "rdp" ? (
                   <RdpEndpointCard key={`${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
+                ) : item.kind === "custom" ? (
+                  <CustomConnectionCard key={`custom-${item.endpoint.id}`} endpoint={item.endpoint} />
                 ) : (
                   <GatewayEndpointCard key={`${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
                 )
@@ -793,7 +1326,7 @@ export default function Dashboard() {
             <Card>
               <CardContent className="p-0 divide-y divide-border">
                 {filteredServices.map((item) => (
-                  <ServiceListItem key={item.kind === "ssh" ? item.server.id : `${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} item={item} sshBlocked={isSshBlocked} />
+                  <ServiceListItem key={item.kind === "ssh" ? `ssh-${item.endpoint.id}-${item.backend.name}` : item.kind === "custom" ? `custom-${item.endpoint.id}` : `${item.endpoint.signalServerId}-${item.endpoint.id}-${item.backend.name}`} item={item} sshBlocked={isSshBlocked} />
                 ))}
               </CardContent>
             </Card>
@@ -820,6 +1353,14 @@ export default function Dashboard() {
           </Card>
         )}
       </div>
+        </TabsContent>
+
+        {canAccessGateways && (
+          <TabsContent value="gateways">
+            <GatewaysTab />
+          </TabsContent>
+        )}
+      </Tabs>
 
       {recentSessions.length > 0 && (
         <div className="space-y-4">
