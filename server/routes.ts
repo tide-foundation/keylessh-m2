@@ -1,6 +1,6 @@
-import type { Express } from "express";
+import express, { type Express } from "express";
 import type { Server } from "http";
-import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, signalServerStorage, type ApprovalType } from "./storage";
+import { storage, approvalStorage, policyStorage, pendingPolicyStorage, templateStorage, subscriptionStorage, recordingStorage, fileOperationStorage, bridgeStorage, signalServerStorage, gatewayConfigStorage, type ApprovalType } from "./storage";
 import { subscriptionTiers, type SubscriptionTier } from "@shared/schema";
 import * as stripeLib from "./lib/stripe";
 import { log, logForseti, logError } from "./logger";
@@ -114,6 +114,7 @@ async function checkServersHealth(servers: ServerType[]): Promise<Map<string, Se
 import {
   authenticate,
   requireAdmin,
+  requireAdminOrConfigDownload,
   requirePolicyCreator,
   tidecloakAdmin,
   type AuthenticatedRequest,
@@ -180,7 +181,6 @@ export async function registerRoutes(
       ? path.resolve(_currentDir, "public", "tide_dpop_auth.html")
       : path.resolve(_currentDir, "..", "client", "public", "tide_dpop_auth.html");
     res.sendFile(filePath);
-   
   });
     
   // Health Check (unauthenticated, for load balancers and monitoring)
@@ -855,6 +855,285 @@ export async function registerRoutes(
     }
   });
 
+  // ── Bridge session tracking endpoints ──────────────────────────────
+  // Called by punchd-bridge for RDP/endpoint/VPN session lifecycle.
+
+  // POST /api/bridge/create-session - Create a session from the bridge
+  app.post("/api/bridge/create-session", async (req, res) => {
+    try {
+      const { token, sessionType, backendName, gatewayId } = req.body;
+      if (!token || !sessionType) {
+        res.status(400).json({ error: "Missing token or sessionType" });
+        return;
+      }
+
+      const payload = await verifyTideCloakToken(token, []);
+      if (!payload) {
+        res.status(401).json({ error: "Invalid token" });
+        return;
+      }
+
+      const session = await storage.createSession({
+        userId: payload.sub || "unknown",
+        userUsername: payload.preferred_username || payload.name || "",
+        userEmail: payload.email || "",
+        serverId: backendName || gatewayId || "bridge",
+        sshUser: backendName || sessionType, // reuse sshUser for connection identifier
+        sessionType,
+        gatewayId: gatewayId || "",
+        backendName: backendName || "",
+      });
+
+      log(`[Bridge] ${sessionType} session created: ${session.id} for ${payload.sub} -> ${backendName || gatewayId}`);
+      res.json({ sessionId: session.id });
+    } catch (error) {
+      log(`Bridge create-session error: ${error}`);
+      res.status(500).json({ error: "Failed to create session" });
+    }
+  });
+
+  // POST /api/bridge/end-session - End a session from the bridge
+  app.post("/api/bridge/end-session", async (req, res) => {
+    try {
+      const { token, sessionId } = req.body;
+      if (!token || !sessionId) {
+        res.status(400).json({ error: "Missing token or sessionId" });
+        return;
+      }
+
+      const payload = await verifyTideCloakToken(token, []);
+      if (!payload) {
+        res.status(401).json({ error: "Invalid token" });
+        return;
+      }
+
+      await storage.endSession(sessionId);
+      log(`[Bridge] Session ended: ${sessionId}`);
+      res.json({ success: true });
+    } catch (error) {
+      log(`Bridge end-session error: ${error}`);
+      res.status(500).json({ error: "Failed to end session" });
+    }
+  });
+
+  // ── RDP recording endpoints ─────────────────────────────────────
+  // Called by browser (Authorization header, cross-origin) or bridge (token in body).
+
+  // CORS preflight for recording endpoints
+  app.options("/api/bridge/:path", (_req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.status(204).end();
+  });
+
+  // CORS helper for recording responses
+  function setCorsHeaders(res: any) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  }
+
+  // POST /api/bridge/start-rdp-recording
+  app.post("/api/bridge/start-rdp-recording", async (req, res) => {
+    setCorsHeaders(res);
+    try {
+      const { token: bodyToken, sessionId, serverId, backendName, gatewayId, userEmail, timestamp } = req.body;
+      const authHeader = req.headers.authorization;
+      const token = (authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null) || bodyToken;
+      if (!token || !sessionId || !backendName) {
+        res.status(400).json({ error: "Missing required fields" });
+        return;
+      }
+
+      // Verify the JWT token
+      const payload = await verifyTideCloakToken(token, []);
+      if (!payload) {
+        res.status(401).json({ error: "Invalid token" });
+        return;
+      }
+
+      // Also create a session if one doesn't exist
+      let actualSessionId = sessionId;
+      const existingSession = await storage.getSession(sessionId);
+      if (!existingSession) {
+        const newSession = await storage.createSession({
+          userId: payload.sub || "unknown",
+          userUsername: payload.preferred_username || payload.name || "",
+          userEmail: userEmail || payload.email || "",
+          serverId: serverId || backendName,
+          sshUser: backendName,
+          sessionType: "rdp",
+          gatewayId: gatewayId || "",
+          backendName,
+        });
+        actualSessionId = newSession.id;
+      }
+
+      const recording = await recordingStorage.createRecording({
+        sessionId: actualSessionId,
+        serverId: serverId || backendName,
+        serverName: backendName,
+        userId: payload.sub || "unknown",
+        userEmail: userEmail || payload.email || "",
+        sshUser: backendName,
+        terminalWidth: 0,
+        terminalHeight: 0,
+        recordingType: "rdp",
+        backendName,
+        gatewayId: gatewayId || "",
+      });
+
+      // Write JSON header
+      const ts = timestamp || Math.floor(Date.now() / 1000);
+      const header = JSON.stringify({
+        version: 1,
+        format: "rdp-pdu",
+        timestamp: ts,
+        backend: backendName,
+        gateway: gatewayId,
+        user: payload.sub,
+      }) + "\n";
+      await recordingStorage.appendData(recording.id, header);
+
+      log(`Started RDP recording ${recording.id} for ${payload.sub} -> ${backendName}`);
+      res.json({ recordingId: recording.id });
+    } catch (error) {
+      log(`Start RDP recording error: ${error}`);
+      res.status(500).json({ error: "Failed to start recording" });
+    }
+  });
+
+  // POST /api/bridge/rdp-record - Append RDP PDU events
+  app.post("/api/bridge/rdp-record", async (req, res) => {
+    setCorsHeaders(res);
+    try {
+      const { token: bodyToken, sessionId, recordingId, events } = req.body;
+      const authHeader = req.headers.authorization;
+      const token = (authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null) || bodyToken;
+      if (!token || !recordingId || !events) {
+        res.status(400).json({ error: "Missing required fields" });
+        return;
+      }
+
+      // Verify token
+      const payload = await verifyTideCloakToken(token, []);
+      if (!payload) {
+        res.status(401).json({ error: "Invalid token" });
+        return;
+      }
+
+      // Format events as JSON lines: [time, direction, base64data]
+      let eventData = "";
+      for (const event of events) {
+        eventData += JSON.stringify(event) + "\n";
+      }
+
+      await recordingStorage.appendData(recordingId, eventData);
+      res.json({ success: true });
+    } catch (error) {
+      log(`RDP record error: ${error}`);
+      res.status(500).json({ error: "Failed to record" });
+    }
+  });
+
+  // POST /api/bridge/end-rdp-recording - Finalize RDP recording
+  app.post("/api/bridge/end-rdp-recording", async (req, res) => {
+    setCorsHeaders(res);
+    try {
+      const { token: bodyToken, sessionId, recordingId } = req.body;
+      const authHeader = req.headers.authorization;
+      const token = (authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null) || bodyToken;
+      if (!token || !recordingId) {
+        res.status(400).json({ error: "Missing required fields" });
+        return;
+      }
+
+      const payload = await verifyTideCloakToken(token, []);
+      if (!payload) {
+        res.status(401).json({ error: "Invalid token" });
+        return;
+      }
+
+      await recordingStorage.finalizeRecording(recordingId);
+      log(`Finalized RDP recording ${recordingId}`);
+      res.json({ success: true });
+    } catch (error) {
+      log(`End RDP recording error: ${error}`);
+      res.status(500).json({ error: "Failed to end recording" });
+    }
+  });
+
+  // POST /api/bridge/rdp-video-chunk - Upload a WebM video chunk for RDP recording
+  app.post("/api/bridge/rdp-video-chunk",
+    express.raw({ type: "application/octet-stream", limit: "10mb" }),
+    async (req, res) => {
+      setCorsHeaders(res);
+      try {
+        const authHeader = req.headers.authorization;
+        const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : null;
+        const recordingId = req.headers["x-recording-id"] as string;
+        if (!token || !recordingId) {
+          res.status(400).json({ error: "Missing token or recording ID" });
+          return;
+        }
+
+        const payload = await verifyTideCloakToken(token, []);
+        if (!payload) {
+          res.status(401).json({ error: "Invalid token" });
+          return;
+        }
+
+        const chunk = req.body as Buffer;
+        if (!chunk || chunk.length === 0) {
+          res.status(400).json({ error: "Empty body" });
+          return;
+        }
+
+        await recordingStorage.appendVideoData(recordingId, chunk);
+        res.json({ success: true, bytes: chunk.length });
+      } catch (error) {
+        log(`RDP video chunk error: ${error}`);
+        res.status(500).json({ error: "Failed to store video chunk" });
+      }
+    }
+  );
+
+  // GET /api/admin/recordings/:id/video - Stream the recorded WebM video
+  app.get(
+    "/api/admin/recordings/:id/video",
+    async (req, res) => {
+      try {
+        // Allow token via query param (for video src attribute)
+        const token = req.query.token as string
+          || req.headers.authorization?.replace("Bearer ", "");
+        if (!token) {
+          res.status(401).json({ error: "Missing token" });
+          return;
+        }
+        const payload = await verifyTideCloakToken(token, []);
+        if (!payload) {
+          res.status(401).json({ error: "Invalid token" });
+          return;
+        }
+
+        const videoData = await recordingStorage.getVideoData(req.params.id);
+        if (!videoData) {
+          res.status(404).json({ error: "No video data" });
+          return;
+        }
+
+        res.writeHead(200, {
+          "Content-Type": "video/webm",
+          "Content-Length": videoData.length.toString(),
+        });
+        res.end(videoData);
+      } catch (error) {
+        log(`RDP video serve error: ${error}`);
+        res.status(500).json({ error: "Failed to serve video" });
+      }
+    }
+  );
+
   // POST /api/sessions/:id/file-op - Log a file operation
   app.post("/api/sessions/:id/file-op", authenticate, async (req: AuthenticatedRequest, res) => {
     try {
@@ -1140,7 +1419,7 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const { name, url, description, enabled } = req.body;
+        const { name, url, description, enabled, apiSecret, iceServers, turnServer, turnSecret } = req.body;
         if (!name || !url) {
           return res.status(400).json({ message: "Name and URL are required" });
         }
@@ -1149,7 +1428,8 @@ export async function registerRoutes(
           url,
           description,
           enabled: enabled !== false,
-        });
+          apiSecret, iceServers, turnServer, turnSecret,
+        } as any);
         res.status(201).json(signalServer);
       } catch (error) {
         log(`Failed to create signal server: ${error}`);
@@ -1184,13 +1464,14 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const { name, url, description, enabled } = req.body;
+        const { name, url, description, enabled, apiSecret, iceServers, turnServer, turnSecret } = req.body;
         const signalServer = await signalServerStorage.updateSignalServer(req.params.id, {
           name,
           url,
           description,
           enabled,
-        });
+          apiSecret, iceServers, turnServer, turnSecret,
+        } as any);
         if (!signalServer) {
           return res.status(404).json({ message: "Signal server not found" });
         }
@@ -1220,6 +1501,149 @@ export async function registerRoutes(
       }
     }
   );
+
+  // ============================================
+  // Gateway Configs (admin-managed, downloadable as TOML)
+  // ============================================
+
+  // GET /api/admin/gateway-configs - List all gateway configs
+  app.get("/api/admin/gateway-configs", authenticate, requireAdminOrConfigDownload, async (_req: AuthenticatedRequest, res) => {
+    try {
+      const configs = await gatewayConfigStorage.list();
+      res.json(configs);
+    } catch (error) {
+      log(`Failed to list gateway configs: ${error}`);
+      res.status(500).json({ message: "Failed to list gateway configs" });
+    }
+  });
+
+  // POST /api/admin/gateway-configs - Create a new gateway config
+  app.post("/api/admin/gateway-configs", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
+    try {
+      const config = await gatewayConfigStorage.create(req.body);
+      res.status(201).json(config);
+    } catch (error) {
+      log(`Failed to create gateway config: ${error}`);
+      res.status(500).json({ message: "Failed to create gateway config" });
+    }
+  });
+
+  // GET /api/admin/gateway-configs/:id - Get a specific gateway config
+  app.get("/api/admin/gateway-configs/:id", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
+    try {
+      const config = await gatewayConfigStorage.getById(req.params.id);
+      if (!config) return res.status(404).json({ message: "Gateway config not found" });
+      res.json(config);
+    } catch (error) {
+      log(`Failed to fetch gateway config: ${error}`);
+      res.status(500).json({ message: "Failed to fetch gateway config" });
+    }
+  });
+
+  // PUT /api/admin/gateway-configs/:id - Update a gateway config
+  app.put("/api/admin/gateway-configs/:id", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
+    try {
+      const config = await gatewayConfigStorage.update(req.params.id, req.body);
+      if (!config) return res.status(404).json({ message: "Gateway config not found" });
+      res.json(config);
+    } catch (error) {
+      log(`Failed to update gateway config: ${error}`);
+      res.status(500).json({ message: "Failed to update gateway config" });
+    }
+  });
+
+  // DELETE /api/admin/gateway-configs/:id - Delete a gateway config
+  app.delete("/api/admin/gateway-configs/:id", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
+    try {
+      const deleted = await gatewayConfigStorage.delete(req.params.id);
+      if (!deleted) return res.status(404).json({ message: "Gateway config not found" });
+      res.status(204).send();
+    } catch (error) {
+      log(`Failed to delete gateway config: ${error}`);
+      res.status(500).json({ message: "Failed to delete gateway config" });
+    }
+  });
+
+  // GET /api/admin/gateway-configs/:id/download - Download gateway config as TOML
+  app.get("/api/admin/gateway-configs/:id/download", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
+    try {
+      const config = await gatewayConfigStorage.getById(req.params.id);
+      if (!config) return res.status(404).json({ message: "Gateway config not found" });
+
+      // Find the signal server that matches this gateway's stun URL
+      const signalServers = await signalServerStorage.getSignalServers();
+      const matchingSignalServer = signalServers.find((ss) => {
+        const wsUrl = ss.url.replace(/^http/, "ws");
+        return config.stunServerUrl === ss.url || config.stunServerUrl === wsUrl;
+      });
+
+      const toml = gatewayConfigStorage.toToml(config, matchingSignalServer);
+      res.setHeader("Content-Type", "application/toml");
+      res.setHeader("Content-Disposition", `attachment; filename="gateway.toml"`);
+      res.send(toml);
+    } catch (error) {
+      log(`Failed to download gateway config: ${error}`);
+      res.status(500).json({ message: "Failed to download gateway config" });
+    }
+  });
+
+  // GET /api/admin/gateway-configs/:id/tidecloak-config - Download tidecloak.json adapter config
+  app.get("/api/admin/gateway-configs/:id/tidecloak-config", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
+    try {
+      const config = await gatewayConfigStorage.getById(req.params.id);
+      if (!config) return res.status(404).json({ message: "Gateway config not found" });
+      if (!config.tidecloakConfigB64) return res.status(404).json({ message: "No TideCloak config set for this gateway" });
+
+      const json = Buffer.from(config.tidecloakConfigB64, "base64").toString("utf-8");
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Content-Disposition", `attachment; filename="tidecloak.json"`);
+      res.send(json);
+    } catch (error) {
+      log(`Failed to download tidecloak config: ${error}`);
+      res.status(500).json({ message: "Failed to download tidecloak config" });
+    }
+  });
+
+  // GET /api/admin/gateway-configs/:id/vpn-config - Download VPN client config (tidecloak.json + connection info)
+  app.get("/api/admin/gateway-configs/:id/vpn-config", authenticate, requireAdminOrConfigDownload, async (req: AuthenticatedRequest, res) => {
+    try {
+      const config = await gatewayConfigStorage.getById(req.params.id);
+      if (!config) return res.status(404).json({ message: "Gateway config not found" });
+
+      // Merge with signal server for missing values
+      const allSignalServers = await signalServerStorage.getSignalServers();
+      const ss = allSignalServers.find((s) => {
+        const wsUrl = s.url.replace(/^http/, "ws");
+        return config.stunServerUrl === s.url || config.stunServerUrl === wsUrl;
+      });
+
+      const stunServer = config.stunServerUrl || (ss?.url?.replace(/^http/, "ws")) || "";
+      const iceServers = config.iceServers || (ss as any)?.iceServers || "";
+      const turnServer = config.turnServer || (ss as any)?.turnServer || "";
+      const turnSecret = config.turnSecret || (ss as any)?.turnSecret || "";
+
+      const vpnConfig: Record<string, any> = {
+        stun_server: stunServer,
+        gateway_id: config.gatewayId,
+      };
+      if (iceServers) vpnConfig.ice_server = iceServers;
+      if (turnServer) vpnConfig.turn_server = turnServer;
+      if (turnSecret) vpnConfig.turn_secret = turnSecret;
+      if (config.tidecloakConfigB64) vpnConfig.tidecloak_config_b64 = config.tidecloakConfigB64;
+
+      const toml = Object.entries(vpnConfig)
+        .filter(([, v]) => v != null)
+        .map(([k, v]) => `${k} = "${v}"`)
+        .join("\n");
+
+      res.setHeader("Content-Type", "application/toml");
+      res.setHeader("Content-Disposition", `attachment; filename="vpn-config.toml"`);
+      res.send(`# Punchd VPN config\n# Gateway: ${config.gatewayId}${config.displayName ? ` (${config.displayName})` : ""}\n# Generated: ${new Date().toISOString()}\n\n${toml}\n`);
+    } catch (error) {
+      log(`Failed to download VPN config: ${error}`);
+      res.status(500).json({ message: "Failed to download VPN config" });
+    }
+  });
 
   // ============================================
   // Gateway Endpoints (user-facing aggregation from signal servers)
@@ -1279,6 +1703,10 @@ export async function registerRoutes(
 
         await Promise.all(fetches);
 
+        // Load gateway configs for directUrl
+        const allGwConfigs = await gatewayConfigStorage.list();
+        const gwConfigMap = new Map(allGwConfigs.map(c => [c.gatewayId, c]));
+
         // Annotate backends with access info based on dest: roles.
         // Every user (including admins) must have an explicit
         // dest:<gatewayId>:<backendName> role to access a backend.
@@ -1290,27 +1718,37 @@ export async function registerRoutes(
 
         const annotated = results.map((gw) => {
           const backends = (gw.backends.length > 0 ? gw.backends : [{ name: "Default" }]).map((b) => {
+            const backendProtocol = ("protocol" in b ? b.protocol : "http") || "http";
+            // SSH backends match ssh: roles, everything else matches dest: roles
+            const expectedPrefix = backendProtocol === "ssh" ? "ssh" : "dest";
             const matchingPerms = destPerms.filter(
-              (p) => p.gatewayId.toLowerCase() === gw.id.toLowerCase() && p.backendName.toLowerCase() === b.name.toLowerCase()
+              (p) => p.prefix === expectedPrefix && p.gatewayId.toLowerCase() === gw.id.toLowerCase() && p.backendName.toLowerCase() === b.name.toLowerCase()
             );
             const isEddsa = "auth" in b && b.auth === "eddsa";
-            // For EdDSA backends, require a 4-segment role with username
-            const accessible = isEddsa
+            const isSsh = backendProtocol === "ssh";
+            // EdDSA and SSH backends require a username in the role
+            const accessible = (isEddsa || isSsh)
               ? matchingPerms.some((p) => p.username)
               : matchingPerms.length > 0;
-            // Collect all usernames from matching 4-segment roles
-            const rdpUsernames = matchingPerms
+            // Collect all usernames from matching roles
+            const usernames = matchingPerms
               .map((p) => p.username)
               .filter((u): u is string => !!u);
             return {
               name: b.name,
-              protocol: ("protocol" in b ? b.protocol : "http") || "http",
+              protocol: backendProtocol,
               ...("auth" in b && b.auth ? { auth: b.auth } : {}),
               accessible,
-              ...(rdpUsernames.length > 0 ? { rdpUsernames } : {}),
+              ...(usernames.length > 0 && isEddsa ? { rdpUsernames: usernames } : {}),
+              ...(usernames.length > 0 && isSsh ? { sshUsernames: usernames } : {}),
             };
           });
-          return { ...gw, backends };
+          const gwConfig = gwConfigMap.get(gw.id);
+          return {
+            ...gw,
+            backends,
+            directUrl: gwConfig?.directUrl || null,
+          };
         });
 
         res.json(annotated);
@@ -3544,6 +3982,9 @@ export async function registerRoutes(
             terminalWidth: r.terminalWidth,
             terminalHeight: r.terminalHeight,
             fileSize: r.fileSize,
+            recordingType: r.recordingType || "ssh",
+            backendName: r.backendName || null,
+            gatewayId: r.gatewayId || null,
             // Don't include full data in list response
           })),
           totalCount,
@@ -3583,7 +4024,10 @@ export async function registerRoutes(
           terminalWidth: recording.terminalWidth,
           terminalHeight: recording.terminalHeight,
           fileSize: recording.fileSize,
-          data: recording.data, // Full asciicast data for playback
+          recordingType: recording.recordingType || "ssh",
+          backendName: recording.backendName || null,
+          gatewayId: recording.gatewayId || null,
+          data: recording.data, // Full asciicast/RDP PDU data for playback
         });
       } catch (error) {
         log(`Failed to get recording: ${error}`);

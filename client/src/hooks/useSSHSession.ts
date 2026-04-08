@@ -11,6 +11,10 @@ interface UseSSHSessionOptions {
   username: string;
   onData: (data: Uint8Array) => void;
   signer?: SSHSigner;
+  /** Gateway URL for routing SSH through punchd gateway */
+  gatewayUrl?: string;
+  /** Gateway ID for QUIC signaling */
+  gatewayId?: string;
 }
 
 export type FileOpEvent = {
@@ -52,6 +56,8 @@ export function useSSHSession({
   username,
   onData,
   signer,
+  gatewayUrl,
+  gatewayId,
 }: UseSSHSessionOptions): UseSSHSessionReturn {
   const [status, setStatus] = useState<SSHConnectionStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
@@ -118,6 +124,8 @@ export function useSSHSession({
         username: currentUsername,
         onData: currentOnData,
         signer: currentSigner,
+        gatewayUrl,
+        gatewayId,
         onStatusChange: (newStatus) => {
           setStatus(newStatus);
         },

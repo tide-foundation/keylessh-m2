@@ -1,0 +1,265 @@
+name: Build VPN Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number'
+        required: true
+        default: '1.0.0'
+  push:
+    tags:
+      - 'vpn-v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  VERSION: ${{ github.event.inputs.version || github.ref_name }}
+
+jobs:
+  # ── Windows MSI ────────────────────────────────────────────────
+  windows-msi:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build punchd-vpn.exe
+        working-directory: bridges/punchd-bridge-rs
+        run: cargo build --release --bin punchd-vpn
+
+      - name: Install WiX
+        run: |
+          dotnet tool install --global wix
+          wix extension add --global WixToolset.UI.wixext
+
+      - name: Build MSI
+        working-directory: bridges/punchd-bridge-rs/wix
+        run: |
+          copy ..\target\release\punchd-vpn.exe .
+          wix build punchd-vpn.wxs -arch x64 -o punchd-vpn-${{ env.VERSION }}.msi
+          del punchd-vpn.exe
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: punchd-vpn-windows-msi
+          path: bridges/punchd-bridge-rs/wix/punchd-vpn-*.msi
+
+      - name: Upload standalone EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: punchd-vpn-windows-exe
+          path: bridges/punchd-bridge-rs/target/release/punchd-vpn.exe
+
+  # ── Windows Gateway ────────────────────────────────────────────
+  windows-gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + cross-compile toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Install mingw
+        run: sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Build punchd-bridge-rs.exe
+        working-directory: bridges/punchd-bridge-rs
+        run: cargo build --release --target x86_64-pc-windows-gnu --bin punchd-bridge-rs
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: punchd-bridge-windows
+          path: bridges/punchd-bridge-rs/target/x86_64-pc-windows-gnu/release/punchd-bridge-rs.exe
+
+  # ── Linux amd64 ────────────────────────────────────────────────
+  linux-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build VPN + Gateway
+        working-directory: bridges/punchd-bridge-rs
+        run: |
+          cargo build --release --bin punchd-vpn
+          cargo build --release --bin punchd-bridge-rs
+
+      - name: Build .deb package
+        working-directory: bridges/punchd-bridge-rs
+        run: |
+          cargo install cargo-deb
+          cargo deb --no-build
+
+      - name: Package tarball
+        working-directory: bridges/punchd-bridge-rs
+        run: |
+          mkdir -p dist/punchd-vpn-linux-amd64
+          cp target/release/punchd-vpn dist/punchd-vpn-linux-amd64/
+          cp pkg/punchd-vpn.service dist/punchd-vpn-linux-amd64/
+          cp pkg/install.sh dist/punchd-vpn-linux-amd64/
+          chmod +x dist/punchd-vpn-linux-amd64/install.sh
+          tar -czf dist/punchd-vpn-linux-amd64.tar.gz -C dist punchd-vpn-linux-amd64
+
+          mkdir -p dist/punchd-bridge-linux-amd64
+          cp target/release/punchd-bridge-rs dist/punchd-bridge-linux-amd64/
+          tar -czf dist/punchd-bridge-linux-amd64.tar.gz -C dist punchd-bridge-linux-amd64
+
+      - name: Upload VPN .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: punchd-vpn-linux-deb
+          path: bridges/punchd-bridge-rs/target/debian/*.deb
+
+      - name: Upload VPN tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: punchd-vpn-linux-amd64
+          path: bridges/punchd-bridge-rs/dist/punchd-vpn-linux-amd64.tar.gz
+
+      - name: Upload Gateway tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: punchd-bridge-linux-amd64
+          path: bridges/punchd-bridge-rs/dist/punchd-bridge-linux-amd64.tar.gz
+
+  # ── Linux arm64 ────────────────────────────────────────────────
+  linux-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + cross
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install cross-compile tools
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+
+      - name: Build
+        working-directory: bridges/punchd-bridge-rs
+        run: |
+          cargo build --release --target aarch64-unknown-linux-gnu --bin punchd-vpn
+          cargo build --release --target aarch64-unknown-linux-gnu --bin punchd-bridge-rs
+
+      - name: Package tarball
+        working-directory: bridges/punchd-bridge-rs
+        run: |
+          mkdir -p dist/punchd-vpn-linux-arm64
+          cp target/aarch64-unknown-linux-gnu/release/punchd-vpn dist/punchd-vpn-linux-arm64/
+          cp pkg/punchd-vpn.service dist/punchd-vpn-linux-arm64/
+          cp pkg/install.sh dist/punchd-vpn-linux-arm64/
+          chmod +x dist/punchd-vpn-linux-arm64/install.sh
+          tar -czf dist/punchd-vpn-linux-arm64.tar.gz -C dist punchd-vpn-linux-arm64
+
+          mkdir -p dist/punchd-bridge-linux-arm64
+          cp target/aarch64-unknown-linux-gnu/release/punchd-bridge-rs dist/punchd-bridge-linux-arm64/
+          tar -czf dist/punchd-bridge-linux-arm64.tar.gz -C dist punchd-bridge-linux-arm64
+
+      - name: Upload VPN
+        uses: actions/upload-artifact@v4
+        with:
+          name: punchd-vpn-linux-arm64
+          path: bridges/punchd-bridge-rs/dist/punchd-vpn-linux-arm64.tar.gz
+
+      - name: Upload Gateway
+        uses: actions/upload-artifact@v4
+        with:
+          name: punchd-bridge-linux-arm64
+          path: bridges/punchd-bridge-rs/dist/punchd-bridge-linux-arm64.tar.gz
+
+  # ── macOS (universal binary) ───────────────────────────────────
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Build (x86_64 + arm64)
+        working-directory: bridges/punchd-bridge-rs
+        run: |
+          cargo build --release --target x86_64-apple-darwin --bin punchd-vpn
+          cargo build --release --target aarch64-apple-darwin --bin punchd-vpn
+          cargo build --release --target x86_64-apple-darwin --bin punchd-bridge-rs
+          cargo build --release --target aarch64-apple-darwin --bin punchd-bridge-rs
+
+      - name: Create universal binaries
+        working-directory: bridges/punchd-bridge-rs
+        run: |
+          mkdir -p dist
+          lipo -create \
+            target/x86_64-apple-darwin/release/punchd-vpn \
+            target/aarch64-apple-darwin/release/punchd-vpn \
+            -output dist/punchd-vpn
+          lipo -create \
+            target/x86_64-apple-darwin/release/punchd-bridge-rs \
+            target/aarch64-apple-darwin/release/punchd-bridge-rs \
+            -output dist/punchd-bridge-rs
+
+      - name: Package
+        working-directory: bridges/punchd-bridge-rs
+        run: |
+          mkdir -p dist/punchd-vpn-macos
+          cp dist/punchd-vpn dist/punchd-vpn-macos/
+          cp pkg/com.keylessh.punchd-vpn.plist dist/punchd-vpn-macos/
+          tar -czf dist/punchd-vpn-macos.tar.gz -C dist punchd-vpn-macos
+
+          mkdir -p dist/punchd-bridge-macos
+          cp dist/punchd-bridge-rs dist/punchd-bridge-macos/
+          tar -czf dist/punchd-bridge-macos.tar.gz -C dist punchd-bridge-macos
+
+      - name: Upload VPN
+        uses: actions/upload-artifact@v4
+        with:
+          name: punchd-vpn-macos
+          path: bridges/punchd-bridge-rs/dist/punchd-vpn-macos.tar.gz
+
+      - name: Upload Gateway
+        uses: actions/upload-artifact@v4
+        with:
+          name: punchd-bridge-macos
+          path: bridges/punchd-bridge-rs/dist/punchd-bridge-macos.tar.gz
+
+  # ── GitHub Release ─────────────────────────────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/vpn-v')
+    needs: [windows-msi, windows-gateway, linux-amd64, linux-arm64, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Punchd VPN ${{ github.ref_name }}
+          files: |
+            artifacts/punchd-vpn-windows-msi/*.msi
+            artifacts/punchd-vpn-windows-exe/punchd-vpn.exe
+            artifacts/punchd-bridge-windows/punchd-bridge-rs.exe
+            artifacts/punchd-vpn-linux-deb/*.deb
+            artifacts/punchd-vpn-linux-amd64/*.tar.gz
+            artifacts/punchd-bridge-linux-amd64/*.tar.gz
+            artifacts/punchd-vpn-linux-arm64/*.tar.gz
+            artifacts/punchd-bridge-linux-arm64/*.tar.gz
+            artifacts/punchd-vpn-macos/*.tar.gz
+            artifacts/punchd-bridge-macos/*.tar.gz

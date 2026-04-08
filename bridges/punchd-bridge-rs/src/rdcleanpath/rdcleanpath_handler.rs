@@ -14,6 +14,7 @@ use tokio_native_tls::TlsStream;
 
 use crate::auth::tidecloak::{JwtPayload, TidecloakAuth};
 use crate::config::{BackendAuth, BackendEntry};
+use crate::recording::RecordingHandle;
 
 use super::rdcleanpath::{
     build_error, build_response, parse_request, RDCleanPathError, RDCleanPathResponse,
@@ -29,7 +30,10 @@ pub struct RDCleanPathSessionOptions {
     pub backends: Vec<BackendEntry>,
     pub auth: Arc<TidecloakAuth>,
     pub gateway_id: Option<String>,
-    pub tc_client_id: Option<String>,
+    pub server_url: Option<String>,
+    pub recording: Option<RecordingHandle>,
+    /// Pre-obtained keylessh app token (via PKCE+SSO from browser) for recording API calls
+    pub recording_token: Option<String>,
 }
 
 pub struct RDCleanPathSession {
@@ -67,7 +71,7 @@ impl RDCleanPathSession {
 // ---------------------------------------------------------------------------
 
 async fn run_session(
-    opts: RDCleanPathSessionOptions,
+    mut opts: RDCleanPathSessionOptions,
     mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) -> Result<(), String> {
     let send_binary = opts.send_binary.clone();
@@ -123,9 +127,9 @@ async fn run_session(
         if let Some(ref ra) = payload.resource_access {
             tracing::info!("Resource access: {}", ra);
         }
-        tracing::info!("tc_client_id: {:?}, destination: {}", opts.tc_client_id, req.destination);
+        tracing::info!("destination: {}", req.destination);
 
-        _rdp_username = match check_dest_roles(&payload, &req.destination, opts.tc_client_id.as_deref()) {
+        _rdp_username = match check_dest_roles(&payload, &req.destination, payload.azp.as_deref().unwrap_or("")) {
             Some(u) => u,
             None => {
                 tracing::error!(
@@ -138,6 +142,19 @@ async fn run_session(
                 return Err("Access denied".into());
             }
         };
+
+        // Create audit session on keylessh (browser handles PDU recording)
+        if let Some(ref server_url) = opts.server_url {
+            let sess_server_url = server_url.clone();
+            let sess_token = opts.recording_token.clone().unwrap_or_else(|| req.proxy_auth.clone());
+            let sess_backend = req.destination.clone();
+            let sess_gateway = opts.gateway_id.clone().unwrap_or_default();
+            tokio::spawn(async move {
+                crate::recording::create_session(
+                    &sess_server_url, &sess_token, "rdp", &sess_backend, &sess_gateway,
+                ).await;
+            });
+        }
     }
 
     // ------------------------------------------------------------------
@@ -264,7 +281,8 @@ async fn run_session(
 
     // Task: client -> RDP server
     let _send_close_c2s = send_close.clone();
-    let c2s = tokio::spawn(async move {
+    let rec_c2s = opts.recording.clone();
+    let mut c2s = tokio::spawn(async move {
         let mut first_msg = true;
         let mut mcs_proto = mcs_patch_protocol;
         while let Some(mut data) = rx.recv().await {
@@ -275,6 +293,10 @@ async fn run_session(
                 patch_mcs_selected_protocol(&mut data, mcs_patch_protocol);
             } else {
                 first_msg = false;
+            }
+            // Record PDU before writing
+            if let Some(ref rec) = rec_c2s {
+                rec.record_c2s(&data);
             }
             if let Err(e) = tls_write.write_all(&data).await {
                 tracing::error!("Relay c2s write error: {e}");
@@ -287,12 +309,17 @@ async fn run_session(
     // Task: RDP server -> client
     let send_binary_s2c = send_binary.clone();
     let send_close_s2c = send_close.clone();
-    let s2c = tokio::spawn(async move {
+    let rec_s2c = opts.recording.clone();
+    let mut s2c = tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         loop {
             match tls_read.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
+                    // Record PDU before sending to client
+                    if let Some(ref rec) = rec_s2c {
+                        rec.record_s2c(&buf[..n]);
+                    }
                     (send_binary_s2c)(buf[..n].to_vec());
                 }
                 Err(e) => {
@@ -304,11 +331,15 @@ async fn run_session(
         (send_close_s2c)(1000, "RDP session ended".into());
     });
 
-    // Wait for either direction to finish
+    // Wait for either direction to finish, then abort the other
     tokio::select! {
-        _ = c2s => {},
-        _ = s2c => {},
+        _ = &mut c2s => { s2c.abort(); let _ = s2c.await; },
+        _ = &mut s2c => { c2s.abort(); let _ = c2s.await; },
     }
+
+    // All relay task handles dropped — rec_c2s/rec_s2c clones are gone.
+    // Drop the last recording handle so the uploader channel closes and end-recording fires.
+    drop(opts.recording);
 
     Ok(())
 }
@@ -365,7 +396,7 @@ fn extract_peer_cert_chain(tls_stream: &TlsStream<TcpStream>) -> Vec<Vec<u8>> {
 }
 
 /// Check whether the JWT payload has a matching "dest:" role for the given destination.
-/// Looks in both realm_access.roles and resource_access[tc_client_id].roles.
+/// Searches realm_access.roles and resource_access[client_id].roles.
 ///
 /// Accepted role formats:
 ///   - "dest:<endpoint>"                          (simple)
@@ -374,7 +405,7 @@ fn extract_peer_cert_chain(tls_stream: &TlsStream<TcpStream>) -> Vec<Vec<u8>> {
 ///
 /// Returns Some(username) if a role with an explicit username is found,
 /// or Some("") if access is granted but no username is embedded.
-fn check_dest_roles(payload: &JwtPayload, destination: &str, tc_client_id: Option<&str>) -> Option<String> {
+pub fn check_dest_roles(payload: &JwtPayload, destination: &str, client_id: &str) -> Option<String> {
     let check_roles = |roles: &[String]| -> Option<String> {
         let mut granted = false;
         let mut username: Option<String> = None;
@@ -414,9 +445,8 @@ fn check_dest_roles(payload: &JwtPayload, destination: &str, tc_client_id: Optio
         }
     }
 
-    // Check resource_access[tc_client_id].roles
-    if let (Some(resource_access), Some(client_id)) = (&payload.resource_access, tc_client_id)
-    {
+    // Check resource_access[client_id].roles
+    if let Some(ref resource_access) = payload.resource_access {
         if let Some(client_obj) = resource_access.get(client_id) {
             if let Some(roles) = client_obj.get("roles").and_then(|v| v.as_array()) {
                 let role_strs: Vec<String> = roles

@@ -211,6 +211,12 @@ export const api = {
         const linkUrl = await tc.getTideLinkUrl(userId, redirectUri || window.location.origin);
         return { linkUrl };
       },
+      getRoles: async (userId: string): Promise<string[]> => {
+        // Use client-specific role-mappings endpoint to get all assigned roles
+        // (the generic /role-mappings endpoint may not return VPN firewall roles)
+        const clientRoles = await tc.getUserClientRoleMappings(userId);
+        return clientRoles.map(r => r.name).filter((n): n is string => !!n);
+      },
       setEnabled: async (userId: string, enabled: boolean) => {
         await tc.setUserEnabled(userId, enabled);
         return { success: true, enabled };
@@ -352,7 +358,7 @@ export const api = {
         return requests.map((req) => ({
           id: req.retrievalInfo.changeSetId,
           requestType: req.data.actionType || req.data.action,
-          status: req.data.status,
+          status: (req.data.actionType === "DELETE" ? req.data.deleteStatus : req.data.status) || "PENDING",
           requestedBy: req.data.userRecord?.[0]?.username || "Unknown",
           requestedAt: req.data.createdAt || new Date().toISOString(),
           role: req.data.role,
@@ -526,20 +532,57 @@ export const api = {
           body: JSON.stringify(params),
         }),
     },
+    gatewayConfigs: {
+      list: () => apiRequest<GatewayConfigSummary[]>("/api/admin/gateway-configs"),
+      get: (id: string) => apiRequest<GatewayConfigSummary>(`/api/admin/gateway-configs/${id}`),
+      create: (data: any) => apiRequest<GatewayConfigSummary>("/api/admin/gateway-configs", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: string, data: any) => apiRequest<GatewayConfigSummary>(`/api/admin/gateway-configs/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+      delete: (id: string) => apiRequest<void>(`/api/admin/gateway-configs/${id}`, { method: "DELETE" }),
+      downloadUrl: (id: string) => `/api/admin/gateway-configs/${id}/download`,
+      vpnConfigUrl: (id: string) => `/api/admin/gateway-configs/${id}/vpn-config`,
+      tidecloakConfigUrl: (id: string) => `/api/admin/gateway-configs/${id}/tidecloak-config`,
+    },
   },
 };
+
+// Gateway config (managed from admin UI)
+export interface GatewayConfigSummary {
+  id: string;
+  gatewayId: string;
+  displayName: string | null;
+  stunServerUrl: string | null;
+  apiSecret: string | null;
+  iceServers: string | null;
+  turnServer: string | null;
+  turnSecret: string | null;
+  backends: string | null;
+  tidecloakConfigB64: string | null;
+  authServerPublicUrl: string | null;
+  serverUrl: string | null;
+  vpnEnabled: boolean;
+  vpnSubnet: string;
+  listenPort: number;
+  healthPort: number;
+  https: boolean;
+  tlsHostname: string;
+  extraConfig: string | null;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
 
 // Gateway endpoint from signal server aggregation
 export interface GatewayEndpoint {
   id: string;
   displayName: string;
   description: string;
-  backends: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; accessible: boolean }[];
+  backends: { name: string; protocol?: string; auth?: string; rdpUsernames?: string[]; sshUsernames?: string[]; accessible: boolean }[];
   online: boolean;
   clientCount: number;
   signalServerId: string;
   signalServerName: string;
   signalServerUrl: string;
+  directUrl?: string;
 }
 
 // Re-export types for convenience
@@ -795,10 +838,13 @@ export interface RecordingSummary {
   terminalWidth: number;
   terminalHeight: number;
   fileSize: number;
+  recordingType?: "ssh" | "rdp";
+  backendName?: string | null;
+  gatewayId?: string | null;
 }
 
 export interface RecordingDetails extends RecordingSummary {
-  data: string; // Full asciicast data for playback
+  data: string; // Full recording data (asciicast for SSH, PDU JSON lines for RDP)
 }
 
 export interface RecordingsListResponse {

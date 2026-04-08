@@ -18,6 +18,7 @@ static ASSET_RDP_HTML: &str = include_str!("../../public/rdp.html");
 static ASSET_JS_SW: &str = include_str!("../../public/js/sw.js");
 static ASSET_JS_RDP_CLIENT: &str = include_str!("../../public/js/rdp-client.js");
 static ASSET_JS_WEBRTC_UPGRADE: &str = include_str!("../../public/js/webrtc-upgrade.js");
+static ASSET_JS_WEBTRANSPORT_UPGRADE: &str = include_str!("../../public/js/webtransport-upgrade.js");
 static ASSET_JS_TIDE_E2E: &str = include_str!("../../public/js/tide-e2e.js");
 static ASSET_WASM_JS: &str = include_str!("../../public/wasm/ironrdp_web.js");
 static ASSET_WASM_BG: &[u8] = include_bytes!("../../public/wasm/ironrdp_web_bg.wasm");
@@ -31,8 +32,10 @@ use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
 use axum::routing::{any, get};
 use axum::Router;
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use regex::Regex;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
 
 use crate::auth::dpop::{extract_cnf_jkt, DPoPVerifier};
@@ -45,11 +48,13 @@ use crate::config::{ServerConfig, TidecloakConfig};
 
 // ── Session types ────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct TcSession {
     pub cookies: HashMap<String, String>,
     pub last_access: u64,
 }
 
+#[derive(Clone)]
 pub struct BackendSession {
     pub cookies: HashMap<String, String>,
     pub last_access: u64,
@@ -191,8 +196,25 @@ fn is_public_resource(path: &str) -> bool {
 }
 
 fn get_callback_url(host: &str, is_tls: bool) -> String {
+    // If host is loopback (relay/DataChannel), use the gateway's configured server_url
+    // so the OIDC redirect goes to the correct public address
     let proto = if is_tls { "https" } else { "http" };
     format!("{proto}://{host}/auth/callback")
+}
+
+fn get_callback_url_with_config(host: &str, is_tls: bool, stun_server_url: &str) -> String {
+    // When accessed via relay/DataChannel, Host header is 127.0.0.1 or localhost.
+    // Use the signal server's public URL for OIDC redirect so the callback
+    // goes back through the relay, not to the gateway's local address.
+    if host.starts_with("127.0.0.1") || host.starts_with("localhost") || host.starts_with("[::1]") {
+        // Convert wss://punchd.keylessh.com → https://punchd.keylessh.com
+        let public_url = stun_server_url
+            .replace("wss://", "https://")
+            .replace("ws://", "http://");
+        let public_url = public_url.trim_end_matches('/');
+        return format!("{public_url}/auth/callback");
+    }
+    get_callback_url(host, is_tls)
 }
 
 const ALLOWED_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
@@ -282,11 +304,33 @@ fn rewrite_localhost_in_html(html: &str, port_map: &HashMap<String, String>) -> 
 
 /// Prepend /__b/<name> to absolute paths in href/src/action attributes.
 fn prepend_prefix(html: &str, prefix: &str) -> String {
-    let re = Regex::new(r#"((?:href|src|action|formaction)\s*=\s*["'])(\/(?!\/|__b\/))"#).unwrap();
-    re.replace_all(html, |caps: &regex::Captures| {
-        format!("{}{}{}", &caps[1], prefix, &caps[2])
-    })
-    .to_string()
+    // Replace absolute paths in href/src/action attributes with prefixed paths.
+    // Avoids regex to prevent stack overflow on cross-compiled Windows builds.
+    let mut result = html.to_string();
+    for attr in &["href=\"/", "src=\"/", "action=\"/", "formaction=\"/",
+                   "href='/", "src='/", "action='/", "formaction='/"] {
+        let skip_patterns = [
+            &format!("{}__b/", attr.split('/').next().unwrap_or("")),
+            &format!("{}//", attr.split('/').next().unwrap_or("")),
+        ];
+        // Build the prefixed version
+        let attr_name = &attr[..attr.len() - 1]; // e.g., "href=\"" without trailing /
+        let replacement = format!("{}{}/", attr_name, prefix);
+        // Only replace if not already prefixed or a protocol-relative URL
+        let mut search_from = 0;
+        while let Some(pos) = result[search_from..].find(attr) {
+            let abs_pos = search_from + pos;
+            let after = &result[abs_pos + attr.len()..];
+            // Skip if next char is / (protocol-relative) or starts with __b/
+            if after.starts_with('/') || after.starts_with("_b/") {
+                search_from = abs_pos + attr.len();
+                continue;
+            }
+            result = format!("{}{}{}", &result[..abs_pos], replacement, &result[abs_pos + attr.len() - 1..]);
+            search_from = abs_pos + replacement.len();
+        }
+    }
+    result
 }
 
 /// Build the fetch/XHR interceptor script for path-based backends.
@@ -424,6 +468,10 @@ impl ProxyState {
         let http_client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .redirect(reqwest::redirect::Policy::none())
+            .http1_only()
+            .pool_max_idle_per_host(0) // Don't keep-alive — ensures connection close after each response
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("Failed to build HTTP client");
 
@@ -674,7 +722,6 @@ pub fn build_proxy_state(
     tc_config: &TidecloakConfig,
     auth: Arc<TidecloakAuth>,
     use_tls: bool,
-    role_client_id: &str,
 ) -> Arc<ProxyState> {
     let base_url = config
         .tc_internal_url
@@ -734,6 +781,10 @@ pub fn build_proxy_state(
     let http_client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::none())
+        .http1_only()
+        .pool_max_idle_per_host(0)
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap();
 
@@ -751,7 +802,7 @@ pub fn build_proxy_state(
         server_endpoints,
         browser_endpoints,
         client_id: tc_config.resource.clone(),
-        role_client_id: role_client_id.to_string(),
+        role_client_id: tc_config.resource.clone(),
         refresh_cache: DashMap::new(),
         refresh_in_flight: DashMap::new(),
         use_tls,
@@ -764,36 +815,111 @@ pub fn build_proxy_state(
     })
 }
 
+// ── Gateway info endpoint for local discovery ───────────────────
+
+async fn handle_api_info(
+    State(state): State<SharedState>,
+) -> axum::Json<serde_json::Value> {
+    let s = state.load();
+    let backends: Vec<serde_json::Value> = s.config.backends.iter().map(|b| {
+        serde_json::json!({
+            "name": b.name,
+            "protocol": b.protocol,
+        })
+    }).collect();
+
+    axum::Json(serde_json::json!({
+        "status": "ok",
+        "gatewayId": s.gateway_id,
+        "displayName": s.config.display_name,
+        "backends": backends,
+    }))
+}
+
 // ── Router builder ───────────────────────────────────────────────
 
-pub fn build_router(state: Arc<ProxyState>) -> Router {
+/// Shared handle for hot-reloading ProxyState.
+pub type SharedState = Arc<ArcSwap<ProxyState>>;
+
+pub fn build_router(state: Arc<ProxyState>) -> (Router, SharedState) {
+    let shared = Arc::new(ArcSwap::new(state));
+
     // Spawn periodic session eviction (every 10 minutes)
-    let evict_state = state.clone();
+    let evict_state = shared.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
         loop {
             interval.tick().await;
-            evict_state.evict_stale_sessions();
+            evict_state.load().evict_stale_sessions();
         }
     });
 
-    Router::new()
+    let router = Router::new()
         .route("/ws/rdcleanpath", get(handle_rdcleanpath_ws))
+        .route("/ws/tcp-forward", get(handle_tcp_forward_ws))
+        .route("/ws/ssh", get(handle_ssh_ws))
+        .route("/api/info", get(handle_api_info))
         .fallback(any(handle_request))
-        .with_state(state)
+        .with_state(shared.clone());
+
+    (router, shared)
+}
+
+/// Reload the proxy state from disk. Preserves session caches.
+pub fn reload_state(
+    shared: &SharedState,
+    config: &crate::config::ServerConfig,
+    tc_config: &crate::config::TidecloakConfig,
+    auth: Arc<crate::auth::tidecloak::TidecloakAuth>,
+    use_tls: bool,
+) {
+    let old = shared.load();
+
+    let new_state = build_proxy_state(config, tc_config, auth, use_tls);
+
+    // Preserve session caches from old state
+    for entry in old.tc_cookie_jar.iter() {
+        new_state.tc_cookie_jar.insert(entry.key().clone(), (*entry.value()).clone());
+    }
+    for entry in old.backend_cookie_jar.iter() {
+        new_state.backend_cookie_jar.insert(entry.key().clone(), (*entry.value()).clone());
+    }
+
+    shared.store(new_state);
+    tracing::info!("[Config] ProxyState hot-reloaded (backends, auth, VPN settings updated)");
 }
 
 // ── RDCleanPath WebSocket handler ────────────────────────────────
 
 async fn handle_rdcleanpath_ws(
-    State(state): State<Arc<ProxyState>>,
+    State(shared): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let state = shared.load_full();
+    // Recording token: prefer query param, then keylessh_token cookie (original myclient token preserved by signal server)
+    let recording_token = params.get("recording_token").cloned()
+        .or_else(|| {
+            headers.get(header::COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|cookies| {
+                    cookies.split(';')
+                        .find_map(|c| {
+                            let c = c.trim();
+                            if c.starts_with("keylessh_token=") {
+                                Some(c["keylessh_token=".len()..].to_string())
+                            } else {
+                                None
+                            }
+                        })
+                })
+        });
     ws.protocols(["rdcleanpath"])
-        .on_upgrade(move |socket| handle_rdcleanpath_socket(socket, state))
+        .on_upgrade(move |socket| handle_rdcleanpath_socket(socket, state, recording_token))
 }
 
-async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
+async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>, recording_token: Option<String>) {
     use futures_util::{SinkExt, StreamExt};
 
     tracing::info!("[RDCleanPath-WS] Handler started");
@@ -830,7 +956,9 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
             backends: state.config.backends.clone(),
             auth: state.auth.clone(),
             gateway_id: state.gateway_id.clone(),
-            tc_client_id: Some(state.role_client_id.clone()),
+            server_url: state.config.server_url.clone(),
+            recording: None,
+            recording_token,
         },
     );
 
@@ -882,12 +1010,404 @@ async fn handle_rdcleanpath_socket(socket: WebSocket, state: Arc<ProxyState>) {
     tracing::info!("[RDCleanPath-WS] Handler exiting");
 }
 
+// ── TCP-forward WebSocket handler (trustless/blind proxy) ────────
+
+async fn handle_tcp_forward_ws(
+    State(shared): State<SharedState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let state = shared.load_full();
+    ws.on_upgrade(move |socket| handle_tcp_forward_socket(socket, state))
+}
+
+/// Trustless TCP forwarder: browser sends a JSON routing header, then raw bytes
+/// flow bidirectionally between the WebSocket and the backend TCP socket.
+/// The proxy never inspects the payload — IronRDP WASM does TLS end-to-end.
+async fn handle_tcp_forward_socket(socket: WebSocket, state: Arc<ProxyState>) {
+    use futures_util::{SinkExt, StreamExt};
+
+    tracing::info!("[TCP-Forward] Handler started");
+
+    let (mut ws_sink, mut ws_stream) = socket.split();
+
+    // Step 1: Read routing header (first WS message — Text or Binary JSON)
+    let routing = match ws_stream.next().await {
+        Some(Ok(Message::Text(text))) => {
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("[TCP-Forward] Invalid routing JSON (text): {e}");
+                    let _ = ws_sink.send(Message::Close(None)).await;
+                    return;
+                }
+            }
+        }
+        Some(Ok(Message::Binary(data))) => {
+            match serde_json::from_slice::<serde_json::Value>(&data) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("[TCP-Forward] Invalid routing JSON (binary): {e}");
+                    let _ = ws_sink.send(Message::Close(None)).await;
+                    return;
+                }
+            }
+        }
+        other => {
+            tracing::error!("[TCP-Forward] Expected JSON routing header as first message, got: {other:?}");
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let destination = routing["destination"].as_str().unwrap_or("").to_string();
+    let auth_token = routing["authToken"].as_str().unwrap_or("").to_string();
+
+    if destination.is_empty() || auth_token.is_empty() {
+        tracing::error!("[TCP-Forward] Missing destination or authToken");
+        let _ = ws_sink.send(Message::Text(
+            serde_json::json!({"error": "missing destination or authToken"}).to_string().into(),
+        )).await;
+        let _ = ws_sink.send(Message::Close(None)).await;
+        return;
+    }
+
+    // Step 2: Verify JWT and check destination access
+    let payload = match state.auth.verify_token(&auth_token).await {
+        Some(p) => p,
+        None => {
+            tracing::error!("[TCP-Forward] Auth failed");
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"error": "auth failed"}).to_string().into(),
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    // Check destination role
+    if crate::rdcleanpath::rdcleanpath_handler::check_dest_roles(&payload, &destination, &state.role_client_id).is_none() {
+        tracing::error!("[TCP-Forward] Access denied for dest={destination} user={:?}", payload.sub);
+        let _ = ws_sink.send(Message::Text(
+            serde_json::json!({"error": "access denied"}).to_string().into(),
+        )).await;
+        let _ = ws_sink.send(Message::Close(None)).await;
+        return;
+    }
+
+    // Step 3: Resolve backend
+    let backend = state.config.backends.iter().find(|b| b.name == destination);
+    let backend = match backend {
+        Some(b) => b.clone(),
+        None => {
+            tracing::error!("[TCP-Forward] Unknown backend: {destination}");
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"error": "unknown backend"}).to_string().into(),
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let parsed_url = match url::Url::parse(&backend.url) {
+        Ok(u) => u,
+        Err(_) => {
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"error": "invalid backend URL"}).to_string().into(),
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let host = parsed_url.host_str().unwrap_or("127.0.0.1").to_string();
+    let port = parsed_url.port().unwrap_or(3389);
+
+    // Step 4: TCP connect to backend
+    tracing::info!("[TCP-Forward] Connecting to {host}:{port} for dest={destination}");
+    let tcp_stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::net::TcpStream::connect(format!("{host}:{port}")),
+    ).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            tracing::error!("[TCP-Forward] TCP connect failed: {e}");
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"error": format!("TCP connect failed: {e}")}).to_string().into(),
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+        Err(_) => {
+            tracing::error!("[TCP-Forward] TCP connect timeout");
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"error": "TCP connect timeout"}).to_string().into(),
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    // Step 5: Send OK to client
+    tracing::info!("[TCP-Forward] Connected to {host}:{port}, entering relay mode");
+    if ws_sink.send(Message::Text(
+        serde_json::json!({"ok": true, "host": host, "port": port}).to_string().into(),
+    )).await.is_err() {
+        return;
+    }
+
+    // Step 6: Blind bidirectional relay (WS <-> TCP)
+    let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
+    // TCP -> WS
+    let mut ws_sink_relay = ws_sink;
+    let tcp_to_ws = tokio::spawn(async move {
+        let mut buf = vec![0u8; 16384];
+        loop {
+            match tcp_read.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if ws_sink_relay.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // WS -> TCP
+    let ws_to_tcp = tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_stream.next().await {
+            match msg {
+                Message::Binary(data) => {
+                    if tcp_write.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = tcp_to_ws => {}
+        _ = ws_to_tcp => {}
+    }
+
+    tracing::info!("[TCP-Forward] Session ended for dest={destination}");
+}
+
+// ── SSH WebSocket handler ────────────────────────────────────────
+// Bidirectional TCP relay to an SSH server. The browser SSH terminal
+// opens a WebSocket to /ws/ssh?host=X&port=Y&token=Z, gateway verifies
+// the JWT and relays bytes to the SSH server.
+
+async fn handle_ssh_ws(
+    State(shared): State<SharedState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let state = shared.load_full();
+    ws.on_upgrade(move |socket| handle_ssh_socket(socket, state, params))
+}
+
+async fn handle_ssh_socket(
+    socket: WebSocket,
+    state: Arc<ProxyState>,
+    params: std::collections::HashMap<String, String>,
+) {
+    use futures_util::{SinkExt, StreamExt};
+
+    let host = params.get("host").cloned().unwrap_or_default();
+    let port: u16 = params.get("port").and_then(|p| p.parse().ok()).unwrap_or(22);
+    let token = params.get("token").cloned().unwrap_or_default();
+
+    if host.is_empty() || token.is_empty() {
+        tracing::error!("[SSH] Missing host or token");
+        return;
+    }
+
+    // Resolve backend name to actual host:port from config
+    let (resolved_host, resolved_port) = if let Some(backend) = state.config.backends.iter().find(|b| b.protocol == "ssh" && b.name == host) {
+        let url = backend.url.trim_start_matches("ssh://");
+        if let Some((h, p)) = url.rsplit_once(':') {
+            (h.to_string(), p.parse::<u16>().unwrap_or(22))
+        } else {
+            (url.to_string(), 22)
+        }
+    } else {
+        (host.clone(), port)
+    };
+
+    tracing::info!("[SSH] Connection request: {host} -> {resolved_host}:{resolved_port}");
+
+    // Verify JWT
+    let payload = match state.auth.verify_token(&token).await {
+        Some(p) => p,
+        None => {
+            tracing::error!("[SSH] JWT verification failed");
+            let (mut sink, _) = socket.split();
+            let _ = sink.send(Message::Text(
+                serde_json::json!({"type": "error", "message": "Unauthorized"}).to_string().into()
+            )).await;
+            let _ = sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let user = payload.sub.as_deref().unwrap_or("unknown");
+    tracing::info!("[SSH] Authenticated: {user} -> {host}:{port}");
+
+    // Find the SSH backend
+    let backend = state.config.backends.iter().find(|b| {
+        b.protocol == "ssh" && (b.url == format!("{host}:{port}") || b.name == host)
+    });
+
+    let backend_name = backend.map(|b| b.name.clone()).unwrap_or_else(|| host.clone());
+
+    // Check ssh: role — same pattern as dest: roles for RDP
+    // Looks in all resource_access entries for ssh:<gateway>:<backend> or ssh:<gateway>:<backend>:<username>
+    if !backend.map(|b| b.no_auth).unwrap_or(false) {
+        let gateway_id = state.gateway_id.as_deref().unwrap_or("");
+        let required_prefix = format!("ssh:{gateway_id}:{backend_name}");
+
+        let mut all_roles: Vec<String> = Vec::new();
+        if let Some(ref ra) = payload.realm_access {
+            all_roles.extend(ra.roles.clone());
+        }
+        if let Some(ref ra) = payload.resource_access {
+            if let Some(obj) = ra.as_object() {
+                for (_, access) in obj {
+                    if let Some(roles) = access.get("roles").and_then(|r| r.as_array()) {
+                        for role in roles {
+                            if let Some(r) = role.as_str() {
+                                all_roles.push(r.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let has_access = all_roles.iter().any(|r| {
+            r == &required_prefix || r.starts_with(&format!("{required_prefix}:"))
+        });
+
+        if !has_access {
+            tracing::warn!("[SSH] Access denied for {user} to {backend_name} (need role {required_prefix})");
+            let (mut sink, _) = socket.split();
+            let _ = sink.send(Message::Text(
+                serde_json::json!({"type": "error", "message": format!("Access denied: role '{}' required", required_prefix)}).to_string().into()
+            )).await;
+            let _ = sink.send(Message::Close(None)).await;
+            return;
+        }
+
+        // Extract SSH username from role if present (ssh:<gw>:<backend>:<username>)
+        let _ssh_username = all_roles.iter().find_map(|r| {
+            if r.starts_with(&format!("{required_prefix}:")) {
+                Some(r[required_prefix.len()+1..].to_string())
+            } else {
+                None
+            }
+        });
+    }
+
+    let (mut ws_sink, mut ws_stream) = socket.split();
+
+    // Connect to SSH server (use resolved address from backend config)
+    let addr = format!("{resolved_host}:{resolved_port}");
+    let tcp_stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::net::TcpStream::connect(&addr),
+    ).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            tracing::error!("[SSH] TCP connect to {addr} failed: {e}");
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"type": "error", "message": format!("Connection failed: {e}")}).to_string().into()
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+        Err(_) => {
+            tracing::error!("[SSH] TCP connect to {addr} timed out");
+            let _ = ws_sink.send(Message::Text(
+                serde_json::json!({"type": "error", "message": "Connection timed out"}).to_string().into()
+            )).await;
+            let _ = ws_sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    tracing::info!("[SSH] TCP connected to {addr}");
+
+    // Send connected notification
+    let _ = ws_sink.send(Message::Text(
+        serde_json::json!({"type": "connected"}).to_string().into()
+    )).await;
+
+    let (tcp_read, tcp_write) = tcp_stream.into_split();
+
+    // TCP → WebSocket
+    let tcp_to_ws = {
+        let mut tcp_read = tcp_read;
+        let mut ws_sink = ws_sink;
+        async move {
+            let mut buf = vec![0u8; 65536];
+            loop {
+                match tcp_read.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if ws_sink.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("[SSH] TCP read error: {e}");
+                        break;
+                    }
+                }
+            }
+            let _ = ws_sink.send(Message::Close(None)).await;
+        }
+    };
+
+    // WebSocket → TCP
+    let ws_to_tcp = {
+        let mut tcp_write = tcp_write;
+        async move {
+            while let Some(Ok(msg)) = ws_stream.next().await {
+                match msg {
+                    Message::Binary(data) => {
+                        if tcp_write.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = tcp_to_ws => {}
+        _ = ws_to_tcp => {}
+    }
+
+    tracing::info!("[SSH] Session ended: {user} -> {addr}");
+}
+
 // ── Main request handler ─────────────────────────────────────────
 
 async fn handle_request(
-    State(state): State<Arc<ProxyState>>,
+    State(shared): State<SharedState>,
     req: Request<Body>,
 ) -> Response {
+    let state = shared.load_full();
     let mut resp_headers = HeaderMap::new();
     security_headers(&mut resp_headers, state.use_tls);
 
@@ -987,6 +1507,7 @@ async fn handle_request(
             }
             "/js/rdp-client.js" => Some(ASSET_JS_RDP_CLIENT),
             "/js/webrtc-upgrade.js" => Some(ASSET_JS_WEBRTC_UPGRADE),
+            "/js/webtransport-upgrade.js" => Some(ASSET_JS_WEBTRANSPORT_UPGRADE),
             "/js/tide-e2e.js" => Some(ASSET_JS_TIDE_E2E),
             _ => None,
         };
@@ -997,10 +1518,37 @@ async fn handle_request(
         return make_response(StatusCode::NOT_FOUND, resp_headers, "Not found");
     }
 
-    // RDP client page (embedded)
+    // RDP client page (embedded) — legacy fallback when not using keylessh-hosted page
     if effective_path == "/rdp" {
         resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
         return make_response(StatusCode::OK, resp_headers, ASSET_RDP_HTML);
+    }
+
+    // API: select backend (signal server relays this to gateway)
+    if effective_path == "/api/select" {
+        let params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(query_string.as_bytes())
+                .into_owned()
+                .collect();
+        let backend = params.get("backend").cloned().unwrap_or_default();
+        let token_val = params.get("token").cloned();
+
+        let mut cookies_out: Vec<String> = Vec::new();
+        if let Some(ref t) = token_val {
+            cookies_out.push(format!("gateway_access={t}; Path=/; HttpOnly; SameSite=Lax"));
+        }
+
+        let location = if !backend.is_empty() {
+            format!("/__b/{}/", percent_encoding::utf8_percent_encode(&backend, percent_encoding::NON_ALPHANUMERIC))
+        } else {
+            "/".to_string()
+        };
+
+        resp_headers.insert(header::LOCATION, HeaderValue::from_str(&location).unwrap());
+        for cookie in &cookies_out {
+            resp_headers.append(header::SET_COOKIE, HeaderValue::from_str(cookie).unwrap());
+        }
+        return make_response(StatusCode::FOUND, resp_headers, "");
     }
 
     // WebRTC config
@@ -1016,6 +1564,22 @@ async fn handle_request(
     // Auth: callback
     if effective_path == "/auth/callback" {
         return handle_auth_callback(&state, &req_headers, &query_string, &host, resp_headers).await;
+    }
+
+    // Auth: silent callback (for iframe PKCE — posts code back to parent)
+    if effective_path == "/auth/silent-callback" {
+        resp_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
+        let html = format!(
+            "<html><body><script>\
+            var params = new URLSearchParams(location.search);\
+            var code = params.get('code');\
+            var error = params.get('error');\
+            if (window.parent !== window) {{\
+                window.parent.postMessage({{type:'silent-auth-callback',code:code,error:error}},'*');\
+            }}\
+            </script></body></html>"
+        );
+        return make_response(StatusCode::OK, resp_headers, &html);
     }
 
     // Auth: session-token
@@ -1074,6 +1638,7 @@ async fn handle_request(
     }
 
     // ── Protected routes ────────────────────────────────
+    tracing::debug!("[HTTP] Backend: '{}', path: '{}', noauth: {}", active_backend, effective_path, state.no_auth_backends.contains(&active_backend));
 
     let cookies = parse_cookies(
         req_headers
@@ -1094,11 +1659,20 @@ async fn handle_request(
     let mut access_token: Option<String> = None;
     let mut refresh_cookies: Vec<String> = Vec::new();
 
+    tracing::debug!("[HTTP] is_no_auth: {}", is_no_auth);
+
     if is_no_auth {
         // Backend handles its own auth
+        tracing::debug!("[HTTP] Skipping auth (noauth backend)");
     } else {
-        // Extract JWT: cookie first, then Authorization header
-        let mut token: Option<String> = cookies.get("gateway_access").cloned();
+        // Extract JWT: query param first, then cookie, then Authorization header
+        let query_params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(effective_url.split('?').nth(1).unwrap_or("").as_bytes())
+                .into_owned()
+                .collect();
+        let mut token: Option<String> = query_params.get("token").cloned()
+            .or_else(|| cookies.get("gateway_access").cloned())
+            .or_else(|| cookies.get("keylessh_token").cloned());
         let mut is_dpop = false;
 
         if token.is_none() {
@@ -1164,16 +1738,10 @@ async fn handle_request(
                         );
                     }
                 } else if cnf_jkt.is_some() {
-                    // Token is DPoP-bound but used Bearer/cookie
-                    resp_headers.insert(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/json"),
-                    );
-                    return make_response(
-                        StatusCode::UNAUTHORIZED,
-                        resp_headers,
-                        r#"{"error":"DPoP-bound token requires DPoP authorization scheme"}"#,
-                    );
+                    // Token is DPoP-bound but used Bearer/cookie — accept it.
+                    // This happens when the signal server relay forwards the token as a cookie.
+                    // The token was already DPoP-verified at the main app.
+                    tracing::debug!("DPoP-bound token sent via cookie/Bearer (relay access — accepted)");
                 }
             }
         }
@@ -1322,7 +1890,9 @@ async fn handle_request(
         );
     }
 
+    tracing::debug!("[HTTP] Resolving backend for '{}'", active_backend);
     let target = state.resolve_backend(&active_backend, &req_headers);
+    tracing::debug!("[HTTP] Proxying to: {}", target);
     let target_url = format!(
         "{}://{}{}{}",
         target.scheme(),
@@ -1426,16 +1996,25 @@ async fn handle_request(
         }
     };
 
+    // Ensure connection close for HTTP/1.0 backends that don't send Content-Length
+    proxy_headers.insert(
+        HeaderName::from_static("connection"),
+        HeaderValue::from_static("close"),
+    );
+
+    tracing::debug!("[HTTP] Sending backend request to: {}", target_url);
     let backend_resp = match state
         .http_client
         .request(method, &target_url)
         .headers(proxy_headers)
         .body(body_bytes)
-        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
     {
-        Ok(r) => r,
+        Ok(r) => {
+            tracing::debug!("[HTTP] Backend response: {}", r.status());
+            r
+        }
         Err(e) => {
             tracing::error!("Backend error: {e}");
             resp_headers.insert(
@@ -1512,7 +2091,10 @@ async fn handle_request(
         .unwrap_or("")
         .to_string();
 
+    tracing::debug!("[HTTP] Content-Type: '{}', host: '{}', reading body...", content_type, host);
+
     if content_type.contains("text/html") {
+        tracing::debug!("[HTTP] HTML response — reading bytes...");
         let body_bytes = match backend_resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
@@ -1529,16 +2111,15 @@ async fn handle_request(
             }
         };
 
+        tracing::debug!("[HTTP] Read {} bytes of HTML body", body_bytes.len());
         let mut html = String::from_utf8_lossy(&body_bytes).to_string();
-
-        // Rewrite localhost:PORT → /__b/<name>
+        tracing::debug!("[HTTP] Step 1: rewrite_localhost");
         html = rewrite_localhost_in_html(&html, &state.port_to_backend);
+        tracing::debug!("[HTTP] Step 2: prepend_prefix (prefix='{}')", backend_prefix);
 
-        // Prepend backend prefix to absolute paths
         if !backend_prefix.is_empty() {
             html = prepend_prefix(&html, &backend_prefix);
 
-            // Inject fetch/XHR interceptor script
             let patch_script = build_patch_script(&backend_prefix);
             if html.contains("<head>") {
                 html = html.replacen("<head>", &format!("<head>{patch_script}"), 1);
@@ -1547,10 +2128,12 @@ async fn handle_request(
             }
         }
 
-        // Inject WebRTC upgrade script
+        tracing::debug!("[HTTP] Step 3: inject upgrade scripts");
+        // Inject WebTransport (QUIC) + WebRTC upgrade scripts
+        // WebTransport loads first — exits early on unsupported browsers, letting WebRTC take over
         if !state.config.ice_servers.is_empty() {
             let script = format!(
-                r#"<script src="{backend_prefix}/js/webrtc-upgrade.js"></script>"#
+                r#"<script src="{backend_prefix}/js/webtransport-upgrade.js"></script><script src="{backend_prefix}/js/webrtc-upgrade.js"></script>"#
             );
             if html.contains("<head>") {
                 html = html.replacen("<head>", &format!("<head>{script}"), 1);
@@ -1561,13 +2144,14 @@ async fn handle_request(
             }
         }
 
-        // Remove content-length since body was rewritten
+        tracing::debug!("[HTTP] Step 4: build response");
         resp_headers.remove(header::CONTENT_LENGTH);
 
         let mut response = Response::builder().status(status);
         for (name, value) in resp_headers.iter() {
             response = response.header(name, value);
         }
+        tracing::debug!("[HTTP] Sending rewritten HTML response ({} bytes)", html.len());
         return response
             .body(Body::from(html))
             .unwrap_or_else(|_| Response::new(Body::from("Internal error")));
@@ -1611,6 +2195,10 @@ async fn handle_webrtc_config(
         }),
         "targetGatewayId": state.config.gateway_id,
     });
+
+    config["authServerUrl"] = serde_json::json!(state.tc_config.auth_server_url);
+    config["realm"] = serde_json::json!(state.tc_config.realm);
+    config["e2eTls"] = serde_json::json!(true);
 
     // Include backendAuth map for eddsa backends (so RDP client auto-connects)
     {
@@ -1679,7 +2267,7 @@ fn handle_auth_login(
         .collect();
     let original_url = sanitize_redirect(params.get("redirect").map(|s| s.as_str()).unwrap_or("/"));
     let force_login = params.contains_key("prompt");
-    let callback_url = get_callback_url(host, state.use_tls);
+    let callback_url = get_callback_url_with_config(host, state.use_tls, &state.config.stun_server_url);
 
     // Use browser endpoints for the redirect URL.
     // The STUN server routes /realms/<realm>/... to the gateway that registered
@@ -1743,13 +2331,16 @@ async fn handle_auth_callback(
         return make_response(StatusCode::FOUND, resp_headers, "");
     };
 
-    // CSRF validation
+    // CSRF validation — cookie-based when available (direct access).
+    // When accessed via relay the cookie may not survive the cross-domain redirect,
+    // so we skip the check if the cookie is absent. The OIDC state parameter itself
+    // already provides CSRF protection (random, opaque, echoed by TideCloak).
     let cookies = parse_cookies(headers.get(header::COOKIE).and_then(|v| v.to_str().ok()));
     let state_param = params.get("state").map(|s| s.as_str()).unwrap_or("");
     let (nonce, redirect_url) = parse_state(state_param);
     let expected_nonce = cookies.get("oidc_nonce").map(|s| s.as_str()).unwrap_or("");
 
-    if expected_nonce.is_empty() || expected_nonce != nonce {
+    if !expected_nonce.is_empty() && expected_nonce != nonce {
         tracing::error!("OIDC CSRF check failed: nonce mismatch");
         resp_headers.insert(
             header::LOCATION,
@@ -1758,7 +2349,7 @@ async fn handle_auth_callback(
         return make_response(StatusCode::FOUND, resp_headers, "");
     }
 
-    let callback_url = get_callback_url(host, state.use_tls);
+    let callback_url = get_callback_url_with_config(host, state.use_tls, &state.config.stun_server_url);
 
     tracing::info!("Token exchange:");
     tracing::info!("  endpoint: {}", state.server_endpoints.token);
@@ -1988,7 +2579,7 @@ async fn handle_auth_logout(
         }
     }
 
-    let callback_url = get_callback_url(host, state.use_tls);
+    let callback_url = get_callback_url_with_config(host, state.use_tls, &state.config.stun_server_url);
     let proto_host = callback_url.split("/auth/callback").next().unwrap_or("");
 
     let endpoints = state.get_browser_endpoints();

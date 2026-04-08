@@ -332,6 +332,10 @@ export interface SSHClientOptions {
    * signature algorithm (the library will wrap it in SSH "signature data").
    */
   signer?: SSHSigner;
+  /** Gateway URL for routing SSH through punchd gateway's /ws/ssh endpoint */
+  gatewayUrl?: string;
+  /** Gateway ID for QUIC signaling pairing */
+  gatewayId?: string;
 }
 
 /**
@@ -469,8 +473,10 @@ export class BrowserSSHClient {
 
       this.options.onStatusChange("connecting");
 
-      // Create session record first so the WS bridge can be associated with a session.
-      this.sessionId = await this.createSessionRecord();
+      // Create session record (skip in gateway mode — gateway creates its own)
+      if (!this.options.gatewayUrl) {
+        this.sessionId = await this.createSessionRecord();
+      }
       this.sessionEnded = false;
 
       // Register browser close/navigate handlers to end session on unexpected exit
@@ -478,18 +484,36 @@ export class BrowserSSHClient {
 
       const keyPair = auth.keyPair;
 
-      // Get the WebSocket URL for the TCP bridge
-      const wsUrl = this.buildWebSocketUrl();
-
-      // Create WebSocket connection to the TCP bridge
-      this.websocket = new WebSocket(wsUrl);
-      this.websocket.binaryType = "arraybuffer";
-
-      // Wait for WebSocket to connect
-      await this.waitForWebSocketOpen();
+      // Connect via WebRTC DataChannel (P2P like RDP) with WebSocket fallback
+      let useWebSocket = true;
+      if (this.options.gatewayUrl) {
+        try {
+          const { connectWebRtcSsh } = await import("./webrtcSsh");
+          const token = localStorage.getItem("access_token") || "";
+          this.websocket = await connectWebRtcSsh({
+            signalUrl: this.options.gatewayUrl,
+            gatewayId: this.options.gatewayId || this.options.serverId,
+            host: this.options.host,
+            port: this.options.port,
+            token,
+          });
+          this.websocket.binaryType = "arraybuffer";
+          useWebSocket = false;
+          console.log("[SSH] Connected via WebRTC DataChannel");
+        } catch (webrtcErr) {
+          console.warn("[SSH] WebRTC failed, falling back to WebSocket:", webrtcErr);
+        }
+      }
+      if (useWebSocket) {
+        const wsUrl = this.buildWebSocketUrl();
+        console.log("[SSH] Connecting via WebSocket:", wsUrl);
+        this.websocket = new WebSocket(wsUrl);
+        this.websocket.binaryType = "arraybuffer";
+        await this.waitForWebSocketOpen();
+      }
 
       // Handle socket closure (e.g. admin termination, network drop)
-      this.websocket.addEventListener("close", (event) => {
+      this.websocket!.addEventListener("close", (event) => {
         if (this.isCleaningUp) return;
         if (event.reason) {
           this.options.onError(event.reason);
@@ -554,7 +578,7 @@ export class BrowserSSHClient {
       });
 
       // Wrap WebSocket in SSH stream
-      const stream = new WebSocketStream(this.websocket);
+      const stream = new WebSocketStream(this.websocket!);
 
       // Connect the SSH session
       await this.session.connect(stream);
@@ -594,6 +618,15 @@ export class BrowserSSHClient {
       token,
       sessionId: this.sessionId || "",
     });
+
+    // Route through gateway — use signal server relay as WebSocket
+    // (QUIC WebTransport for SSH would need a separate stream, not WebSocket)
+    if (this.options.gatewayUrl) {
+      const gwUrl = this.options.gatewayUrl.replace(/\/$/, "");
+      // Convert http(s) to ws(s)
+      const wsUrl = gwUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+      return `${wsUrl}/ws/ssh?${params.toString()}`;
+    }
 
     // Use external bridge URL if provided, otherwise fallback to local /ws/tcp
     if (this.bridgeUrl) {

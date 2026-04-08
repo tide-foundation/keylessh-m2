@@ -50,7 +50,7 @@ import { api, type PolicyTemplate, type TemplateParameter, type GatewayEndpoint 
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { RefreshButton } from "@/components/RefreshButton";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
-import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode, Globe, ChevronLeft, ChevronRight } from "lucide-react";
+import { KeyRound, Pencil, Plus, Trash2, Search, Shield, FileCode, Globe, ChevronLeft, ChevronRight, Wifi } from "lucide-react";
 import type { AdminRole } from "@shared/schema";
 import { ADMIN_ROLE_SET } from "@shared/config/roles";
 import { createSshPolicyRequest, createSshPolicyRequestWithCode, bytesToBase64, SSH_MODEL_IDS, SSH_FORSETI_CONTRACT } from "@/lib/sshPolicy";
@@ -88,7 +88,7 @@ export default function AdminRoles() {
   const [editingRole, setEditingRole] = useState<AdminRole | null>(null);
   const [creatingRole, setCreatingRole] = useState(false);
   const [deletingRole, setDeletingRole] = useState<AdminRole | null>(null);
-  const [roleType, setRoleType] = useState<"ssh" | "endpoint" | "custom">("ssh");
+  const [roleType, setRoleType] = useState<"ssh" | "endpoint" | "vpn" | "custom">("ssh");
   const [isCreatingPolicy, setIsCreatingPolicy] = useState(false);
   const [formData, setFormData] = useState<{ name: string; description: string }>({
     name: "",
@@ -102,6 +102,23 @@ export default function AdminRoles() {
   const [selectedBackendName, setSelectedBackendName] = useState<string>("");
   const [selectedRdpUsername, setSelectedRdpUsername] = useState<string>("");
 
+  // VPN role state
+  const [vpnGatewayId, setVpnGatewayId] = useState<string>("");
+  const [vpnFirewallRules, setVpnFirewallRules] = useState<Array<{
+    action: "allow" | "deny";
+    protocol: "any" | "tcp" | "udp" | "icmp";
+    network: string;
+    prefix: string;
+    ports: string;
+    priority: string;
+  }>>([]);
+
+  // Custom role builder state
+  const [customPrefix, setCustomPrefix] = useState<"none" | "ssh" | "dest" | "vpn">("none");
+  const [customGateway, setCustomGateway] = useState("");
+  const [customBackend, setCustomBackend] = useState("");
+  const [customUsername, setCustomUsername] = useState("");
+
   const normalizeSshRoleName = (value: string) => {
     const trimmed = value.trim();
     if (!trimmed) return "";
@@ -111,7 +128,7 @@ export default function AdminRoles() {
 
   const { data: rolesData, isLoading: rolesLoading, refetch: refetchRoles } = useQuery({
     queryKey: ["/api/admin/roles"],
-    queryFn: api.admin.roles.list,
+    queryFn: () => api.admin.roles.listAll(),
     staleTime: 30_000,
   });
   const isFetchingRoles = useIsFetching({ queryKey: ["/api/admin/roles"] }) > 0;
@@ -398,7 +415,15 @@ export default function AdminRoles() {
     e.preventDefault();
     let name: string;
     if (roleType === "ssh") {
-      name = normalizeSshRoleName(formData.name);
+      if (!selectedGatewayId || !selectedBackendName) {
+        toast({ title: "Please select a gateway and SSH backend", variant: "destructive" });
+        return;
+      }
+      if (!formData.name.trim()) {
+        toast({ title: "SSH username is required", variant: "destructive" });
+        return;
+      }
+      name = `ssh:${selectedGatewayId}:${selectedBackendName}:${formData.name.trim()}`;
     } else if (roleType === "endpoint") {
       if (!selectedGatewayId || !selectedBackendName) {
         toast({ title: "Please select a gateway and backend", variant: "destructive" });
@@ -416,15 +441,70 @@ export default function AdminRoles() {
       } else {
         name = `dest:${selectedGatewayId}:${selectedBackendName}`;
       }
+    } else if (roleType === "vpn") {
+      if (!vpnGatewayId) {
+        toast({ title: "Please select a gateway", variant: "destructive" });
+        return;
+      }
+      if (vpnFirewallRules.length === 0) {
+        // Basic VPN access, no firewall rules
+        name = `vpn:${vpnGatewayId}`;
+      } else {
+        // Create the base role + firewall rules as separate roles
+        // First role is the base access role
+        name = `vpn:${vpnGatewayId}`;
+        // Create additional firewall rule roles
+        for (const rule of vpnFirewallRules) {
+          const proto = rule.protocol || "any";
+          const network = rule.network.trim() || "0.0.0.0";
+          const prefix = rule.prefix.trim() || "0";
+          const ports = rule.ports.trim() || "*";
+          const priority = rule.priority?.trim() || "0";
+          const fwRoleName = `vpn:${vpnGatewayId}:${rule.action}:${proto}:${network}/${prefix}:${ports}:${priority}`;
+          // Create each firewall rule as a separate role
+          try {
+            await api.admin.roles.create({ name: fwRoleName, description: `VPN firewall: ${rule.action} ${proto} ${network}/${prefix} ports ${ports} (priority ${priority})` });
+          } catch {
+            // Role may already exist, that's fine
+          }
+        }
+      }
     } else {
-      name = formData.name.trim();
+      // Custom / Manual role
+      if (customPrefix !== "none") {
+        const parts = [customPrefix, customGateway.trim()];
+        if (customPrefix !== "vpn" && customBackend.trim()) {
+          parts.push(customBackend.trim());
+        }
+        if (customPrefix !== "vpn" && customUsername.trim()) {
+          parts.push(customUsername.trim());
+        }
+        name = parts.join(":");
+      } else {
+        name = formData.name.trim();
+      }
     }
     if (!name) {
       toast({ title: "Role name is required", variant: "destructive" });
       return;
     }
 
-    // First create the role
+    // For VPN roles: base role may already exist if we're just adding firewall rules
+    if (roleType === "vpn") {
+      try {
+        await api.admin.roles.create({ name, description: formData.description || undefined });
+      } catch {
+        // 409 = role already exists, that's fine for VPN
+      }
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/roles"] });
+      void queryClient.refetchQueries({ queryKey: ["/api/admin/roles"] });
+      setCreatingRole(false);
+      setFormData({ name: "", description: "" });
+      toast({ title: vpnFirewallRules.length > 0 ? "VPN firewall rules created" : "VPN role created" });
+      return;
+    }
+
+    // Create the role
     createMutation.mutate({
       name,
       description: formData.description || undefined,
@@ -536,6 +616,11 @@ export default function AdminRoles() {
     [roles]
   );
 
+  const vpnRoleCount = useMemo(
+    () => roles.filter((r) => /^vpn[:\-]/i.test(r.name)).length,
+    [roles]
+  );
+
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -549,7 +634,8 @@ export default function AdminRoles() {
           </p>
           <p className="text-xs text-muted-foreground">
             <span className="font-mono">ssh:&lt;username&gt;</span> for SSH access ({sshRoleCount}),{" "}
-            <span className="font-mono">dest:&lt;gateway&gt;:&lt;backend&gt;</span> for endpoint access ({destRoleCount}).
+            <span className="font-mono">dest:&lt;gateway&gt;:&lt;backend&gt;</span> for endpoint access ({destRoleCount}),{" "}
+            <span className="font-mono">vpn:&lt;gateway&gt;</span> for VPN access ({vpnRoleCount}).
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -957,33 +1043,90 @@ export default function AdminRoles() {
                 </button>
                 <button
                   type="button"
-                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${roleType === "custom" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
-                  onClick={() => { setRoleType("custom"); setFormData({ ...formData, name: "" }); }}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${roleType === "vpn" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+                  onClick={() => { setRoleType("vpn"); setFormData({ ...formData, name: "" }); setVpnGatewayId(""); setVpnFirewallRules([]); }}
                 >
-                  Custom
+                  <Wifi className="h-3.5 w-3.5" />
+                  VPN
+                </button>
+                <button
+                  type="button"
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${roleType === "custom" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+                  onClick={() => { setRoleType("custom"); setFormData({ ...formData, name: "" }); setCustomPrefix("none"); setCustomGateway(""); setCustomBackend(""); setCustomUsername(""); }}
+                >
+                  Manual
                 </button>
               </div>
             </div>
 
-            {/* SSH Role Name Input */}
+            {/* SSH Role — Gateway, Backend, Username */}
             {roleType === "ssh" && (
-              <div className="space-y-2">
-                <Label htmlFor="roleName">SSH Username</Label>
-                <Input
-                  id="roleName"
-                  value={formData.name}
-                  onChange={(e) => {
-                    const raw = e.target.value;
-                    setFormData({ ...formData, name: normalizeSshRoleName(raw) });
-                  }}
-                  placeholder="e.g., root"
-                  required
-                />
-                <p className="text-xs text-muted-foreground">
-                  Creates role <span className="font-mono">ssh:{formData.name.replace(/^ssh[:\-]/i, "") || "username"}</span> — grants SSH access as this user.
-                </p>
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label>Gateway</Label>
+                  <Select
+                    value={selectedGatewayId}
+                    onValueChange={(v) => {
+                      setSelectedGatewayId(v);
+                      setSelectedBackendName("");
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select gateway" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(gatewayEndpoints || []).filter(g => g.backends?.some(b => b.protocol === "ssh")).map((gw) => (
+                        <SelectItem key={gw.id} value={gw.id}>
+                          {gw.displayName || gw.id}
+                        </SelectItem>
+                      ))}
+                      {(gatewayEndpoints || []).filter(g => g.backends?.some(b => b.protocol === "ssh")).length === 0 && (
+                        <SelectItem value="_none" disabled>No gateways with SSH backends</SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {selectedGatewayId && (
+                  <div className="space-y-2">
+                    <Label>SSH Backend</Label>
+                    <Select
+                      value={selectedBackendName}
+                      onValueChange={setSelectedBackendName}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select SSH server" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(gatewayEndpoints || [])
+                          .find(g => g.id === selectedGatewayId)
+                          ?.backends?.filter(b => b.protocol === "ssh")
+                          .map((b) => (
+                            <SelectItem key={b.name} value={b.name}>
+                              {b.name}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                {selectedBackendName && (
+                  <div className="space-y-2">
+                    <Label htmlFor="sshUsername">SSH Username</Label>
+                    <Input
+                      id="sshUsername"
+                      value={formData.name}
+                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                      placeholder="e.g., root"
+                      required
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Creates role <span className="font-mono">ssh:{selectedGatewayId}:{selectedBackendName}:{formData.name || "username"}</span>
+                    </p>
+                  </div>
+                )}
               </div>
             )}
+
 
             {/* Endpoint Role - Gateway & Backend Dropdowns */}
             {roleType === "endpoint" && (
@@ -1063,23 +1206,243 @@ export default function AdminRoles() {
                 )}
                 {(!gatewayEndpoints || gatewayEndpoints.length === 0) && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">
-                    No gateways are currently online. You can still create the role manually using "Custom" type.
+                    No gateways are currently online. You can still create the role manually using the "Manual" tab.
                   </p>
                 )}
               </div>
             )}
 
-            {/* Custom Role Name Input */}
+            {/* VPN Role - Gateway & Firewall Rules */}
+            {roleType === "vpn" && (
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label>Gateway</Label>
+                  <Select
+                    value={vpnGatewayId}
+                    onValueChange={(v) => setVpnGatewayId(v)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select a gateway..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(gatewayEndpoints || []).map((gw) => (
+                        <SelectItem key={gw.id} value={gw.id}>
+                          {gw.displayName || gw.id}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {vpnGatewayId && (
+                  <>
+                    <p className="text-xs text-muted-foreground">
+                      Creates role <span className="font-mono">vpn:{vpnGatewayId}</span> — grants VPN access to this gateway's network.
+                    </p>
+
+                    <Separator />
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label>Firewall Rules</Label>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setVpnFirewallRules([...vpnFirewallRules, { action: "allow", protocol: "any", network: "", prefix: "24", ports: "*", priority: "0" }])}
+                        >
+                          <Plus className="h-3 w-3 mr-1" /> Add Rule
+                        </Button>
+                      </div>
+
+                      {vpnFirewallRules.length === 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          No firewall rules — user will have unrestricted access to the gateway's network. Add rules to restrict access to specific subnets and ports.
+                        </p>
+                      )}
+
+                      {vpnFirewallRules.map((rule, idx) => (
+                        <div key={idx} className="p-3 border rounded-md bg-muted/30 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-muted-foreground">Rule {idx + 1}</span>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="h-6 w-6 shrink-0"
+                              onClick={() => setVpnFirewallRules(vpnFirewallRules.filter((_, i) => i !== idx))}
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </Button>
+                          </div>
+                          <div className="grid grid-cols-[100px_1fr] gap-2 items-center">
+                            <Label className="text-xs">Action</Label>
+                            <Select
+                              value={rule.action}
+                              onValueChange={(v) => {
+                                const updated = [...vpnFirewallRules];
+                                updated[idx] = { ...rule, action: v as "allow" | "deny" };
+                                setVpnFirewallRules(updated);
+                              }}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="allow">Allow</SelectItem>
+                                <SelectItem value="deny">Deny</SelectItem>
+                              </SelectContent>
+                            </Select>
+
+                            <Label className="text-xs">Protocol</Label>
+                            <Select
+                              value={rule.protocol}
+                              onValueChange={(v) => {
+                                const updated = [...vpnFirewallRules];
+                                updated[idx] = { ...rule, protocol: v as "any" | "tcp" | "udp" | "icmp" };
+                                setVpnFirewallRules(updated);
+                              }}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="any">Any</SelectItem>
+                                <SelectItem value="tcp">TCP</SelectItem>
+                                <SelectItem value="udp">UDP</SelectItem>
+                                <SelectItem value="icmp">ICMP</SelectItem>
+                              </SelectContent>
+                            </Select>
+
+                            <Label className="text-xs">Network</Label>
+                            <div className="flex items-center gap-1">
+                              <Input
+                                className="flex-1"
+                                placeholder="192.168.0.0"
+                                value={rule.network}
+                                onChange={(e) => {
+                                  const updated = [...vpnFirewallRules];
+                                  updated[idx] = { ...rule, network: e.target.value };
+                                  setVpnFirewallRules(updated);
+                                }}
+                              />
+                              <span className="text-muted-foreground">/</span>
+                              <Input
+                                className="w-16"
+                                placeholder="24"
+                                value={rule.prefix}
+                                onChange={(e) => {
+                                  const updated = [...vpnFirewallRules];
+                                  updated[idx] = { ...rule, prefix: e.target.value };
+                                  setVpnFirewallRules(updated);
+                                }}
+                              />
+                            </div>
+
+                            <Label className="text-xs">Ports</Label>
+                            <Input
+                              placeholder="* (all) or 80,443"
+                              value={rule.ports}
+                              onChange={(e) => {
+                                const updated = [...vpnFirewallRules];
+                                updated[idx] = { ...rule, ports: e.target.value };
+                                setVpnFirewallRules(updated);
+                              }}
+                            />
+
+                            <Label className="text-xs">Priority</Label>
+                            <Input
+                              placeholder="0"
+                              value={rule.priority}
+                              onChange={(e) => {
+                                const updated = [...vpnFirewallRules];
+                                updated[idx] = { ...rule, priority: e.target.value };
+                                setVpnFirewallRules(updated);
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+
+                      {vpnFirewallRules.length > 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          Rules are evaluated in priority order (lowest number first). First matching rule wins. If rules exist but none match, traffic is blocked by default.
+                        </p>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Manual Role Builder */}
             {roleType === "custom" && (
-              <div className="space-y-2">
-                <Label htmlFor="roleName">Role Name</Label>
-                <Input
-                  id="roleName"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  placeholder="e.g., developer"
-                  required
-                />
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label>Role Prefix</Label>
+                  <div className="flex gap-2 flex-wrap">
+                    {(["none", "ssh", "dest", "vpn"] as const).map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        className={`px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${customPrefix === p ? "bg-primary text-primary-foreground border-primary" : "bg-background border-border text-muted-foreground hover:text-foreground"}`}
+                        onClick={() => { setCustomPrefix(p); setCustomGateway(""); setCustomBackend(""); setCustomUsername(""); }}
+                      >
+                        {p === "none" ? "None" : `${p}:`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {customPrefix !== "none" && (
+                  <div className="space-y-2">
+                    <Label>Gateway ID</Label>
+                    <Input
+                      value={customGateway}
+                      onChange={(e) => setCustomGateway(e.target.value)}
+                      placeholder="e.g., SashasGateway"
+                    />
+                  </div>
+                )}
+
+                {customPrefix !== "none" && customPrefix !== "vpn" && (
+                  <div className="space-y-2">
+                    <Label>Backend / Endpoint</Label>
+                    <Input
+                      value={customBackend}
+                      onChange={(e) => setCustomBackend(e.target.value)}
+                      placeholder="e.g., MyServer"
+                    />
+                  </div>
+                )}
+
+                {customPrefix !== "none" && customPrefix !== "vpn" && (
+                  <div className="space-y-2">
+                    <Label>Username (optional)</Label>
+                    <Input
+                      value={customUsername}
+                      onChange={(e) => setCustomUsername(e.target.value)}
+                      placeholder="e.g., Administrator"
+                    />
+                  </div>
+                )}
+
+                {customPrefix === "none" ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="roleName">Role Name</Label>
+                    <Input
+                      id="roleName"
+                      value={formData.name}
+                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                      placeholder="e.g., developer"
+                      required
+                    />
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground font-mono">
+                    Preview: {customPrefix}:{customGateway || "<gateway>"}{customPrefix !== "vpn" ? `:${customBackend || "<backend>"}` : ""}{customUsername ? `:${customUsername}` : ""}
+                  </p>
+                )}
               </div>
             )}
 
@@ -1324,7 +1687,8 @@ export default function AdminRoles() {
                 disabled={
                   createMutation.isPending ||
                   isCreatingPolicy ||
-                  (roleType === "endpoint" && (!selectedGatewayId || !selectedBackendName))
+                  (roleType === "endpoint" && (!selectedGatewayId || !selectedBackendName)) ||
+                  (roleType === "vpn" && !vpnGatewayId)
                 }
               >
                 {createMutation.isPending || isCreatingPolicy ? "Creating..." : "Create Role"}
