@@ -63,6 +63,78 @@ impl StunRegistration {
     }
 }
 
+/// Allocate a TURN relay on behalf of the gateway so VPN clients behind
+/// port-restricted NAT can reach the gateway through the relay.
+/// Returns the TURN relay address that the client should connect to.
+async fn allocate_gateway_turn_relay(
+    turn_server: &str,
+    turn_secret: &str,
+    gateway_id: &str,
+    client_addr: std::net::SocketAddr,
+    opts: Arc<StunRegistrationOptions>,
+) -> Result<std::net::SocketAddr, String> {
+    use crate::quic::turn_client;
+
+    let (username, credential) = turn_client::generate_credentials(turn_secret, gateway_id);
+
+    let turn_socket = Arc::new(
+        tokio::net::UdpSocket::bind("0.0.0.0:0").await
+            .map_err(|e| format!("TURN socket bind: {e}"))?
+    );
+
+    let allocation = turn_client::allocate(
+        turn_socket.clone(),
+        turn_server,
+        &username,
+        &credential,
+        client_addr,
+    ).await?;
+
+    let relay_addr = allocation.relay_addr();
+    tracing::info!("[QUIC] Gateway TURN relay allocated: {relay_addr}");
+
+    // Start local UDP proxy: quinn server ↔ ChannelData ↔ TURN server ↔ client
+    let (proxy_addr, _shutdown_tx) = turn_client::start_turn_proxy(allocation).await?;
+    tracing::info!("[QUIC] Gateway TURN proxy on {proxy_addr}");
+
+    // Create a quinn SERVER endpoint on the proxy address to accept VPN connections
+    let (server_config, _cert_hash) = crate::quic::transport::make_server_config();
+    let endpoint = quinn::Endpoint::server(server_config, proxy_addr)
+        .map_err(|e| format!("QUIC TURN server endpoint: {e}"))?;
+
+    // Spawn accept loop for connections through this TURN relay
+    let opts_clone = Arc::new(opts.clone());
+    tokio::spawn(async move {
+        while let Some(incoming) = endpoint.accept().await {
+            let opts = opts_clone.clone();
+            tokio::spawn(async move {
+                match incoming.await {
+                    Ok(conn) => {
+                        let remote = conn.remote_address();
+                        tracing::info!("[QUIC] VPN client connected via TURN relay from {remote}");
+                        let handler = crate::quic::peer_handler::QuicPeerHandler::new(
+                            crate::quic::peer_handler::QuicPeerHandlerOptions {
+                                listen_port: opts.listen_port,
+                                use_tls: opts.use_tls,
+                                gateway_id: opts.gateway_id.clone(),
+                                send_signaling: tokio::sync::mpsc::unbounded_channel().0,
+                                backends: opts.backends.clone(),
+                                auth: opts.auth.clone(),
+                                vpn_state: opts.vpn_state.clone(),
+                            },
+                        );
+                        handler.handle_connection(conn, remote.to_string()).await;
+                    }
+                    Err(e) => tracing::error!("[QUIC] TURN relay VPN connection failed: {e}"),
+                }
+            });
+        }
+    });
+
+    // Return the external relay address that the client should connect to
+    Ok(relay_addr)
+}
+
 /// Get all non-loopback IPv4 LAN addresses with the given port.
 fn get_local_addresses(port: u16) -> Vec<String> {
     let mut addrs = Vec::new();
@@ -454,6 +526,39 @@ async fn connect_and_run(
                                         tracing::info!("[STUN] Punching client {from_id} at {target}");
                                         for _ in 0..5 {
                                             let _ = punch_socket.send_to(b"punch", target);
+                                        }
+
+                                        // Allocate TURN relay for this client so they can reach us
+                                        // through TURN even behind port-restricted NAT
+                                        if let (Some(turn_server), Some(turn_secret)) =
+                                            (options.turn_server.as_deref(), options.turn_secret.as_deref())
+                                        {
+                                            let from_id = from_id.to_string();
+                                            let turn_server = turn_server.to_string();
+                                            let turn_secret = turn_secret.to_string();
+                                            let gateway_id = options.gateway_id.clone();
+                                            let signaling_tx = signaling_tx.clone();
+                                            let opts = options.clone();
+                                            tokio::spawn(async move {
+                                                match allocate_gateway_turn_relay(
+                                                    &turn_server, &turn_secret, &gateway_id, target, opts,
+                                                ).await {
+                                                    Ok(relay_addr) => {
+                                                        tracing::info!("[QUIC] TURN relay for client {from_id}: {relay_addr}");
+                                                        // Tell client they can reach us via this relay
+                                                        let _ = signaling_tx.send(json!({
+                                                            "type": "quic_address",
+                                                            "targetId": from_id,
+                                                            "fromId": gateway_id,
+                                                            "address": relay_addr.to_string(),
+                                                            "turnRelay": true,
+                                                        }));
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!("[QUIC] Failed to allocate TURN relay for {from_id}: {e}");
+                                                    }
+                                                }
+                                            });
                                         }
                                     }
                                 }
