@@ -93,41 +93,39 @@ async fn allocate_gateway_turn_relay(
     let relay_addr = allocation.relay_addr();
     tracing::info!("[QUIC] Gateway TURN relay allocated: {relay_addr}");
 
-    // Start local UDP proxy: quinn server ↔ ChannelData ↔ TURN server ↔ client
+    // The TURN proxy normally forwards between a local quinn client and the TURN server.
+    // For the gateway, we need the reverse: forward between the TURN server and
+    // the existing quinn server endpoint on the QUIC port.
+    // We use start_turn_proxy which creates 127.0.0.1:X, then bridge it to 127.0.0.1:quic_port
+    // so the existing quinn endpoint receives the client's QUIC packets.
     let (proxy_addr, _shutdown_tx) = turn_client::start_turn_proxy(allocation).await?;
     tracing::info!("[QUIC] Gateway TURN proxy on {proxy_addr}");
 
-    // Create a quinn SERVER endpoint on the proxy address to accept VPN connections
-    let (server_config, _cert_hash) = crate::quic::transport::make_server_config();
-    let endpoint = quinn::Endpoint::server(server_config, proxy_addr)
-        .map_err(|e| format!("QUIC TURN server endpoint: {e}"))?;
+    // Bridge: forward UDP between proxy and the main QUIC endpoint
+    let quic_local: std::net::SocketAddr = format!("127.0.0.1:{}", opts.quic_port).parse().unwrap();
+    let bridge = Arc::new(
+        tokio::net::UdpSocket::bind("127.0.0.1:0").await
+            .map_err(|e| format!("Bridge socket: {e}"))?
+    );
 
-    // Spawn accept loop for connections through this TURN relay
-    let opts_clone = Arc::new(opts.clone());
+    // proxy → bridge → quinn server
     tokio::spawn(async move {
-        while let Some(incoming) = endpoint.accept().await {
-            let opts = opts_clone.clone();
-            tokio::spawn(async move {
-                match incoming.await {
-                    Ok(conn) => {
-                        let remote = conn.remote_address();
-                        tracing::info!("[QUIC] VPN client connected via TURN relay from {remote}");
-                        let handler = crate::quic::peer_handler::QuicPeerHandler::new(
-                            crate::quic::peer_handler::QuicPeerHandlerOptions {
-                                listen_port: opts.listen_port,
-                                use_tls: opts.use_tls,
-                                gateway_id: opts.gateway_id.clone(),
-                                send_signaling: tokio::sync::mpsc::unbounded_channel().0,
-                                backends: opts.backends.clone(),
-                                auth: opts.auth.clone(),
-                                vpn_state: opts.vpn_state.clone(),
-                            },
-                        );
-                        handler.handle_connection(conn, remote.to_string()).await;
+        let mut buf = vec![0u8; 65536];
+        let proxy = proxy_addr;
+        let quinn = quic_local;
+        // Connect to proxy so it knows our address
+        let _ = bridge.send_to(b"init", proxy).await;
+        loop {
+            match bridge.recv_from(&mut buf).await {
+                Ok((n, from)) if n > 0 => {
+                    if from == proxy {
+                        let _ = bridge.send_to(&buf[..n], quinn).await;
+                    } else {
+                        let _ = bridge.send_to(&buf[..n], proxy).await;
                     }
-                    Err(e) => tracing::error!("[QUIC] TURN relay VPN connection failed: {e}"),
                 }
-            });
+                _ => break,
+            }
         }
     });
 
