@@ -34,10 +34,11 @@ The result: enterprise-grade SSH access control without any private keys to mana
 - **Quorum-based RBAC, zero-knowledge OIDC login** with TideCloak - no passwords, no keys
 - **Programmable policy enforcement** with Forseti contracts for SSH access
 - **Admin UX**: servers, users, roles, policy templates, change requests, sessions, logs
-- **Browser-based RDP** - full Windows remote desktop in a browser tab via [IronRDP](https://github.com/Devolutions/IronRDP) WASM. No client install, no ports to open, no VPN. See [RDP Architecture](bridges/punchd-bridge/docs/ARCHITECTURE.md#rdp-remote-desktop-ironrdp-wasm--rdcleanpath).
-- **P2P DataChannel transport** - automatic upgrade from HTTP relay to direct peer-to-peer WebRTC, with a Service Worker that silently reroutes all browser fetches through the encrypted DataChannel. See [Connection Lifecycle](bridges/punchd-bridge/docs/ARCHITECTURE.md#connection-lifecycle).
-- **Signal server** (`signal-server/`) - coordinates P2P connections between browsers and gateways via WebSocket signaling (SDP/ICE), relays HTTP traffic before DataChannel is ready, and generates ephemeral TURN credentials. Deployed with a coturn sidecar for STUN NAT discovery and TURN relay fallback. See [Architecture](bridges/punchd-bridge/docs/ARCHITECTURE.md#system-overview).
-- **Multi-backend routing** (`bridges/punchd-bridge`) - proxy to multiple HTTP backends and RDP servers from a single gateway. See [Multi-Backend Routing](bridges/punchd-bridge/docs/ARCHITECTURE.md#multi-backend-routing).
+- **Browser-based RDP** - full Windows remote desktop in a browser tab via [IronRDP](https://github.com/sashyo/IronRDP/tree/feat/ironrdp-tls-wasm) WASM (forked to add e2e TLS in WASM via WebCrypto). No client install, no ports to open, no VPN. Passwordless login via TideSSP EdDSA certificates.
+- **QUIC VPN** - native VPN client with TUN adapter, NAT hole-punching (LAN → direct → TURN relay fallback), per-user firewall rules from JWT roles, auto LAN route detection
+- **P2P transport** - automatic upgrade from HTTP relay to direct peer-to-peer WebRTC DataChannels (browsers) or QUIC P2P (native VPN), with TURN relay fallback for restrictive NATs
+- **Signal server** (`signal-server-rs/`) - Rust signaling hub coordinating P2P connections via WebSocket (SDP/ICE), HTTP relay, gateway registry, and ephemeral TURN credential generation. Deployed with a coturn sidecar for STUN/TURN.
+- **Multi-backend routing** (`bridges/punchd-bridge-rs/`) - proxy to multiple HTTP backends and RDP servers from a single gateway, with per-backend auth flags (eddsa, noauth, stripauth)
 
 ## Downloads
 
@@ -45,11 +46,12 @@ Each [release](../../releases) includes pre-built binaries and installers:
 
 | Artifact | Platform | Description |
 |----------|----------|-------------|
-| `ssh-bridge-linux-x64.tar.gz` | Linux | **SSH Bridge** — WebSocket-to-TCP tunnel for browser SSH sessions. Deploy on any server with SSH access to your targets. Verifies JWTs against TideCloak, pipes SSH traffic between browser and server. |
-| `ssh-bridge-windows-x64.tar.gz` | Windows | SSH Bridge for Windows (same as above, runs as a system tray app). First-run setup wizard auto-configures from `tidecloak.json`. |
-| `punchd-gateway-linux-x64.tar.gz` | Linux | **Punch'd Gateway** — NAT-traversing reverse proxy. Runs on your private network, connects outbound to the signal server, and proxies HTTP/RDP traffic to local backends. Handles TideCloak OIDC auth, WebRTC DataChannel, and TURN fallback. |
-| `punchd-gateway-windows-x64.tar.gz` | Windows | Punch'd Gateway for Windows (same as above). |
-| `TideSSP.msi` | Windows | **TideSSP Installer** — Windows Security Support Provider for passwordless RDP. Installs `TideSSP.dll` and `TideSubAuth.dll` to System32, registers them as LSA security packages, and copies your TideCloak config. Reboot required after install. |
+| `PunchdEndpoint.msi` | Windows | **PunchdEndpoint** — Combined installer: TideSSP (passwordless RDP) + Punchd Gateway (Rust, runs as Windows service). Includes setup wizard for tidecloak.json and gateway.toml. Reboot required. |
+| `punchd-gateway-linux.deb` | Linux | **Punchd Gateway** — NAT-traversing reverse proxy + QUIC VPN gateway. Runs on your private network, connects to signal server, proxies HTTP/RDP/VPN to local backends. |
+| `punchd-gateway-macos-x64` | macOS x64 | Punchd Gateway for macOS Intel |
+| `punchd-gateway-macos-arm64` | macOS | Punchd Gateway for macOS Apple Silicon |
+| `punchd-vpn.msi` | Windows | **Punchd VPN** — Native VPN client with WebView2 DPoP auth, system tray, and auto-reconnect. |
+| `ssh-bridge-linux-x64.tar.gz` | Linux | **SSH Bridge** (Rust) — WebSocket-to-TCP tunnel for browser SSH sessions. |
 
 All components require a `tidecloak.json` exported from your TideCloak admin console. See the [Deployment Guide](docs/DEPLOYMENT.md) for step-by-step setup.
 
@@ -57,14 +59,13 @@ All components require a `tidecloak.json` exported from your TideCloak admin con
 
 ```
 keylessh/
-├── client/                  # React UI (xterm.js, SSH client, SFTP browser)
+├── client/                  # React UI (xterm.js, SSH client, SFTP browser, admin)
 ├── server/                  # Express API + WebSocket bridge + SQLite
 ├── shared/                  # Shared types + schema
-├── signal-server/           # P2P signaling + HTTP relay + STUN/TURN
+├── signal-server-rs/        # Rust signal server (signaling, HTTP relay, TURN creds)
 ├── bridges/
 │   ├── ssh-bridge-rs/       # Rust SSH bridge (WS↔TCP tunnel, JWT auth)
-│   ├── punchd-bridge/       # NAT-traversing HTTP reverse proxy (Node.js)
-│   ├── punchd-bridge-rs/    # NAT-traversing HTTP reverse proxy (Rust)
+│   ├── punchd-bridge-rs/    # Punchd Gateway (Rust) — WebRTC, QUIC VPN, HTTP proxy
 │   └── tcp-bridge/          # Stateless WS↔TCP forwarder (optional)
 ├── tide-ssp/                # Windows SSP for passwordless RDP (C + WiX MSI)
 ├── docs/                    # Architecture, deployment, developer guides
@@ -79,8 +80,9 @@ keylessh/
 
 ### Component docs
 
-- [Punch'd Bridge](bridges/punchd-bridge/docs/ARCHITECTURE.md) — [connection lifecycle](bridges/punchd-bridge/docs/ARCHITECTURE.md#connection-lifecycle) (portal → relay → P2P → SW takeover), [RDP/RDCleanPath](bridges/punchd-bridge/docs/ARCHITECTURE.md#rdp-remote-desktop-ironrdp-wasm--rdcleanpath), [multi-backend routing](bridges/punchd-bridge/docs/ARCHITECTURE.md#multi-backend-routing), [DataChannel messages](bridges/punchd-bridge/docs/ARCHITECTURE.md#datachannel-messages-gateway--browser), [API endpoints](bridges/punchd-bridge/docs/ARCHITECTURE.md#signal-server-api-routes), [security & rate limits](bridges/punchd-bridge/docs/ARCHITECTURE.md#security), [sequence diagrams](bridges/punchd-bridge/docs/diagrams/)
-- [Signal Server](signal-server/deploy.sh) — WebSocket signaling (SDP/ICE), HTTP relay, gateway registry, TURN credential generation, coturn sidecar for STUN/TURN
+- [Punchd Gateway (Rust)](bridges/punchd-bridge-rs/README.md) — WebRTC + QUIC VPN gateway, multi-backend routing, RDCleanPath, VPN firewall, TURN relay
+- [Signal Server (Rust)](signal-server-rs/deploy.sh) — WebSocket signaling, HTTP relay, gateway registry, TURN credential generation, coturn sidecar
+- [TideSSP](tide-ssp/README.md) — Windows Security Support Provider for passwordless RDP via EdDSA JWT
 
 ## Quickstart (Local Dev)
 
@@ -159,7 +161,7 @@ sudo docker run -d \
 
 ### Step 2: Configure KeyleSSH
 
-1. Go to [Servers](http://localhost:3000/admin/servers) > `Add Server`
+1. Go to Dashboard and select Servers tab > `Add Server`
    - Server Name: _myserver_
    - Host: _localhost_
    - Port: _2222_
@@ -167,21 +169,22 @@ sudo docker run -d \
    - Click `Add Server` — status should show `Online`
 
 2. Go to [Roles](http://localhost:3000/admin/roles) > `Add Role`
-   - Select `SSH` role type
-   - Role Name: user (auto-changes to `ssh:user`)
-   - Click `Create Role`
+   - Select `Manual` tab
+   - Select `SSH` prefix
+   - Update Username: user (auto-changes to `ssh:user`)
+   - Scroll down and Click `Create Role`
 
-3. Go to [Users](http://localhost:3000/admin/users)
+4. Go to [Users](http://localhost:3000/admin/users)
    - Click the `Action` button for the default admin user
    - Click the `ssh:user` tag in `Available Roles` to move it to `Assigned Roles`
    - Click `Save Changes`
 
-4. Go to [Change Requests](http://localhost:3000/admin/approvals)
+5. Go to [Change Requests](http://localhost:3000/admin/approvals)
    - Click `Review` for the user admin > confirm with `Y` > `Submit Approvals` > `Commit`
    - Switch to the `Policies` tab (click `Refresh` if empty)
    - Click `Review` for `ssh:user` > confirm with `Y` > `Submit Approvals` > `Commit`
 
-5. Expand your user profile (bottom-left icon) > click `Restart session`
+6. Expand your user profile (bottom-left icon) > click `Restart session`
 
 ### Step 3: Get the public key
 
