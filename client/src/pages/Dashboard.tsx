@@ -1200,7 +1200,7 @@ export default function Dashboard() {
           <TabsTrigger value="services" className="gap-1.5">
             <Server className="h-4 w-4" />
             Services
-            {allServices.length > 0 && <Badge variant="secondary" className="ml-1 text-xs">{allServices.length}</Badge>}
+            {(allServices.length + (servers?.length || 0)) > 0 && <Badge variant="secondary" className="ml-1 text-xs">{allServices.length + (servers?.length || 0)}</Badge>}
           </TabsTrigger>
           {canAccessGateways && (
             <TabsTrigger value="gateways" className="gap-1.5">
@@ -1315,9 +1315,12 @@ export default function Dashboard() {
               <ServerCardSkeleton key={i} />
             ))}
           </div>
-        ) : filteredServices.length > 0 ? (
+        ) : (filteredServices.length > 0 || (servers && servers.length > 0)) ? (
           viewMode === "grid" ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {(servers || []).map((server) => (
+                <ServerCard key={`local-${server.id}`} server={server} sshBlocked={isSshBlocked} />
+              ))}
               {filteredServices.map((item) =>
                 item.kind === "ssh" ? (
                   <GatewayEndpointCard key={`ssh-${item.endpoint.id}-${item.backend.name}`} endpoint={item.endpoint} backend={item.backend} />
