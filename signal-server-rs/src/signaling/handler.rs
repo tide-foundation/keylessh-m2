@@ -230,6 +230,7 @@ async fn handle_signaling(socket: WebSocket, client_ip: String, state: AppState)
                             "address": address,
                             "certHash": parsed["certHash"],
                             "localAddresses": parsed["localAddresses"],
+                            "turnRelay": parsed["turnRelay"],
                             "relayUrl": format!("{}:{}", state.config.relay_host, state.config.relay_port),
                             "gatewayId": from,
                             "nativeAddress": native_address,
