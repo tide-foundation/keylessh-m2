@@ -472,12 +472,14 @@ export default function AdminRoles() {
     } else {
       // Custom / Manual role
       if (customPrefix !== "none") {
-        const parts = [customPrefix, customGateway.trim()];
-        if (customPrefix !== "vpn" && customBackend.trim()) {
-          parts.push(customBackend.trim());
-        }
-        if (customPrefix !== "vpn" && customUsername.trim()) {
-          parts.push(customUsername.trim());
+        const parts = [customPrefix];
+        if (customGateway.trim()) parts.push(customGateway.trim());
+        if (customPrefix !== "vpn" && customBackend.trim()) parts.push(customBackend.trim());
+        if (customPrefix !== "vpn" && customUsername.trim()) parts.push(customUsername.trim());
+        // If only prefix + no fields, require at least one value
+        if (parts.length === 1 && customPrefix === "ssh") {
+          toast({ title: "At least a username is required for SSH roles", variant: "destructive" });
+          return;
         }
         name = parts.join(":");
       } else {
@@ -1396,7 +1398,7 @@ export default function AdminRoles() {
 
                 {customPrefix !== "none" && (
                   <div className="space-y-2">
-                    <Label>Gateway ID</Label>
+                    <Label>Gateway ID <span className="text-muted-foreground font-normal">(optional)</span></Label>
                     <Input
                       value={customGateway}
                       onChange={(e) => setCustomGateway(e.target.value)}
@@ -1407,7 +1409,7 @@ export default function AdminRoles() {
 
                 {customPrefix !== "none" && customPrefix !== "vpn" && (
                   <div className="space-y-2">
-                    <Label>Backend / Endpoint</Label>
+                    <Label>Backend / Endpoint <span className="text-muted-foreground font-normal">(optional)</span></Label>
                     <Input
                       value={customBackend}
                       onChange={(e) => setCustomBackend(e.target.value)}
@@ -1418,7 +1420,7 @@ export default function AdminRoles() {
 
                 {customPrefix !== "none" && customPrefix !== "vpn" && (
                   <div className="space-y-2">
-                    <Label>Username (optional)</Label>
+                    <Label>Username <span className="text-muted-foreground font-normal">(optional)</span></Label>
                     <Input
                       value={customUsername}
                       onChange={(e) => setCustomUsername(e.target.value)}
@@ -1440,7 +1442,7 @@ export default function AdminRoles() {
                   </div>
                 ) : (
                   <p className="text-xs text-muted-foreground font-mono">
-                    Preview: {customPrefix}:{customGateway || "<gateway>"}{customPrefix !== "vpn" ? `:${customBackend || "<backend>"}` : ""}{customUsername ? `:${customUsername}` : ""}
+                    Preview: {[customPrefix, customGateway || undefined, (customPrefix !== "vpn" && customBackend) || undefined, (customPrefix !== "vpn" && customUsername) || undefined].filter(Boolean).join(":")}
                   </p>
                 )}
               </div>
