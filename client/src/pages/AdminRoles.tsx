@@ -472,12 +472,14 @@ export default function AdminRoles() {
     } else {
       // Custom / Manual role
       if (customPrefix !== "none") {
-        const parts = [customPrefix, customGateway.trim()];
-        if (customPrefix !== "vpn" && customBackend.trim()) {
-          parts.push(customBackend.trim());
-        }
-        if (customPrefix !== "vpn" && customUsername.trim()) {
-          parts.push(customUsername.trim());
+        const parts = [customPrefix];
+        if (customGateway.trim()) parts.push(customGateway.trim());
+        if (customPrefix !== "vpn" && customBackend.trim()) parts.push(customBackend.trim());
+        if (customPrefix !== "vpn" && customUsername.trim()) parts.push(customUsername.trim());
+        // Username is required for SSH and dest roles
+        if ((customPrefix === "ssh" || customPrefix === "dest") && !customUsername.trim()) {
+          toast({ title: "Username is required", variant: "destructive" });
+          return;
         }
         name = parts.join(":");
       } else {
@@ -508,11 +510,11 @@ export default function AdminRoles() {
     createMutation.mutate({
       name,
       description: formData.description || undefined,
-      policy: roleType === "ssh" && policyConfig.enabled ? policyConfig : undefined,
+      policy: (roleType === "ssh" || (roleType === "custom" && customPrefix === "ssh")) && policyConfig.enabled ? policyConfig : undefined,
     });
 
     // If policy is enabled, create the PolicySignRequest with Forseti contract
-    if (roleType === "ssh" && policyConfig.enabled) {
+    if ((roleType === "ssh" || (roleType === "custom" && customPrefix === "ssh")) && policyConfig.enabled) {
       setIsCreatingPolicy(true);
       try {
         let policyRequest;
@@ -1396,7 +1398,7 @@ export default function AdminRoles() {
 
                 {customPrefix !== "none" && (
                   <div className="space-y-2">
-                    <Label>Gateway ID</Label>
+                    <Label>Gateway ID <span className="text-muted-foreground font-normal">(optional)</span></Label>
                     <Input
                       value={customGateway}
                       onChange={(e) => setCustomGateway(e.target.value)}
@@ -1407,7 +1409,7 @@ export default function AdminRoles() {
 
                 {customPrefix !== "none" && customPrefix !== "vpn" && (
                   <div className="space-y-2">
-                    <Label>Backend / Endpoint</Label>
+                    <Label>Backend / Endpoint <span className="text-muted-foreground font-normal">(optional)</span></Label>
                     <Input
                       value={customBackend}
                       onChange={(e) => setCustomBackend(e.target.value)}
@@ -1418,7 +1420,7 @@ export default function AdminRoles() {
 
                 {customPrefix !== "none" && customPrefix !== "vpn" && (
                   <div className="space-y-2">
-                    <Label>Username (optional)</Label>
+                    <Label>Username</Label>
                     <Input
                       value={customUsername}
                       onChange={(e) => setCustomUsername(e.target.value)}
@@ -1440,7 +1442,7 @@ export default function AdminRoles() {
                   </div>
                 ) : (
                   <p className="text-xs text-muted-foreground font-mono">
-                    Preview: {customPrefix}:{customGateway || "<gateway>"}{customPrefix !== "vpn" ? `:${customBackend || "<backend>"}` : ""}{customUsername ? `:${customUsername}` : ""}
+                    Preview: {[customPrefix, customGateway || undefined, (customPrefix !== "vpn" && customBackend) || undefined, (customPrefix !== "vpn" && customUsername) || undefined].filter(Boolean).join(":")}
                   </p>
                 )}
               </div>
@@ -1457,8 +1459,8 @@ export default function AdminRoles() {
               />
             </div>
 
-            {/* Policy Configuration Section - only for SSH roles */}
-            {roleType === "ssh" && (
+            {/* Policy Configuration Section - for SSH roles (both SSH tab and custom with ssh: prefix) */}
+            {(roleType === "ssh" || (roleType === "custom" && customPrefix === "ssh")) && (
               <div className="space-y-4 pt-4 border-t">
                 <div className="flex items-center gap-2">
                   <Shield className="h-4 w-4 text-muted-foreground" />

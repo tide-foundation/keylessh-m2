@@ -173,7 +173,7 @@ export function AppLayout({ children }: AppLayoutProps) {
         }),
       })).filter(group => group.items.length > 0);
     } else {
-      // Hide Punchd gateway tab unless admin or has allowConfigDownload role
+      // Hide Punchd unless admin or has allowConfigDownload role
       if (!canAccessGateways) {
         groups = groups.map(group => ({
           ...group,
