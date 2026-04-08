@@ -476,9 +476,9 @@ export default function AdminRoles() {
         if (customGateway.trim()) parts.push(customGateway.trim());
         if (customPrefix !== "vpn" && customBackend.trim()) parts.push(customBackend.trim());
         if (customPrefix !== "vpn" && customUsername.trim()) parts.push(customUsername.trim());
-        // If only prefix + no fields, require at least one value
-        if (parts.length === 1 && customPrefix === "ssh") {
-          toast({ title: "At least a username is required for SSH roles", variant: "destructive" });
+        // Username is required for SSH and dest roles
+        if ((customPrefix === "ssh" || customPrefix === "dest") && !customUsername.trim()) {
+          toast({ title: "Username is required", variant: "destructive" });
           return;
         }
         name = parts.join(":");
@@ -1420,7 +1420,7 @@ export default function AdminRoles() {
 
                 {customPrefix !== "none" && customPrefix !== "vpn" && (
                   <div className="space-y-2">
-                    <Label>Username <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                    <Label>Username</Label>
                     <Input
                       value={customUsername}
                       onChange={(e) => setCustomUsername(e.target.value)}
