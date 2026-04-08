@@ -161,7 +161,7 @@ sudo docker run -d \
 
 ### Step 2: Configure KeyleSSH
 
-1. Go to [Servers](http://localhost:3000/admin/servers) > `Add Server`
+1. Go to Dashboard and select Servers tab > `Add Server`
    - Server Name: _myserver_
    - Host: _localhost_
    - Port: _2222_
@@ -169,21 +169,22 @@ sudo docker run -d \
    - Click `Add Server` — status should show `Online`
 
 2. Go to [Roles](http://localhost:3000/admin/roles) > `Add Role`
-   - Select `SSH` role type
-   - Role Name: user (auto-changes to `ssh:user`)
-   - Click `Create Role`
+   - Select `Manual` tab
+   - Select `SSH` prefix
+   - Update Username: user (auto-changes to `ssh:user`)
+   - Scroll down and Click `Create Role`
 
-3. Go to [Users](http://localhost:3000/admin/users)
+4. Go to [Users](http://localhost:3000/admin/users)
    - Click the `Action` button for the default admin user
    - Click the `ssh:user` tag in `Available Roles` to move it to `Assigned Roles`
    - Click `Save Changes`
 
-4. Go to [Change Requests](http://localhost:3000/admin/approvals)
+5. Go to [Change Requests](http://localhost:3000/admin/approvals)
    - Click `Review` for the user admin > confirm with `Y` > `Submit Approvals` > `Commit`
    - Switch to the `Policies` tab (click `Refresh` if empty)
    - Click `Review` for `ssh:user` > confirm with `Y` > `Submit Approvals` > `Commit`
 
-5. Expand your user profile (bottom-left icon) > click `Restart session`
+6. Expand your user profile (bottom-left icon) > click `Restart session`
 
 ### Step 3: Get the public key
 
