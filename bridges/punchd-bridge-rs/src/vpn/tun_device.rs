@@ -183,15 +183,27 @@ mod platform {
                 .args(["interface", "ipv4", "set", "subinterface", &config.name, &format!("mtu={mtu_str}"), "store=active"])
                 .status();
 
-            // Don't override the TUN metric — let Windows use the default.
-            // The VPN routes use explicit metrics when installed.
-
-            // Enable forwarding on the TUN interface only.
-            // Note: on Hyper-V Default Switch VMs this may affect NAT.
-            // Use an External Switch if the Default Switch breaks.
-            let _ = std::process::Command::new("netsh")
-                .args(["interface", "ipv4", "set", "interface", &config.name, "forwarding=enabled"])
-                .status();
+            // Enable IP forwarding on the TUN + physical adapters so packets
+            // from VPN clients (10.66.0.x) can be forwarded to LAN destinations.
+            // Skip vEthernet (Hyper-V virtual switches) to avoid breaking NAT.
+            let iface_output = std::process::Command::new("netsh")
+                .args(["interface", "ipv4", "show", "interfaces"])
+                .output();
+            if let Ok(out) = iface_output {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines().skip(3) {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 5 && parts[3] == "connected" {
+                        let iface_name = parts[4..].join(" ");
+                        if iface_name.starts_with("vEthernet") {
+                            continue;
+                        }
+                        let _ = std::process::Command::new("netsh")
+                            .args(["interface", "ipv4", "set", "interface", &iface_name, "forwarding=enabled"])
+                            .status();
+                    }
+                }
+            }
 
             // Firewall rules for VPN subnet (idempotent — netsh ignores duplicates)
             let subnet = format!("{}/{}", {

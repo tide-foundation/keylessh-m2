@@ -838,11 +838,13 @@ static NTSTATUS NTAPI TideSsp_AcceptLsaModeContext(
         /* Decode payload to extract username and expiry */
         const char *payloadB64 = dot1 + 1;
         int payloadB64Len = (int)(dot2 - dot1 - 1);
-        char payloadJson[2048];
+        char payloadJson[8192];
         int payloadLen = base64url_decode(payloadB64, payloadB64Len,
                                           (UCHAR *)payloadJson, sizeof(payloadJson) - 1);
-        if (payloadLen <= 0)
+        if (payloadLen <= 0) {
+            tide_log("JWT payload decode failed (b64len=%d, bufsize=%d)", payloadB64Len, (int)sizeof(payloadJson));
             return SEC_E_INVALID_TOKEN;
+        }
         payloadJson[payloadLen] = '\0';
 
         /* Check token expiry */

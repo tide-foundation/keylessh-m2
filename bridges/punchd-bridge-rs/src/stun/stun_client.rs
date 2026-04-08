@@ -63,6 +63,76 @@ impl StunRegistration {
     }
 }
 
+/// Allocate a TURN relay on behalf of the gateway so VPN clients behind
+/// port-restricted NAT can reach the gateway through the relay.
+/// Returns the TURN relay address that the client should connect to.
+async fn allocate_gateway_turn_relay(
+    turn_server: &str,
+    turn_secret: &str,
+    gateway_id: &str,
+    client_addr: std::net::SocketAddr,
+    opts: Arc<StunRegistrationOptions>,
+) -> Result<std::net::SocketAddr, String> {
+    use crate::quic::turn_client;
+
+    let (username, credential) = turn_client::generate_credentials(turn_secret, gateway_id);
+
+    let turn_socket = Arc::new(
+        tokio::net::UdpSocket::bind("0.0.0.0:0").await
+            .map_err(|e| format!("TURN socket bind: {e}"))?
+    );
+
+    let allocation = turn_client::allocate(
+        turn_socket.clone(),
+        turn_server,
+        &username,
+        &credential,
+        client_addr,
+    ).await?;
+
+    let relay_addr = allocation.relay_addr();
+    tracing::info!("[QUIC] Gateway TURN relay allocated: {relay_addr}");
+
+    // The TURN proxy normally forwards between a local quinn client and the TURN server.
+    // For the gateway, we need the reverse: forward between the TURN server and
+    // the existing quinn server endpoint on the QUIC port.
+    // We use start_turn_proxy which creates 127.0.0.1:X, then bridge it to 127.0.0.1:quic_port
+    // so the existing quinn endpoint receives the client's QUIC packets.
+    let (proxy_addr, _shutdown_tx) = turn_client::start_turn_proxy(allocation).await?;
+    tracing::info!("[QUIC] Gateway TURN proxy on {proxy_addr}");
+
+    // Bridge: forward UDP between proxy and the main QUIC endpoint
+    let quic_local: std::net::SocketAddr = format!("127.0.0.1:{}", opts.quic_port).parse().unwrap();
+    let bridge = Arc::new(
+        tokio::net::UdpSocket::bind("127.0.0.1:0").await
+            .map_err(|e| format!("Bridge socket: {e}"))?
+    );
+
+    // proxy → bridge → quinn server
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        let proxy = proxy_addr;
+        let quinn = quic_local;
+        // Connect to proxy so it knows our address
+        let _ = bridge.send_to(b"init", proxy).await;
+        loop {
+            match bridge.recv_from(&mut buf).await {
+                Ok((n, from)) if n > 0 => {
+                    if from == proxy {
+                        let _ = bridge.send_to(&buf[..n], quinn).await;
+                    } else {
+                        let _ = bridge.send_to(&buf[..n], proxy).await;
+                    }
+                }
+                _ => break,
+            }
+        }
+    });
+
+    // Return the external relay address that the client should connect to
+    Ok(relay_addr)
+}
+
 /// Get all non-loopback IPv4 LAN addresses with the given port.
 fn get_local_addresses(port: u16) -> Vec<String> {
     let mut addrs = Vec::new();
@@ -454,6 +524,39 @@ async fn connect_and_run(
                                         tracing::info!("[STUN] Punching client {from_id} at {target}");
                                         for _ in 0..5 {
                                             let _ = punch_socket.send_to(b"punch", target);
+                                        }
+
+                                        // Allocate TURN relay for this client so they can reach us
+                                        // through TURN even behind port-restricted NAT
+                                        if let (Some(turn_server), Some(turn_secret)) =
+                                            (options.turn_server.as_deref(), options.turn_secret.as_deref())
+                                        {
+                                            let from_id = from_id.to_string();
+                                            let turn_server = turn_server.to_string();
+                                            let turn_secret = turn_secret.to_string();
+                                            let gateway_id = options.gateway_id.clone();
+                                            let signaling_tx = signaling_tx.clone();
+                                            let opts = options.clone();
+                                            tokio::spawn(async move {
+                                                match allocate_gateway_turn_relay(
+                                                    &turn_server, &turn_secret, &gateway_id, target, opts,
+                                                ).await {
+                                                    Ok(relay_addr) => {
+                                                        tracing::info!("[QUIC] TURN relay for client {from_id}: {relay_addr}");
+                                                        // Tell client they can reach us via this relay
+                                                        let _ = signaling_tx.send(json!({
+                                                            "type": "quic_address",
+                                                            "targetId": from_id,
+                                                            "fromId": gateway_id,
+                                                            "address": relay_addr.to_string(),
+                                                            "turnRelay": true,
+                                                        }));
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!("[QUIC] Failed to allocate TURN relay for {from_id}: {e}");
+                                                    }
+                                                }
+                                            });
                                         }
                                     }
                                 }
