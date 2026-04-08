@@ -98,7 +98,9 @@ async fn allocate_gateway_turn_relay(
     // the existing quinn server endpoint on the QUIC port.
     // We use start_turn_proxy which creates 127.0.0.1:X, then bridge it to 127.0.0.1:quic_port
     // so the existing quinn endpoint receives the client's QUIC packets.
-    let (proxy_addr, _shutdown_tx) = turn_client::start_turn_proxy(allocation).await?;
+    let (proxy_addr, shutdown_tx) = turn_client::start_turn_proxy(allocation).await?;
+    // Keep the shutdown handle alive so the proxy doesn't exit
+    std::mem::forget(shutdown_tx);
     tracing::info!("[QUIC] Gateway TURN proxy on {proxy_addr}");
 
     // Bridge: forward UDP between proxy and the main QUIC endpoint
