@@ -415,15 +415,15 @@ export default function AdminRoles() {
     e.preventDefault();
     let name: string;
     if (roleType === "ssh") {
+      if (!selectedGatewayId || !selectedBackendName) {
+        toast({ title: "Please select a gateway and SSH backend", variant: "destructive" });
+        return;
+      }
       if (!formData.name.trim()) {
         toast({ title: "SSH username is required", variant: "destructive" });
         return;
       }
-      if (selectedGatewayId && selectedBackendName) {
-        name = `ssh:${selectedGatewayId}:${selectedBackendName}:${formData.name.trim()}`;
-      } else {
-        name = `ssh:${formData.name.trim()}`;
-      }
+      name = `ssh:${selectedGatewayId}:${selectedBackendName}:${formData.name.trim()}`;
     } else if (roleType === "endpoint") {
       if (!selectedGatewayId || !selectedBackendName) {
         toast({ title: "Please select a gateway and backend", variant: "destructive" });
@@ -1063,16 +1063,16 @@ export default function AdminRoles() {
             {roleType === "ssh" && (
               <div className="space-y-3">
                 <div className="space-y-2">
-                  <Label>Gateway <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Label>Gateway</Label>
                   <Select
                     value={selectedGatewayId}
                     onValueChange={(v) => {
-                      setSelectedGatewayId(v === "_clear" ? "" : v);
+                      setSelectedGatewayId(v);
                       setSelectedBackendName("");
                     }}
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Any gateway (embedded bridge)" />
+                      <SelectValue placeholder="Select gateway" />
                     </SelectTrigger>
                     <SelectContent>
                       {(gatewayEndpoints || []).filter(g => g.backends?.some(b => b.protocol === "ssh")).map((gw) => (
