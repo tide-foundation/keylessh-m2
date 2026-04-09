@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package Name="PunchdGateway"
+           Manufacturer="Tide Foundation"
+           Version="1.0.0.0"
+           UpgradeCode="A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C5D"
+           Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of PunchdGateway is already installed."
+                  AllowSameVersionUpgrades="yes"
+                  Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Launch Condition="Privileged" Message="This installer requires administrator privileges." />
+
+    <Property Id="REINSTALLMODE" Value="amus" Secure="yes" />
+
+    <!-- ═══════════ Directory layout ═══════════ -->
+
+    <!-- Punchd Gateway → Program Files\PunchdGateway -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="PUNCHDFOLDER" Name="PunchdGateway">
+        <Component Id="PunchdGateway_EXE" Guid="F1A2B3C4-D5E6-4F7A-8B9C-0D1E2F3A4B5C">
+          <File Id="punchd_bridge_rs.exe" Source="!(bindpath.PunchdDir)\punchd-bridge-rs.exe" KeyPath="yes" />
+          <RemoveFile Id="RemoveWintunDll" Name="wintun.dll" On="uninstall" />
+
+          <!-- Native Windows service -->
+          <ServiceInstall Id="PunchdGatewayService"
+                          Name="PunchdGateway"
+                          DisplayName="Punchd Gateway"
+                          Description="Punchd Gateway - NAT-traversing reverse proxy with QUIC VPN and DPoP authentication"
+                          Type="ownProcess"
+                          Start="auto"
+                          ErrorControl="normal" />
+          <ServiceControl Id="PunchdGatewayControl"
+                          Name="PunchdGateway"
+                          Start="install"
+                          Stop="both"
+                          Remove="uninstall"
+                          Wait="yes" />
+        </Component>
+        <Directory Id="PUNCHDLOGSFOLDER" Name="logs" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- ProgramData\punchd-gateway config directory -->
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="PunchdGatewayDataDir" Name="punchd-gateway">
+        <Component Id="GatewayConfigDirectory" Guid="B2C3D4E5-F6A7-4B8C-9D0E-1F2A3B4C5D6E">
+          <CreateFolder />
+          <RemoveFolder Id="RemoveGatewayDataDir" On="uninstall" />
+          <RegistryValue
+            Root="HKLM"
+            Key="Software\Tide\PunchdGateway"
+            Name="ConfigDir"
+            Type="string"
+            Value="[PunchdGatewayDataDir]"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Complete" Title="PunchdGateway" Level="1">
+      <ComponentRef Id="PunchdGateway_EXE" />
+      <ComponentRef Id="GatewayConfigDirectory" />
+    </Feature>
+
+    <!-- ═══════════ Installer UI ═══════════ -->
+    <UI>
+      <TextStyle Id="TitleFont" FaceName="Tahoma" Size="10" Bold="yes" />
+      <TextStyle Id="BodyFont" FaceName="Tahoma" Size="8" />
+
+      <Dialog Id="WelcomeDlg" Width="370" Height="270" Title="Punchd Gateway Setup">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Welcome to Punchd Gateway Setup" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="60"
+                 Text="{\BodyFont}This will install the Punchd Gateway as a Windows service. The gateway provides NAT-traversing reverse proxy with QUIC VPN, WebRTC, and TideCloak OIDC authentication. Place your gateway.toml and tidecloak.json in ProgramData\punchd-gateway after installation." />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+                 Default="yes" Text="Install">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="CancelDlg" Width="260" Height="85" Title="Cancel Setup">
+        <Control Id="Text" Type="Text" X="48" Y="15" Width="194" Height="30"
+                 Text="{\BodyFont}Are you sure you want to cancel?" />
+        <Control Id="Yes" Type="PushButton" X="72" Y="57" Width="56" Height="17"
+                 Text="Yes">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+        <Control Id="No" Type="PushButton" X="132" Y="57" Width="56" Height="17"
+                 Cancel="yes" Default="yes" Text="No">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="ExitDlg" Width="370" Height="270" Title="Punchd Gateway Setup Complete">
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="330" Height="20"
+                 Text="{\TitleFont}Installation Complete" />
+        <Control Id="Desc" Type="Text" X="20" Y="50" Width="330" Height="70"
+                 Text="{\BodyFont}Punchd Gateway has been installed as a Windows service. Copy your gateway.toml and tidecloak.json to C:\ProgramData\punchd-gateway\ then restart the service." />
+        <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Default="yes" Cancel="yes" Text="Finish">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <InstallUISequence>
+        <Show Dialog="WelcomeDlg" Before="ExecuteAction" Condition="NOT Installed" />
+        <Show Dialog="ExitDlg" After="ExecuteAction" />
+      </InstallUISequence>
+    </UI>
+
+    <InstallExecuteSequence>
+      <ScheduleReboot After="InstallFinalize" Condition="0" />
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>
