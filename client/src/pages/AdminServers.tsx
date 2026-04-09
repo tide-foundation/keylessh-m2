@@ -38,7 +38,7 @@ import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { Plus, Pencil, Trash2, Server, Search, AlertCircle, Video, Loader2, CheckCircle, XCircle, Wifi, KeyRound, Copy, Check } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { Server as ServerType, ServerStatus, Bridge } from "@shared/schema";
-import { api, testBridgeConnection, getBridgeWebSocketUrl } from "@/lib/api";
+import { api, testBridgeConnection, getBridgeWebSocketUrl, type GatewayEndpoint } from "@/lib/api";
 import { base64UrlToBytes, formatOpenSshEd25519PublicKey } from "@/lib/sshClient";
 import { useAuth, useAuthConfig } from "@/contexts/AuthContext";
 import { UpgradeBanner } from "@/components/UpgradeBanner";
@@ -131,6 +131,7 @@ function ServerForm({
   onCancel: () => void;
   isLoading: boolean;
   bridges?: Bridge[];
+  gateways?: GatewayEndpoint[];
 }) {
   const [formData, setFormData] = useState<ServerFormData>(initialData || defaultFormData);
   const [testStatus, setTestStatus] = useState<"idle" | "testing" | "success" | "error">("idle");
@@ -251,30 +252,37 @@ function ServerForm({
         />
       </div>
 
-      {bridges && bridges.length > 0 && (
-        <div className="space-y-2">
-          <Label htmlFor="bridgeId">SSH Bridge</Label>
-          <Select
-            value={formData.bridgeId || "_default"}
-            onValueChange={(value) => setFormData({ ...formData, bridgeId: value === "_default" ? "" : value })}
-          >
-            <SelectTrigger data-testid="select-server-bridge">
-              <SelectValue placeholder="Use default bridge" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="_default">Use default bridge</SelectItem>
-              {bridges.filter(b => b.enabled).map((bridge) => (
-                <SelectItem key={bridge.id} value={bridge.id}>
-                  {bridge.name} {bridge.isDefault && "(default)"}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            Select a specific bridge for this server or use the default
-          </p>
-        </div>
-      )}
+      <div className="space-y-2">
+        <Label htmlFor="bridgeId">Connection Method</Label>
+        <Select
+          value={formData.bridgeId || "_default"}
+          onValueChange={(value) => setFormData({ ...formData, bridgeId: value === "_default" ? "" : value })}
+        >
+          <SelectTrigger data-testid="select-server-bridge">
+            <SelectValue placeholder="Embedded bridge (built-in)" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="_default">Embedded bridge (built-in)</SelectItem>
+            {bridges?.filter(b => b.enabled).map((bridge) => (
+              <SelectItem key={bridge.id} value={bridge.id}>
+                {bridge.name} {bridge.isDefault && "(default)"}
+              </SelectItem>
+            ))}
+            {gateways && gateways.length > 0 && (
+              <>
+                {gateways.filter(g => g.online).map((gw) => (
+                  <SelectItem key={`gw-${gw.id}`} value={`gateway:${gw.id}`}>
+                    {gw.displayName || gw.id} (Gateway)
+                  </SelectItem>
+                ))}
+              </>
+            )}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Route SSH through the built-in bridge, an external bridge, or a Punchd gateway
+        </p>
+      </div>
 
       {/* Test Connection Button */}
       <div className="space-y-2">
@@ -402,6 +410,11 @@ export default function AdminServers() {
   const { data: bridges } = useQuery<Bridge[]>({
     queryKey: ["/api/admin/bridges"],
     queryFn: api.admin.bridges.list,
+  });
+
+  const { data: gatewayEndpoints } = useQuery<GatewayEndpoint[]>({
+    queryKey: ["/api/gateway-endpoints"],
+    queryFn: api.gatewayEndpoints.list,
   });
 
   // Check server status through bridge (client-side for external bridges)
@@ -652,6 +665,7 @@ export default function AdminServers() {
                   : undefined
               }
               bridges={bridges}
+              gateways={gatewayEndpoints}
               onSubmit={handleSubmit}
               onCancel={handleCloseDialog}
               isLoading={createMutation.isPending || updateMutation.isPending}
