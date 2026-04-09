@@ -136,6 +136,14 @@ function ServerForm({
   const [testStatus, setTestStatus] = useState<"idle" | "testing" | "success" | "error">("idle");
   const [testMessage, setTestMessage] = useState<string>("");
 
+  // Load local gateways from localStorage (added via Dashboard > Local Gateways)
+  const localGateways = useMemo(() => {
+    try {
+      const raw = localStorage.getItem("keylessh.localGateways.v1");
+      return raw ? JSON.parse(raw) as { id: string; name: string; url: string; online?: boolean }[] : [];
+    } catch { return []; }
+  }, []);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onSubmit(formData);
@@ -251,30 +259,33 @@ function ServerForm({
         />
       </div>
 
-      {bridges && bridges.length > 0 && (
-        <div className="space-y-2">
-          <Label htmlFor="bridgeId">SSH Bridge</Label>
-          <Select
-            value={formData.bridgeId || "_default"}
-            onValueChange={(value) => setFormData({ ...formData, bridgeId: value === "_default" ? "" : value })}
-          >
-            <SelectTrigger data-testid="select-server-bridge">
-              <SelectValue placeholder="Use default bridge" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="_default">Use default bridge</SelectItem>
-              {bridges.filter(b => b.enabled).map((bridge) => (
-                <SelectItem key={bridge.id} value={bridge.id}>
-                  {bridge.name} {bridge.isDefault && "(default)"}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            Select a specific bridge for this server or use the default
-          </p>
-        </div>
-      )}
+      <div className="space-y-2">
+        <Label htmlFor="bridgeId">Connection Method</Label>
+        <Select
+          value={formData.bridgeId || "_default"}
+          onValueChange={(value) => setFormData({ ...formData, bridgeId: value === "_default" ? "" : value })}
+        >
+          <SelectTrigger data-testid="select-server-bridge">
+            <SelectValue placeholder="Embedded bridge (built-in)" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="_default">Embedded bridge (built-in)</SelectItem>
+            {bridges?.filter(b => b.enabled).map((bridge) => (
+              <SelectItem key={bridge.id} value={bridge.id}>
+                {bridge.name} {bridge.isDefault && "(default)"}
+              </SelectItem>
+            ))}
+            {localGateways.map((gw) => (
+              <SelectItem key={`gw-${gw.id}`} value={`gateway:${gw.url}`}>
+                {gw.name || gw.id} (Gateway)
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Route SSH through the built-in bridge or a local Punchd gateway
+        </p>
+      </div>
 
       {/* Test Connection Button */}
       <div className="space-y-2">
@@ -403,6 +414,7 @@ export default function AdminServers() {
     queryKey: ["/api/admin/bridges"],
     queryFn: api.admin.bridges.list,
   });
+
 
   // Check server status through bridge (client-side for external bridges)
   const checkServerViaClient = useCallback(async (server: ServerType) => {

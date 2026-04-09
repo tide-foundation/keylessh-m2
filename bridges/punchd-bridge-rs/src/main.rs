@@ -22,11 +22,20 @@ fn main() {
     // Check if running as a Windows service
     #[cfg(target_os = "windows")]
     {
-        // Try to start as a Windows service first.
-        // If we're launched by SCM, this succeeds and blocks.
-        // If we're launched from a console, this fails and we fall through.
-        if let Ok(()) = gateway_service::run_as_service() {
-            return;
+        // Only try service dispatcher if not explicitly running as console.
+        // Pass --console to skip service mode, or any other args.
+        let args: Vec<String> = std::env::args().collect();
+        let is_console = args.len() > 1;
+        if !is_console {
+            // Try to start as a Windows service.
+            // If launched by SCM, this blocks. From console, it may fail or return immediately.
+            match gateway_service::run_as_service() {
+                Ok(()) => return,
+                Err(e) => {
+                    // Failed to connect to SCM — running from console
+                    eprintln!("Not running as service ({e}), starting in console mode...");
+                }
+            }
         }
     }
 
@@ -67,17 +76,27 @@ async fn run_gateway() {
     // Load config
     let config = config::load_config();
     let tc_config = config::load_tidecloak_config();
-    // Auth
+    // Auth — create from config or a dummy that rejects all tokens (noauth backends still work)
     let extra_issuers = config
         .auth_server_public_url
         .iter()
         .map(|s| s.clone())
         .chain(config.tc_internal_url.iter().map(|s| s.clone()))
         .collect::<Vec<_>>();
-    let auth = Arc::new(auth::tidecloak::TidecloakAuth::new(
-        &tc_config,
-        &extra_issuers,
-    ));
+    let auth = if let Some(ref tc) = tc_config {
+        Arc::new(auth::tidecloak::TidecloakAuth::new(tc, &extra_issuers))
+    } else {
+        // Dummy config with no keys — verify_token always returns None, noauth backends still work
+        let dummy = config::TidecloakConfig {
+            realm: String::new(),
+            auth_server_url: String::new(),
+            resource: String::new(),
+            public_client: None,
+            jwk: config::JwkSet { keys: vec![] },
+            extra: serde_json::Map::new(),
+        };
+        Arc::new(auth::tidecloak::TidecloakAuth::new(&dummy, &[]))
+    };
 
     // TLS
     let tls_cert = if config.https {
@@ -87,9 +106,14 @@ async fn run_gateway() {
     };
 
     // HTTP Proxy
+    let dummy_tc = config::TidecloakConfig {
+        realm: String::new(), auth_server_url: String::new(),
+        resource: String::new(), public_client: None, jwk: config::JwkSet { keys: vec![] }, extra: serde_json::Map::new(),
+    };
+    let tc_ref = tc_config.as_ref().unwrap_or(&dummy_tc);
     let proxy_state = proxy::http_proxy::build_proxy_state(
         &config,
-        &tc_config,
+        tc_ref,
         auth.clone(),
         tls_cert.is_some(),
     );
@@ -158,7 +182,7 @@ async fn run_gateway() {
                 }).collect::<Vec<_>>(),
             });
             if hosts_tc_locally {
-                meta["realm"] = serde_json::json!(tc_config.realm);
+                meta["realm"] = serde_json::json!(tc_ref.realm);
             }
             if let Ok(public_url) = std::env::var("PUBLIC_URL") {
                 meta["publicUrl"] = serde_json::json!(public_url);
@@ -179,12 +203,17 @@ async fn run_gateway() {
             tracing::info!("[Config] Hot-reloading config...");
             let new_config = config::load_config();
             let new_tc_config = config::load_tidecloak_config();
+            let new_dummy = config::TidecloakConfig {
+                realm: String::new(), auth_server_url: String::new(),
+                resource: String::new(), public_client: None, jwk: config::JwkSet { keys: vec![] }, extra: serde_json::Map::new(),
+            };
+            let new_tc_ref = new_tc_config.as_ref().unwrap_or(&new_dummy);
             let new_extra_issuers: Vec<String> = new_config.auth_server_public_url.iter()
                 .chain(new_config.tc_internal_url.iter())
                 .cloned().collect();
-            let new_auth = Arc::new(auth::tidecloak::TidecloakAuth::new(&new_tc_config, &new_extra_issuers));
+            let new_auth = Arc::new(auth::tidecloak::TidecloakAuth::new(new_tc_ref, &new_extra_issuers));
 
-            proxy::http_proxy::reload_state(&shared, &new_config, &new_tc_config, new_auth, use_tls);
+            proxy::http_proxy::reload_state(&shared, &new_config, new_tc_ref, new_auth, use_tls);
 
             // Re-register with signal server so it picks up new backends
             let hosts_tc_locally = match &new_config.tc_internal_url {
@@ -209,7 +238,7 @@ async fn run_gateway() {
                 }).collect::<Vec<_>>(),
             });
             if hosts_tc_locally {
-                meta["realm"] = serde_json::json!(new_tc_config.realm);
+                meta["realm"] = serde_json::json!(new_tc_ref.realm);
             }
             stun_reg.update_metadata(meta);
         });
