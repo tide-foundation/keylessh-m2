@@ -327,17 +327,15 @@ pub fn load_config() -> ServerConfig {
     }
 
     // Resolve values: TOML > env var > default
+    // stun_server_url and api_secret are optional for offline/local mode
     let stun_server_url = get_val(&toml_cfg.stun_server_url, "STUN_SERVER_URL")
-        .unwrap_or_else(|| {
-            tracing::error!("STUN_SERVER_URL is required (set in gateway.toml or env)");
-            std::process::exit(1);
-        });
+        .unwrap_or_default();
+    if stun_server_url.is_empty() {
+        tracing::info!("No STUN_SERVER_URL — running in offline/local mode (no signal server)");
+    }
 
     let api_secret = get_val(&toml_cfg.api_secret, "API_SECRET")
-        .unwrap_or_else(|| {
-            tracing::error!("API_SECRET is required (set in gateway.toml or env)");
-            std::process::exit(1);
-        });
+        .unwrap_or_default();
 
     let backends_str = get_val(&toml_cfg.backends, "BACKENDS")
         .or_else(|| env::var("BACKEND_URL").ok().map(|u| format!("Default={u}")));
@@ -397,38 +395,40 @@ pub fn load_config() -> ServerConfig {
 
 // ── TideCloak config loader ─────────────────────────────────────
 
-pub fn load_tidecloak_config() -> TidecloakConfig {
+pub fn load_tidecloak_config() -> Option<TidecloakConfig> {
     let toml_cfg = load_toml();
 
     let config_data = if let Some(b64) = get_val(&toml_cfg.tidecloak_config_b64, "TIDECLOAK_CONFIG_B64") {
         tracing::info!("Loading JWKS from base64 config");
-        // Try standard base64, then URL-safe, then raw JSON (in case it was pasted directly)
         let b64_trimmed = b64.trim();
         let bytes = if b64_trimmed.starts_with('{') {
-            // Raw JSON pasted directly
             tracing::info!("Detected raw JSON in tidecloak_config_b64 field");
             b64_trimmed.as_bytes().to_vec()
         } else {
-            base64::engine::general_purpose::STANDARD
-                .decode(b64_trimmed)
+            match base64::engine::general_purpose::STANDARD.decode(b64_trimmed)
                 .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64_trimmed))
                 .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(b64_trimmed))
                 .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b64_trimmed))
-                .unwrap_or_else(|e| {
+            {
+                Ok(b) => b,
+                Err(e) => {
                     tracing::error!("Invalid base64 in TideCloak config: {e}");
-                    tracing::error!("First 50 chars: {}...", &b64_trimmed[..50.min(b64_trimmed.len())]);
-                    std::process::exit(1);
-                })
+                    return None;
+                }
+            }
         };
-        String::from_utf8(bytes).unwrap_or_else(|e| {
-            tracing::error!("Invalid UTF-8 in TideCloak config: {e}");
-            std::process::exit(1);
-        })
+        match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Invalid UTF-8 in TideCloak config: {e}");
+                return None;
+            }
+        }
     } else {
+        // Find tidecloak.json file
         let path = get_val(&toml_cfg.tidecloak_config_path, "TIDECLOAK_CONFIG_PATH")
             .map(|p| {
                 let pb = PathBuf::from(&p);
-                // If relative path, resolve against config dir
                 if pb.is_relative() && !pb.exists() {
                     let in_config_dir = config_dir().join(&pb);
                     if in_config_dir.exists() {
@@ -438,38 +438,41 @@ pub fn load_tidecloak_config() -> TidecloakConfig {
                 pb
             })
             .unwrap_or_else(|| {
-                // Check config dir, then next to exe, then cwd
                 let in_config = config_dir().join("tidecloak.json");
-                if in_config.exists() {
-                    return in_config;
-                }
+                if in_config.exists() { return in_config; }
                 if let Ok(exe) = env::current_exe() {
                     let beside = exe.parent().unwrap_or(exe.as_ref()).join("tidecloak.json");
-                    if beside.exists() {
-                        return beside;
-                    }
+                    if beside.exists() { return beside; }
                 }
                 PathBuf::from("tidecloak.json")
             });
-        tracing::info!("Loading JWKS from {}", path.display());
-        fs::read_to_string(&path).unwrap_or_else(|e| {
-            tracing::error!("Failed to read {}: {e}", path.display());
-            tracing::error!("Place tidecloak.json in {} or set tidecloak_config_path in gateway.toml", config_dir().display());
-            std::process::exit(1);
-        })
+
+        match fs::read_to_string(&path) {
+            Ok(data) => {
+                tracing::info!("Loading JWKS from {}", path.display());
+                data
+            }
+            Err(_) => {
+                tracing::warn!("No tidecloak.json found — running without authentication (noauth backends only)");
+                return None;
+            }
+        }
     };
 
-    let config: TidecloakConfig = serde_json::from_str(&config_data).unwrap_or_else(|e| {
-        tracing::error!("Failed to parse TideCloak config: {e}");
-        std::process::exit(1);
-    });
+    let config: TidecloakConfig = match serde_json::from_str(&config_data) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to parse TideCloak config: {e}");
+            return None;
+        }
+    };
 
     if config.jwk.keys.is_empty() {
-        tracing::error!("No JWKS keys found in config");
-        std::process::exit(1);
+        tracing::warn!("No JWKS keys found in TideCloak config — authentication disabled");
+        return None;
     }
 
-    config
+    Some(config)
 }
 
 // ── Backend string parser ───────────────────────────────────────
