@@ -774,7 +774,8 @@ pub fn build_proxy_state(
         }
     }
 
-    let tc_proxy_url = url::Url::parse(&format!("{}/", base_url)).unwrap();
+    let tc_proxy_url = url::Url::parse(&format!("{}/", base_url))
+        .unwrap_or_else(|_| url::Url::parse("http://localhost/").unwrap());
     let tc_public_origin = config.auth_server_public_url.clone();
 
     // Resolve public directory: check next to executable first, then cwd
