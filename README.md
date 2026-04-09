@@ -46,11 +46,13 @@ Each [release](../../releases) includes pre-built binaries and installers:
 
 | Artifact | Platform | Description |
 |----------|----------|-------------|
-| `PunchdEndpoint.msi` | Windows | **PunchdEndpoint** — Combined installer: TideSSP (passwordless RDP) + Punchd Gateway (Rust, runs as Windows service). Includes setup wizard for tidecloak.json and gateway.toml. Reboot required. |
-| `punchd-gateway-linux.deb` | Linux | **Punchd Gateway** — NAT-traversing reverse proxy + QUIC VPN gateway. Runs on your private network, connects to signal server, proxies HTTP/RDP/VPN to local backends. |
+| `PunchdEndpoint.msi` | Windows | **PunchdEndpoint** — Combined installer: TideSSP (passwordless RDP) + Punchd Gateway. For RDP endpoints that need both passwordless auth and gateway. Reboot required. |
+| `PunchdGateway.msi` | Windows | **Punchd Gateway** — Standalone gateway installer (Windows service). For machines that only need the gateway, no TideSSP. |
+| `punchd-gateway-linux.deb` | Linux | **Punchd Gateway** — NAT-traversing reverse proxy + QUIC VPN gateway. |
 | `punchd-gateway-macos-x64` | macOS x64 | Punchd Gateway for macOS Intel |
 | `punchd-gateway-macos-arm64` | macOS | Punchd Gateway for macOS Apple Silicon |
 | `punchd-vpn.msi` | Windows | **Punchd VPN** — Native VPN client with WebView2 DPoP auth, system tray, and auto-reconnect. |
+| `TideSSP.msi` | Windows | **TideSSP** — Standalone passwordless RDP installer. For RDP endpoints that already have a gateway elsewhere. |
 | `ssh-bridge-linux-x64.tar.gz` | Linux | **SSH Bridge** (Rust) — WebSocket-to-TCP tunnel for browser SSH sessions. |
 
 All components require a `tidecloak.json` exported from your TideCloak admin console. See the [Deployment Guide](docs/DEPLOYMENT.md) for step-by-step setup.

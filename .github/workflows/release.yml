@@ -208,6 +208,39 @@ jobs:
           path: ${{ matrix.artifact }}.tar.gz
 
   # ════════════════════════════════════════════════════════════════
+  # PunchdGateway — standalone Windows MSI (Gateway only, no TideSSP)
+  # ════════════════════════════════════════════════════════════════
+  build-gateway-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Install MinGW
+        run: choco install mingw -y
+      - name: Install WiX
+        run: |
+          dotnet tool install --global wix --version 6.0.2
+          wix extension add --global WixToolset.UI.wixext/6.0.2
+      - name: Build Gateway (GNU — static binary)
+        run: |
+          cd bridges/punchd-bridge-rs
+          cargo build --release --target x86_64-pc-windows-gnu --bin punchd-bridge-rs
+          New-Item -ItemType Directory -Force -Path target/release
+          Copy-Item target/x86_64-pc-windows-gnu/release/punchd-bridge-rs.exe target/release/
+      - name: Build MSI
+        run: |
+          New-Item -ItemType Directory -Force -Path bridges/punchd-bridge-rs/out
+          wix build bridges/punchd-bridge-rs/installer/GatewayProduct.wxs -arch x64 `
+            -bindpath PunchdDir=bridges/punchd-bridge-rs/target/release `
+            -o bridges/punchd-bridge-rs/out/PunchdGateway.msi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PunchdGateway-windows-msi
+          path: bridges/punchd-bridge-rs/out/PunchdGateway.msi
+
+  # ════════════════════════════════════════════════════════════════
   # TideSSP — standalone MSI (Windows only, passwordless RDP)
   # ════════════════════════════════════════════════════════════════
   build-tidessp:
@@ -242,6 +275,7 @@ jobs:
       - build-endpoint-windows
       - build-endpoint-linux
       - build-endpoint-macos
+      - build-gateway-windows
       - build-tidessp
     runs-on: ubuntu-latest
     steps:
@@ -260,6 +294,7 @@ jobs:
             artifacts/punchd-vpn-macos-x64/*.tar.gz
             artifacts/punchd-vpn-macos-arm64/*.tar.gz
             artifacts/PunchdEndpoint-windows-msi/PunchdEndpoint.msi
+            artifacts/PunchdGateway-windows-msi/PunchdGateway.msi
             artifacts/punchd-gateway-linux-deb/punchd-gateway-linux-x64.deb
             artifacts/punchd-gateway-macos-x64/*.tar.gz
             artifacts/punchd-gateway-macos-arm64/*.tar.gz
