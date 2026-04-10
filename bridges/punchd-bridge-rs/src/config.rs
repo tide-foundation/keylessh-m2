@@ -395,7 +395,7 @@ pub fn load_config() -> ServerConfig {
 
 // ── TideCloak config loader ─────────────────────────────────────
 
-pub fn load_tidecloak_config() -> Option<TidecloakConfig> {
+pub fn load_tidecloak_config() -> TidecloakConfig {
     let toml_cfg = load_toml();
 
     let config_data = if let Some(b64) = get_val(&toml_cfg.tidecloak_config_b64, "TIDECLOAK_CONFIG_B64") {
@@ -413,7 +413,7 @@ pub fn load_tidecloak_config() -> Option<TidecloakConfig> {
                 Ok(b) => b,
                 Err(e) => {
                     tracing::error!("Invalid base64 in TideCloak config: {e}");
-                    return None;
+                    std::process::exit(1);
                 }
             }
         };
@@ -421,7 +421,7 @@ pub fn load_tidecloak_config() -> Option<TidecloakConfig> {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!("Invalid UTF-8 in TideCloak config: {e}");
-                return None;
+                std::process::exit(1);
             }
         }
     } else {
@@ -452,9 +452,10 @@ pub fn load_tidecloak_config() -> Option<TidecloakConfig> {
                 tracing::info!("Loading JWKS from {}", path.display());
                 data
             }
-            Err(_) => {
-                tracing::warn!("No tidecloak.json found — running without authentication (noauth backends only)");
-                return None;
+            Err(e) => {
+                tracing::error!("Failed to read {}: {e}", path.display());
+                tracing::error!("Place tidecloak.json in {} or set tidecloak_config_path in gateway.toml", config_dir().display());
+                std::process::exit(1);
             }
         }
     };
@@ -463,16 +464,16 @@ pub fn load_tidecloak_config() -> Option<TidecloakConfig> {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("Failed to parse TideCloak config: {e}");
-            return None;
+            std::process::exit(1);
         }
     };
 
     if config.jwk.keys.is_empty() {
-        tracing::warn!("No JWKS keys found in TideCloak config — authentication disabled");
-        return None;
+        tracing::error!("No JWKS keys found in TideCloak config");
+        std::process::exit(1);
     }
 
-    Some(config)
+    config
 }
 
 // ── Backend string parser ───────────────────────────────────────
@@ -520,7 +521,7 @@ fn parse_backends_str(input: &str) -> Vec<BackendEntry> {
             };
 
             if raw_url.is_empty() {
-                return None;
+                std::process::exit(1);
             }
 
             Some(BackendEntry {
