@@ -1,6 +1,21 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for manual release, e.g. 1.0.1"
+        required: true
+        default: "1.0.1"
+      create_release:
+        description: "Create a GitHub Release?"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
   push:
     tags:
       - "v*"
@@ -117,7 +132,12 @@ jobs:
       - name: Create PKGBUILD
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+
           mkdir -p archpkg
 
           cat > archpkg/PKGBUILD <<'PKGBUILD_EOF'
@@ -288,7 +308,12 @@ jobs:
 
       - name: Package deb
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+
           mkdir -p pkg-deb/DEBIAN pkg-deb/usr/bin pkg-deb/etc/punchd-gateway
           cp bridges/punchd-bridge-rs/target/release/punchd-bridge-rs pkg-deb/usr/bin/
           chmod 755 pkg-deb/usr/bin/punchd-bridge-rs
@@ -433,6 +458,8 @@ jobs:
       - build-gateway-windows
       - build-tidessp
 
+    if: github.event_name == 'push' || github.event.inputs.create_release == 'true'
+
     runs-on: ubuntu-latest
 
     steps:
@@ -442,9 +469,27 @@ jobs:
         with:
           path: artifacts
 
+      - name: Set release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            TAG_NAME="v${VERSION}"
+            RELEASE_NAME="v${VERSION}"
+          else
+            TAG_NAME="${GITHUB_REF_NAME}"
+            RELEASE_NAME="${GITHUB_REF_NAME}"
+          fi
+
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "release_name=${RELEASE_NAME}" >> "$GITHUB_OUTPUT"
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: ${{ steps.meta.outputs.release_name }}
           generate_release_notes: true
           files: |
             artifacts/punchd-vpn-windows-msi/punchd-vpn.msi
