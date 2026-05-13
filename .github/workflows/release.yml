@@ -195,9 +195,11 @@ jobs:
           sed -i "s/__VERSION__/${VERSION:-1.0.0}/g" archpkg/PKGBUILD
           sed -i "s#__GITHUB_REPOSITORY__#${GITHUB_REPOSITORY}#g" archpkg/PKGBUILD
           sed -i 's/^          //' archpkg/PKGBUILD
+          chown -R builder:builder archpkg
 
       - name: Build Arch/CachyOS package
         run: |
+          chown -R builder:builder "$GITHUB_WORKSPACE"
           cd archpkg
           sudo -u builder makepkg -sf --noconfirm
 
