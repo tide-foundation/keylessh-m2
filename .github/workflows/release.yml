@@ -116,6 +116,7 @@ jobs:
             rust \
             cargo \
             git \
+            gcc \
             pkgconf \
             openssl \
             gtk3 \
@@ -164,14 +165,28 @@ jobs:
           makedepends=(
             'rust'
             'cargo'
+            'gcc'
+            'pkgconf'
+          )
+          options=(
+            '!lto'
+            '!debug'
           )
           source=()
           sha256sums=()
 
           build() {
             cd "$startdir/.."
-            cargo build --release --bin punchd-vpn --features webview \
-              --manifest-path bridges/punchd-bridge-rs/Cargo.toml
+
+            env \
+              RUSTFLAGS="" \
+              CFLAGS="" \
+              CXXFLAGS="" \
+              LDFLAGS="" \
+              CC=gcc \
+              CXX=g++ \
+              cargo build --release --bin punchd-vpn --features webview \
+                --manifest-path bridges/punchd-bridge-rs/Cargo.toml
           }
 
           package() {
