@@ -169,13 +169,13 @@ jobs:
           sha256sums=()
 
           build() {
-            cd "$srcdir/.."
+            cd "$startdir/.."
             cargo build --release --bin punchd-vpn --features webview \
               --manifest-path bridges/punchd-bridge-rs/Cargo.toml
           }
 
           package() {
-            cd "$srcdir/.."
+            cd "$startdir/.."
 
             install -Dm755 bridges/punchd-bridge-rs/target/release/punchd-vpn \
               "$pkgdir/usr/bin/punchd-vpn"
