@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version for manual release, e.g. 1.0.1"
+        description: "Version for manual release, e.g. 1.0.1 or 1.0.1_beta"
         required: true
         default: "1.0.1"
       create_release:
@@ -137,6 +137,13 @@ jobs:
           else
             VERSION="${GITHUB_REF_NAME#v}"
           fi
+
+          # Arch pkgver cannot contain colons, forward slashes, hyphens, or whitespace.
+          # Examples:
+          #   v1.0.1-beta -> 1.0.1_beta
+          #   1.0.1 beta  -> 1.0.1_beta
+          VERSION="${VERSION#v}"
+          VERSION="$(echo "$VERSION" | sed -E 's/[-:\/[:space:]]+/_/g')"
 
           mkdir -p archpkg
 
@@ -316,6 +323,10 @@ jobs:
             VERSION="${GITHUB_REF_NAME#v}"
           fi
 
+          # Keep Debian version safe too.
+          VERSION="${VERSION#v}"
+          VERSION="$(echo "$VERSION" | sed -E 's/[:\/[:space:]]+/_/g')"
+
           mkdir -p pkg-deb/DEBIAN pkg-deb/usr/bin pkg-deb/etc/punchd-gateway
           cp bridges/punchd-bridge-rs/target/release/punchd-bridge-rs pkg-deb/usr/bin/
           chmod 755 pkg-deb/usr/bin/punchd-bridge-rs
@@ -477,8 +488,10 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ github.event.inputs.version }}"
-            TAG_NAME="v${VERSION}"
-            RELEASE_NAME="v${VERSION}"
+            VERSION="${VERSION#v}"
+            SAFE_VERSION="$(echo "$VERSION" | sed -E 's/[\/[:space:]]+/_/g')"
+            TAG_NAME="v${SAFE_VERSION}"
+            RELEASE_NAME="v${SAFE_VERSION}"
           else
             TAG_NAME="${GITHUB_REF_NAME}"
             RELEASE_NAME="${GITHUB_REF_NAME}"
