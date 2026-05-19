@@ -303,8 +303,15 @@ if [ "$DEPLOY_GATEWAY" = true ]; then
     echo "  Removing old ACI (if any)..."
     az container delete --resource-group "$RESOURCE_GROUP" --name "$ACI_NAME" --yes 2>/dev/null || true
 
-    # Generate ACI YAML
-    TMPFILE=$(mktemp /tmp/aci-devops-XXXXXX.yaml)
+    # Generate ACI YAML (use Windows-accessible path for WSL compatibility)
+    if command -v wslpath &>/dev/null; then
+        mkdir -p /mnt/c/Temp 2>/dev/null || true
+        TMPFILE="/mnt/c/Temp/aci-devops.yaml"
+        TMPFILE_AZ=$(wslpath -w "$TMPFILE")
+    else
+        TMPFILE=$(mktemp /tmp/aci-devops-XXXXXX.yaml)
+        TMPFILE_AZ="$TMPFILE"
+    fi
     cat > "$TMPFILE" <<YAML
 apiVersion: 2021-09-01
 location: ${LOCATION}
@@ -374,7 +381,7 @@ properties:
 YAML
 
     echo "  Creating ACI..."
-    az container create --resource-group "$RESOURCE_GROUP" --file "$TMPFILE"
+    az container create --resource-group "$RESOURCE_GROUP" --file "$TMPFILE_AZ"
     rm -f "$TMPFILE"
 
     # Show result
