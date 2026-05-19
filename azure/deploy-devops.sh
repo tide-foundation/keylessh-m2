@@ -193,14 +193,18 @@ if [ "$SETUP_ONLY" = true ] || [ "$DEPLOY_WEBAPP" = true ]; then
     echo "  Web App configured"
 
     # Upload tidecloak.json to file share
+    # Copy to /tmp first to avoid WSL/Windows path issues with az cli
     echo "  Uploading tidecloak.json to Azure Files..."
+    TC_TMP=$(mktemp /tmp/tidecloak-XXXXXX.json)
+    cp "$TIDECLOAK_CONFIG" "$TC_TMP"
     az storage file upload \
         --account-name $STORAGE_ACCOUNT \
         --account-key "$STORAGE_KEY" \
         --share-name $FILE_SHARE \
-        --source "$TIDECLOAK_CONFIG" \
+        --source "$TC_TMP" \
         --path tidecloak.json \
         --output none
+    rm -f "$TC_TMP"
     echo "  tidecloak.json uploaded"
 fi
 
