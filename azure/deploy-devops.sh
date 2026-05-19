@@ -157,7 +157,7 @@ if [ "$SETUP_ONLY" = true ] || [ "$DEPLOY_WEBAPP" = true ]; then
         --name $WEBAPP_NAME \
         --resource-group $RESOURCE_GROUP \
         --plan $APP_SERVICE_PLAN \
-        --runtime "NODE:22-lts" \
+        --runtime "NODE:20-lts" \
         --output none 2>/dev/null || echo "  Web App already exists"
 
     # Configure Web App
