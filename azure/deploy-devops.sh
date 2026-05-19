@@ -254,9 +254,17 @@ if [ "$DEPLOY_WEBAPP" = true ]; then
     mkdir -p deploy/data
     cp "$TIDECLOAK_CONFIG" deploy/data/tidecloak.json
 
+    # Install production node_modules inside deploy dir
+    # (WSL is Linux so native modules match Azure's Linux runtime)
+    echo "  Installing production dependencies..."
+    cd deploy
+    npm ci --omit=dev
+    cd ..
+
+    echo "  Creating zip..."
     cd deploy
     if command -v zip &> /dev/null; then
-        zip -r ../deploy.zip .
+        zip -qr ../deploy.zip .
     elif command -v powershell &> /dev/null; then
         powershell -Command "Compress-Archive -Path * -DestinationPath ../deploy.zip -Force"
     else
