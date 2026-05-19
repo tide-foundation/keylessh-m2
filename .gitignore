@@ -25,4 +25,5 @@ bridges/punchd-bridge-rs/dist/
 .env
 .env.local
 .env.*.local
+azure/.env.devops.local
 signal-server-rs/target/
