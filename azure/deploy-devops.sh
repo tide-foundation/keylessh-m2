@@ -193,26 +193,24 @@ if [ "$SETUP_ONLY" = true ] || [ "$DEPLOY_WEBAPP" = true ]; then
     echo "  Web App configured"
 
     # Upload tidecloak.json to file share
-    # Use a Windows-accessible temp path for WSL compatibility with az.exe
     echo "  Uploading tidecloak.json to Azure Files..."
-    if [ -d "/mnt/c/Users" ]; then
-        # Running in WSL — az.exe needs a Windows path
-        WIN_TMP="/mnt/c/Users/$(whoami)/AppData/Local/Temp"
-        mkdir -p "$WIN_TMP" 2>/dev/null || WIN_TMP="/mnt/c/Temp"
-        mkdir -p "$WIN_TMP" 2>/dev/null || true
-        TC_TMP="$WIN_TMP/tidecloak-upload.json"
+    if command -v wslpath &>/dev/null; then
+        # Running in WSL — az.exe needs a native Windows path
+        mkdir -p /mnt/c/Temp 2>/dev/null || true
+        cp "$TIDECLOAK_CONFIG" /mnt/c/Temp/tidecloak-upload.json
+        TC_SOURCE=$(wslpath -w /mnt/c/Temp/tidecloak-upload.json)
     else
-        TC_TMP="/tmp/tidecloak-upload.json"
+        cp "$TIDECLOAK_CONFIG" /tmp/tidecloak-upload.json
+        TC_SOURCE="/tmp/tidecloak-upload.json"
     fi
-    cp "$TIDECLOAK_CONFIG" "$TC_TMP"
     az storage file upload \
         --account-name $STORAGE_ACCOUNT \
         --account-key "$STORAGE_KEY" \
         --share-name $FILE_SHARE \
-        --source "$TC_TMP" \
+        --source "$TC_SOURCE" \
         --path tidecloak.json \
         --output none
-    rm -f "$TC_TMP"
+    rm -f /mnt/c/Temp/tidecloak-upload.json /tmp/tidecloak-upload.json 2>/dev/null
     echo "  tidecloak.json uploaded"
 fi
 
