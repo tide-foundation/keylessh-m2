@@ -257,6 +257,8 @@ if [ "$DEPLOY_WEBAPP" = true ]; then
     # Install production node_modules inside deploy dir
     # (WSL is Linux so native modules match Azure's Linux runtime)
     echo "  Installing production dependencies..."
+    mkdir -p deploy/script
+    cp script/patch-tideorg.js deploy/script/
     cd deploy
     npm ci --omit=dev
     cd ..
