@@ -9,9 +9,12 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Load .env overrides
+# Load .env overrides (template first, then local secrets override)
 if [ -f "$SCRIPT_DIR/.env.devops" ]; then
     export $(grep -v '^#' "$SCRIPT_DIR/.env.devops" | xargs)
+fi
+if [ -f "$SCRIPT_DIR/.env.devops.local" ]; then
+    export $(grep -v '^#' "$SCRIPT_DIR/.env.devops.local" | xargs)
 fi
 
 # ─── Configuration ───────────────────────────────────────────────────────────
