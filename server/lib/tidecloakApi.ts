@@ -13,42 +13,13 @@ const getKeycloakAuthServer = () => getAuthOverrideUrl();
 const getRealm_ = () => getRealm();
 const getClient = () => getResource();
 
-/// Determine which TideCloak client a role belongs to.
-function getClientForRole(roleName: string): string {
-  if (roleName === Roles.Admin) return REALM_MGMT;
-  return getClient();
-}
-
 const getTcUrl = () => `${getKeycloakAuthServer()}/admin/realms/${getRealm_()}`;
 const getNonAdminTcUrl = () => `${getKeycloakAuthServer()}/realms/${getRealm_()}`;
 
 const REALM_MGMT = "realm-management";
 
-// ============================================
-// Caching layer — avoids repeated slow calls to TideCloak
-// ============================================
-
-interface CacheEntry<T> {
-  data: T;
-  expiry: number;
-}
-
-const cache = new Map<string, CacheEntry<any>>();
-const CACHE_TTL_MS = 30_000; // 30 seconds
-
-function getCached<T>(key: string): T | undefined {
-  const entry = cache.get(key);
-  if (!entry) return undefined;
-  if (Date.now() > entry.expiry) {
-    cache.delete(key);
-    return undefined;
-  }
-  return entry.data as T;
-}
-
-function setCache<T>(key: string, data: T, ttl = CACHE_TTL_MS): void {
-  cache.set(key, { data, expiry: Date.now() + ttl });
-}
+// Simple in-memory cache for TideCloak API responses
+const cache = new Map<string, { data: unknown; expiry: number }>();
 
 export function invalidateCache(prefix?: string): void {
   if (!prefix) {
@@ -59,31 +30,6 @@ export function invalidateCache(prefix?: string): void {
     if (key.startsWith(prefix)) cache.delete(key);
   });
 }
-
-// Concurrency-limited Promise.all — runs at most `limit` tasks in parallel
-async function promiseAllLimited<T>(
-  tasks: (() => Promise<T>)[],
-  limit: number
-): Promise<T[]> {
-  const results: T[] = new Array(tasks.length);
-  let idx = 0;
-
-  async function worker() {
-    while (idx < tasks.length) {
-      const i = idx++;
-      results[i] = await tasks[i]();
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => worker());
-  await Promise.all(workers);
-  return results;
-}
-
-// Server-side client lookup cache (equivalent to client-side _clientCache)
-const clientCache = new Map<string, { data: ClientRepresentation; expiry: number }>();
-const CLIENT_CACHE_TTL = 300_000; // 5 minutes — clients rarely change
-
 
 // Sync a committed policy to TideCloak's SSH policies table
 export const syncPolicyToTideCloak = async (
@@ -210,11 +156,6 @@ export const getRoleById = async (
 export const getClientRoles = async (
   token: string
 ): Promise<RoleRepresentation[]> => {
-  // Check cache
-  const cacheKey = "clientRoles";
-  const cached = getCached<RoleRepresentation[]>(cacheKey);
-  if (cached) return cached;
-
   const client: ClientRepresentation | null = await getClientByClientId(
     getClient(),
     token
@@ -233,11 +174,12 @@ export const getClientRoles = async (
     console.error(`Error fetching client roles: ${response.statusText}`);
     return [];
   }
-  // The list endpoint already returns id, name, description, clientRole, containerId
-  // No need to re-fetch each role by ID
-  const roles: RoleRepresentation[] = await response.json();
-
-  setCache(cacheKey, roles);
+  const roleRes: RoleRepresentation[] = await response.json();
+  const roles: RoleRepresentation[] = await Promise.all(
+    roleRes.map(async (r) => {
+      return await getRoleById(r!.id!, token);
+    })
+  );
   return roles;
 };
 
@@ -273,11 +215,6 @@ export const getClientByClientId = async (
   clientId: string,
   token: string
 ): Promise<ClientRepresentation | null> => {
-  // Check cache first — client representations rarely change
-  const cacheKey = `client:${clientId}`;
-  const cached = clientCache.get(cacheKey);
-  if (cached && Date.now() < cached.expiry) return cached.data;
-
   try {
     const response = await fetch(`${getTcUrl()}/clients?clientId=${clientId}`, {
       method: "GET",
@@ -290,9 +227,7 @@ export const getClientByClientId = async (
       return null;
     }
     const clients: ClientRepresentation[] = await response.json();
-    const result = clients.length > 0 ? clients[0] : null;
-    if (result) clientCache.set(cacheKey, { data: result, expiry: Date.now() + CLIENT_CACHE_TTL });
-    return result;
+    return clients.length > 0 ? clients[0] : null;
   } catch (error) {
     console.error("Error fetching client by clientId:", error);
     return null;
@@ -303,10 +238,6 @@ export const getClientById = async (
   id: string,
   token: string
 ): Promise<ClientRepresentation | null> => {
-  const cacheKey = `clientById:${id}`;
-  const cached = clientCache.get(cacheKey);
-  if (cached && Date.now() < cached.expiry) return cached.data;
-
   try {
     const response = await fetch(`${getTcUrl()}/clients/${id}`, {
       method: "GET",
@@ -318,9 +249,7 @@ export const getClientById = async (
       console.error(`Error fetching client by id: ${response.statusText}`);
       return null;
     }
-    const result = await response.json();
-    if (result) clientCache.set(cacheKey, { data: result, expiry: Date.now() + CLIENT_CACHE_TTL });
-    return result;
+    return await response.json();
   } catch (error) {
     console.error("Error fetching client by id:", error);
     return null;
@@ -390,11 +319,13 @@ export const GrantUserRole = async (
   roleName: string,
   token: string
 ): Promise<void> => {
-  const targetClientId = getClientForRole(roleName);
-  const client = await getClientByClientId(targetClientId, token);
+  const client =
+    roleName === Roles.Admin
+      ? await getClientByClientId(REALM_MGMT, token)
+      : await getClientByClientId(getClient(), token);
 
   if (client === null || client?.id === undefined) {
-    throw new Error(`Could not grant user role, client ${targetClientId} does not exist`);
+    throw new Error(`Could not grant user role, client ${getClient()} does not exist`);
   }
 
   const role =
@@ -592,11 +523,13 @@ export const RemoveUserRole = async (
   roleName: string,
   token: string
 ): Promise<void> => {
-  const targetClientId = getClientForRole(roleName);
-  const client = await getClientByClientId(targetClientId, token);
+  const client =
+    roleName === Roles.Admin
+      ? await getClientByClientId(REALM_MGMT, token)
+      : await getClientByClientId(getClient(), token);
 
   if (client === null || client?.id === undefined) {
-    throw new Error(`Could not remove user role, client ${targetClientId} does not exist`);
+    throw new Error(`Could not remove user role, client ${getClient()} does not exist`);
   }
 
   const role =
@@ -692,12 +625,15 @@ export const GetTideLinkUrl = async (
 export const GetAllRoles = async (
   token: string
 ): Promise<RoleRepresentation[]> => {
+  // Get client roles
   const clientRoles = await getClientRoles(token);
 
+  // Get admin role
   try {
     const adminRole = await getTideRealmAdminRole(token);
     return [...clientRoles, adminRole];
   } catch {
+    // If admin role fetch fails, just return client roles
     return clientRoles;
   }
 };
