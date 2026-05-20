@@ -10,12 +10,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Load .env overrides (template first, then local secrets override)
-if [ -f "$SCRIPT_DIR/.env.devops" ]; then
-    export $(grep -v '^#' "$SCRIPT_DIR/.env.devops" | xargs)
-fi
-if [ -f "$SCRIPT_DIR/.env.devops.local" ]; then
-    export $(grep -v '^#' "$SCRIPT_DIR/.env.devops.local" | xargs)
-fi
+load_env() {
+    while IFS= read -r line || [ -n "$line" ]; do
+        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+        line="${line%%#*}"
+        line="${line%"${line##*[![:space:]]}"}"
+        key="${line%%=*}"
+        val="${line#*=}"
+        val="${val#\'}" ; val="${val%\'}"
+        val="${val#\"}" ; val="${val%\"}"
+        export "$key=$val"
+    done < "$1"
+}
+[ -f "$SCRIPT_DIR/.env.devops" ] && load_env "$SCRIPT_DIR/.env.devops"
+[ -f "$SCRIPT_DIR/.env.devops.local" ] && load_env "$SCRIPT_DIR/.env.devops.local"
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 RESOURCE_GROUP="${RESOURCE_GROUP:-KeyleSSH}"

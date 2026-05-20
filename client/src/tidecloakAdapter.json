@@ -1,0 +1,25 @@
+{
+  "realm": "keylessh-devops",
+  "auth-server-url": "https://login.dauth.me",
+  "ssl-required": "external",
+  "resource": "keylessh",
+  "public-client": true,
+  "confidential-port": 0,
+  "jwk": {
+    "keys": [
+      {
+        "kid": "d979CUDW9bnpuVXLM2PDHZjSrmUoaGEFfy5WhKmAO7I",
+        "kty": "OKP",
+        "alg": "EdDSA",
+        "use": "sig",
+        "crv": "Ed25519",
+        "x": "DY83u0yeTYiYAqj3cbs85WYnLcqOuir6VmzDhkgnNYw"
+      }
+    ]
+  },
+  "backgroundUrl": "https://login.dauth.me/realms/keylessh-devops/tide-idp-resources/images/BACKGROUND_IMAGE",
+  "logoUrl": "https://login.dauth.me/realms/keylessh-devops/tide-idp-resources/images/LOGO",
+  "homeOrkUrl": "https://ork1.tideprotocol.com",
+  "vendorId": "6712861106648402294515811279353508785059110884660948217210105390357989661811",
+  "client-origin-auth-https://devops.keylessh.com": "wuDpP7f8MFmHfgg/W66yYlAyK5CElqXFAecji2uQEOV5h1roZQSEKfvgjW3jsERXau25v6Fr5GNId1W1+y+SBg=="
+}
