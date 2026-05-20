@@ -12,10 +12,14 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Load .env overrides (template first, then local secrets override)
 load_env() {
     while IFS= read -r line || [ -n "$line" ]; do
-        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-        line="${line%%#*}"
-        line="${line%"${line##*[![:space:]]}"}"
+        line="${line%$'\r'}"
+        # Skip comments and blank lines
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        # Must contain key=value
+        [[ "$line" != *=* ]] && continue
         key="${line%%=*}"
+        # Skip if key is empty or contains spaces (malformed)
+        [[ -z "$key" || "$key" = *[[:space:]]* ]] && continue
         val="${line#*=}"
         val="${val#\'}" ; val="${val%\'}"
         val="${val#\"}" ; val="${val%\"}"
