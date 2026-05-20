@@ -275,21 +275,19 @@ if [ "$DEPLOY_WEBAPP" = true ]; then
     fi
     cd ..
 
-    # Deploy via Kudu
+    # Deploy via az webapp deploy (more reliable than curl to Kudu from WSL)
     print_header "Deploying to Azure Web App"
-    CREDS=$(az webapp deployment list-publishing-credentials \
+    if command -v wslpath &>/dev/null; then
+        DEPLOY_ZIP=$(wslpath -w "$(pwd)/deploy.zip")
+    else
+        DEPLOY_ZIP="$(pwd)/deploy.zip"
+    fi
+    az webapp deploy \
         --name $WEBAPP_NAME \
         --resource-group $RESOURCE_GROUP \
-        --query "{username:publishingUserName, password:publishingPassword}" -o json)
-
-    DEPLOY_USER=$(echo $CREDS | jq -r '.username')
-    DEPLOY_PASS=$(echo $CREDS | jq -r '.password')
-
-    curl -X POST \
-        --user "$DEPLOY_USER:$DEPLOY_PASS" \
-        --data-binary @deploy.zip \
-        -H "Content-Type: application/zip" \
-        "https://$WEBAPP_NAME.scm.azurewebsites.net/api/zipdeploy?isAsync=false"
+        --src-path "$DEPLOY_ZIP" \
+        --type zip \
+        --clean true
 
     rm -rf deploy deploy.zip
     echo ""
