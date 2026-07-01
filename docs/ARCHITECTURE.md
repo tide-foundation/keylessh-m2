@@ -29,7 +29,7 @@ KeyleSSH is a browser-based SSH console with policy-based cryptographic authoriz
 │  - enforces sshUser allowlist (token roles/claims)            │
 │  - forwards raw bytes to SSH server                           │
 │                                                               │
-│ Optional: forward bytes to external tcp-bridge via BRIDGE_URL │
+│ Optional: forward bytes to external ssh-bridge via BRIDGE_URL │
 └───────────────────────────────────────┬───────────────────────┘
                                         │ TCP
                                         ▼
@@ -42,10 +42,10 @@ KeyleSSH is a browser-based SSH console with policy-based cryptographic authoriz
 
 - `client/`: React app (UI, xterm.js, SSH client, SFTP browser, session UX).
 - `server/`: Express API + WebSocket bridge + SQLite storage.
-- `signal-server/`: P2P signaling, HTTP relay, and TURN credential generation for punchd-bridge.
+- `signal-server-rs/`: Rust P2P signaling, HTTP relay, and TURN credential generation for punchd-bridge.
 - `bridges/`
-  - `tcp-bridge/` (optional external deployment): stateless WS↔TCP forwarder.
-  - `punchd-bridge/`: NAT-traversing HTTP reverse proxy gateway (WebRTC P2P + HTTP relay + RDP via RDCleanPath).
+  - `ssh-bridge-rs/` (optional external deployment): stateless WS↔TCP forwarder (Rust).
+  - `punchd-bridge-rs/`: NAT-traversing HTTP reverse proxy gateway (WebRTC P2P + HTTP relay + RDP via RDCleanPath, Rust).
 - `shared/`: shared types + schema/config.
 
 ## SSH Connection Flow
@@ -279,7 +279,7 @@ This applies to everyone (including admins). If the token does not include the r
 KeyleSSH always requires a WebSocket→TCP bridge.
 
 - **Default (embedded):** `/ws/tcp` opens the TCP socket itself.
-- **External (optional):** set `BRIDGE_URL` and the server forwards the user's JWT to `bridges/tcp-bridge/`. Both endpoints independently verify JWTs against the same TideCloak JWKS.
+- **External (optional):** set `BRIDGE_URL` and the server forwards the user's JWT to `bridges/ssh-bridge-rs/`. Both endpoints independently verify JWTs against the same TideCloak JWKS.
 
 ## Local Testing
 
@@ -294,9 +294,8 @@ npm run dev
 
 ```bash
 # Terminal 1: Start the bridge (needs data/tidecloak.json)
-cd bridges/tcp-bridge
-npm install
-npm run dev
+cd bridges/ssh-bridge-rs
+cargo run --release
 
 # Terminal 2: Start main server with bridge URL
 cd ../..

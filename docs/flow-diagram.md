@@ -1,5 +1,13 @@
 # KeyleSSH: STUN → WebRTC → EdDSA → RDP Connection Flow
 
+> **Note on source links:** the `*Source:*` citations below point at the
+> original Node implementation (`bridges/punchd-bridge/gateway/…`,
+> `signal-server/src/index.ts`), which has been removed in favour of the Rust
+> stack. The protocol and message flow are unchanged; the current code lives in
+> `bridges/punchd-bridge-rs/` (gateway, incl. `src/rdcleanpath/`) and
+> `signal-server-rs/` (signal server, incl. `src/registry/` and
+> `src/signaling/`). Treat the old paths/line numbers as historical references.
+
 ## High-Level Architecture
 
 ```

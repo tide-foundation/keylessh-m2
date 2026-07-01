@@ -154,3 +154,191 @@ pub fn build_error(err: &RDCleanPathError) -> Vec<u8> {
 
     encode_sequence(&[&version_el, &error_el])
 }
+
+// ---------------------------------------------------------------------------
+// Tests — ported from tests/gateway/rdcleanpath.test.ts (Node gateway) to
+// preserve coverage after the Node gateway was removed.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ReqOpts {
+        version: i64,
+        destination: String,
+        proxy_auth: String,
+        preconnection_blob: Option<String>,
+        x224: Vec<u8>,
+    }
+
+    impl Default for ReqOpts {
+        fn default() -> Self {
+            Self {
+                version: RDCLEANPATH_VERSION,
+                destination: "My PC".to_string(),
+                proxy_auth: "jwt-token-here".to_string(),
+                preconnection_blob: None,
+                x224: vec![0x03, 0x00],
+            }
+        }
+    }
+
+    fn build_request(opts: ReqOpts) -> Vec<u8> {
+        let mut fields: Vec<Vec<u8>> = Vec::new();
+        // [0] version
+        fields.push(encode_explicit(0, &encode_integer(opts.version)));
+        // [1] error (empty explicit, matching the TS fixture)
+        fields.push(encode_explicit(1, &encode_sequence(&[])));
+        // [2] destination
+        fields.push(encode_explicit(2, &encode_utf8_string(&opts.destination)));
+        // [3] proxy_auth
+        fields.push(encode_explicit(3, &encode_utf8_string(&opts.proxy_auth)));
+        // [4] server_auth (unused)
+        fields.push(encode_explicit(4, &encode_utf8_string("")));
+        // [5] preconnection_blob (optional)
+        if let Some(ref pcb) = opts.preconnection_blob {
+            fields.push(encode_explicit(5, &encode_utf8_string(pcb)));
+        }
+        // [6] x224_connection_pdu
+        fields.push(encode_explicit(6, &encode_octet_string(&opts.x224)));
+        encode_sequence_from_vecs(&fields)
+    }
+
+    #[test]
+    fn version_constant() {
+        assert_eq!(RDCLEANPATH_VERSION, 3390);
+    }
+
+    #[test]
+    fn error_constants() {
+        assert_eq!(RDCLEANPATH_ERROR_GENERAL, 1);
+        assert_eq!(RDCLEANPATH_ERROR_NEGOTIATION, 2);
+    }
+
+    #[test]
+    fn parse_valid_request() {
+        let x224 = vec![0x03, 0x00, 0x00, 0x13];
+        let buf = build_request(ReqOpts {
+            destination: "My PC".to_string(),
+            proxy_auth: "my-jwt-token".to_string(),
+            x224: x224.clone(),
+            ..Default::default()
+        });
+        let req = parse_request(&buf).unwrap();
+        assert_eq!(req.version, RDCLEANPATH_VERSION);
+        assert_eq!(req.destination, "My PC");
+        assert_eq!(req.proxy_auth, "my-jwt-token");
+        assert_eq!(req.x224_connection_pdu, x224);
+        assert!(req.preconnection_blob.is_none());
+    }
+
+    #[test]
+    fn parse_request_with_preconnection_blob() {
+        let buf = build_request(ReqOpts {
+            preconnection_blob: Some("vm-guid-123".to_string()),
+            ..Default::default()
+        });
+        let req = parse_request(&buf).unwrap();
+        assert_eq!(req.preconnection_blob.as_deref(), Some("vm-guid-123"));
+    }
+
+    #[test]
+    fn parse_rejects_wrong_version() {
+        let buf = build_request(ReqOpts { version: 9999, ..Default::default() });
+        match parse_request(&buf) {
+            Ok(_) => panic!("expected wrong-version request to be rejected"),
+            Err(err) => assert!(err.contains("9999"), "error should mention bad version: {err}"),
+        }
+    }
+
+    #[test]
+    fn build_valid_response() {
+        let x224_confirm = vec![0x03, 0x00, 0x00, 0x0B];
+        let cert1 = vec![0x30, 0x82, 0x01, 0x00];
+        let cert2 = vec![0x30, 0x82, 0x02, 0x00];
+        let buf = build_response(&RDCleanPathResponse {
+            x224_connection_pdu: x224_confirm.clone(),
+            server_cert_chain: vec![cert1.clone(), cert2.clone()],
+            server_addr: "192.168.1.100:3389".to_string(),
+        });
+
+        let mut outer = DerReader::new(&buf);
+        let mut seq = outer.read_sequence().unwrap();
+        // [0] version
+        assert_eq!(seq.read_explicit(0).unwrap().unwrap().read_integer().unwrap(), RDCLEANPATH_VERSION);
+        // [6] x224
+        assert_eq!(seq.read_explicit(6).unwrap().unwrap().read_octet_string().unwrap(), x224_confirm);
+        // [7] cert chain
+        let certs = seq.read_explicit(7).unwrap().unwrap().read_sequence_of_octet_strings().unwrap();
+        assert_eq!(certs.len(), 2);
+        assert_eq!(certs[0], cert1);
+        assert_eq!(certs[1], cert2);
+        // [9] server_addr
+        assert_eq!(seq.read_explicit(9).unwrap().unwrap().read_utf8_string().unwrap(), "192.168.1.100:3389");
+    }
+
+    #[test]
+    fn build_response_single_cert() {
+        let cert = vec![0x30, 0x00];
+        let buf = build_response(&RDCleanPathResponse {
+            x224_connection_pdu: vec![0x03],
+            server_cert_chain: vec![cert],
+            server_addr: "10.0.0.1:3389".to_string(),
+        });
+        let mut outer = DerReader::new(&buf);
+        let mut seq = outer.read_sequence().unwrap();
+        seq.read_explicit(0).unwrap();
+        seq.read_explicit(6).unwrap();
+        let certs = seq.read_explicit(7).unwrap().unwrap().read_sequence_of_octet_strings().unwrap();
+        assert_eq!(certs.len(), 1);
+    }
+
+    #[test]
+    fn build_error_code_only() {
+        let buf = build_error(&RDCleanPathError {
+            error_code: RDCLEANPATH_ERROR_GENERAL,
+            http_status_code: None,
+            wsa_last_error: None,
+            tls_alert_code: None,
+        });
+        let mut outer = DerReader::new(&buf);
+        let mut seq = outer.read_sequence().unwrap();
+        assert_eq!(seq.read_explicit(0).unwrap().unwrap().read_integer().unwrap(), RDCLEANPATH_VERSION);
+        let mut err_seq = seq.read_explicit(1).unwrap().unwrap().read_sequence().unwrap();
+        assert_eq!(err_seq.read_explicit(0).unwrap().unwrap().read_integer().unwrap(), RDCLEANPATH_ERROR_GENERAL);
+    }
+
+    #[test]
+    fn build_error_with_http_status() {
+        let buf = build_error(&RDCleanPathError {
+            error_code: RDCLEANPATH_ERROR_GENERAL,
+            http_status_code: Some(401),
+            wsa_last_error: None,
+            tls_alert_code: None,
+        });
+        let mut outer = DerReader::new(&buf);
+        let mut seq = outer.read_sequence().unwrap();
+        seq.read_explicit(0).unwrap();
+        let mut err_seq = seq.read_explicit(1).unwrap().unwrap().read_sequence().unwrap();
+        err_seq.read_explicit(0).unwrap();
+        assert_eq!(err_seq.read_explicit(1).unwrap().unwrap().read_integer().unwrap(), 401);
+    }
+
+    #[test]
+    fn build_error_all_fields() {
+        let buf = build_error(&RDCleanPathError {
+            error_code: RDCLEANPATH_ERROR_NEGOTIATION,
+            http_status_code: Some(403),
+            wsa_last_error: Some(10061),
+            tls_alert_code: Some(48),
+        });
+        let mut outer = DerReader::new(&buf);
+        let mut seq = outer.read_sequence().unwrap();
+        seq.read_explicit(0).unwrap();
+        let mut err_seq = seq.read_explicit(1).unwrap().unwrap().read_sequence().unwrap();
+        assert_eq!(err_seq.read_explicit(0).unwrap().unwrap().read_integer().unwrap(), RDCLEANPATH_ERROR_NEGOTIATION);
+        assert_eq!(err_seq.read_explicit(1).unwrap().unwrap().read_integer().unwrap(), 403);
+        assert_eq!(err_seq.read_explicit(2).unwrap().unwrap().read_integer().unwrap(), 10061);
+        assert_eq!(err_seq.read_explicit(3).unwrap().unwrap().read_integer().unwrap(), 48);
+    }
+}

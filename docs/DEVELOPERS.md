@@ -4,10 +4,10 @@ This repo is a monorepo with the following components:
 
 - `client/`: React + Vite UI (xterm.js terminal + browser SSH client)
 - `server/`: Express REST API + WebSocket TCP bridge + SQLite storage
-- `signal-server/`: P2P signaling + HTTP relay for punchd-bridge gateways
+- `signal-server-rs/`: Rust P2P signaling + HTTP relay for punchd-bridge gateways
 - `bridges/`
-  - `tcp-bridge/`: optional external WS↔TCP forwarder (stateless)
-  - `punchd-bridge/`: NAT-traversing HTTP reverse proxy gateway (WebRTC P2P + HTTP relay)
+  - `ssh-bridge-rs/`: optional external WS↔TCP forwarder (stateless, Rust)
+  - `punchd-bridge-rs/`: NAT-traversing HTTP reverse proxy gateway (WebRTC P2P + HTTP relay, Rust)
 
 If you’re new to the codebase, start with the “Where to look” section.
 
@@ -81,8 +81,8 @@ SSH username access is token-based (applies to everyone, including admins).
   - `/ws/tcp` WebSocket endpoint
   - Validates: JWT, session ownership, serverId→host/port mapping, sshUser allowlist
   - Local mode: opens TCP sockets directly
-  - External mode: forwards JWT to `bridges/tcp-bridge/` with connection params (`BRIDGE_URL`)
-- `bridges/tcp-bridge/src/index.ts`
+  - External mode: forwards JWT to `bridges/ssh-bridge-rs/` with connection params (`BRIDGE_URL`)
+- `bridges/ssh-bridge-rs/` (Rust SSH bridge)
   - Independently validates JWTs against TideCloak JWKS (same `tidecloak.json` config)
   - Forwards raw bytes between WebSocket and TCP socket
 

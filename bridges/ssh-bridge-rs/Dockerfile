@@ -1,7 +1,7 @@
 ###############
 # Build stage #
 ###############
-FROM rust:1.84-bookworm AS builder
+FROM rust:1.94.0-bookworm AS builder
 WORKDIR /app
 
 # Cache deps by building a dummy project first
