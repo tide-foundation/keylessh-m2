@@ -183,6 +183,7 @@ sudo docker run -d \
 
 5. Go to [Change Requests](http://localhost:3000/admin/approvals)
    - Click `Review` for the user admin > confirm with `Y` > `Submit Approvals` > `Commit`
+   - Click `Review` for the `ssh:user` role add > confirm with `Y` > `Submit Approvals` > `Commit`
    - Switch to the `Policies` tab (click `Refresh` if empty)
    - Click `Review` for `ssh:user` > confirm with `Y` > `Submit Approvals` > `Commit`
 
