@@ -83,34 +83,18 @@ curl https://YOUR_SIGNAL_SERVER:9090/health
 
 ---
 
-## 3. Node vs Rust (which one)
+## 3. The implementation
 
-There are two implementations, matching the two gateway implementations. They
-speak the **same signaling protocol** and generate **identical coturn config**,
-so a gateway doesn't care which one it registers with.
+The signal server is `signal-server-rs/` (Rust) — binary `signal-server-rs`,
+deployed with `signal-server-rs/deploy.sh`. It pairs with a `coturn` container
+for STUN/TURN, and adds a QUIC/WebTransport relay (`RELAY_PORT`, default `7893`)
+for the VPN path. This is the implementation to use; it matches the Rust gateway
+documented in [PUNCHD-GATEWAY.md](PUNCHD-GATEWAY.md).
 
-| Impl | Path | Deploy | Notes |
-|------|------|--------|-------|
-| **Node** | `signal-server/` | `signal-server/deploy.sh` (Docker) | Full-featured: signaling, HTTP relay, TideCloak proxy, timing-safe `API_SECRET` check. The deploy script users tend to reach for first. |
-| **Rust** | `signal-server-rs/` (binary `signal-server-rs`) | `signal-server-rs/deploy.sh` (native binary + `nohup`) | Newer, smaller footprint; adds a QUIC/WebTransport relay (`RELAY_PORT` 7893). Its deploy script reuses the Node `.env` and stops the old Node container. |
-
-**Which is "the" one is genuinely ambiguous in the repo** (see the assumptions
-section). This guide documents the **Rust** deploy flow to stay consistent with
-[PUNCHD-GATEWAY.md](PUNCHD-GATEWAY.md) (which documents the Rust gateway), and
-the README "Component docs" link points at `signal-server-rs/`. If your ops run
-the Node one, the concepts, ports, secrets, and coturn config are the same;
-only the deploy command and a couple of env-var names differ (noted below).
-
-> **deploy.sh discrepancy to know about:** the two deploy scripts behave
-> differently. `signal-server-rs/deploy.sh` builds a native binary
-> (`cargo build --release`) and runs it with `nohup` (NOT Docker), and it
-> **tears down the old Node `signal-server` Docker container** if present.
-> `signal-server/deploy.sh` builds and runs the **Node** image in Docker. Don't
-> run both — the Rust script assumes it supersedes the Node one. Also note the
-> Node deploy's printed "start a gateway" hint points at the older Node gateway
-> (`bridges/punchd-bridge/gateway`), whereas the current gateway is
-> `bridges/punchd-bridge-rs`. (Minor: the Rust `API_SECRET` check is a plain
-> string compare, while the Node one is timing-safe.)
+> `signal-server-rs` has its **own** deploy script and coturn setup — you do
+> not need anything else to stand it up. Its `deploy.sh` builds a native binary
+> (`cargo build --release`) and runs it with `nohup` (not Docker); coturn runs
+> as a Docker container. See section 4.
 
 ---
 
@@ -136,8 +120,7 @@ cd signal-server-rs
 
 On the first run it:
 - Generates `API_SECRET` and `TURN_SECRET` (each `openssl rand -hex 32`) and
-  saves them to `signal-server-rs/.env` (chmod 600). If a Node
-  `signal-server/.env` already exists, it reuses those secrets.
+  saves them to `signal-server-rs/.env` (chmod 600).
 - Auto-detects your public IP (via `ifconfig.me`) as `EXTERNAL_IP` — if
   detection fails it writes `REPLACE_ME` and you must edit `.env`.
 - Pulls `coturn/coturn:latest` and starts coturn (see the exact flags below).
@@ -218,14 +201,7 @@ Verified against `signal-server-rs/src/config.rs`.
 | `TLS_CERT_PATH` | unset | TLS cert (enables `https`/`wss`) |
 | `TLS_KEY_PATH` | unset | TLS private key |
 | `RELAY_HOST` | `punchd.keylessh.com` | Hostname advertised for the relay. The deploy script overrides this to your domain or `EXTERNAL_IP`. |
-| `TIDECLOAK_URL` | unset | TideCloak base URL (Rust server) |
-
-> The **Node** server (`signal-server/src/index.ts`) reads a similar set but
-> uses `TIDECLOAK_CONFIG_B64` (base64 `tidecloak.json`) and `TC_CLIENT_ID`
-> instead of `TIDECLOAK_URL`, and `ALLOWED_ORIGINS` for CORS. The Node
-> deploy.sh passes `TIDECLOAK_CONFIG_B64`, `API_SECRET`, `ICE_SERVERS`,
-> `TURN_SERVER`, `TURN_SECRET`, `PORT`. `RELAY_HOST` also defaults to
-> `punchd.keylessh.com` there (`index.ts`).
+| `TIDECLOAK_URL` | unset | TideCloak base URL |
 
 ---
 
@@ -256,7 +232,7 @@ must be publicly open, and the VM must have a real public IP set as
 | P2P connects on same LAN but not across the internet | STUN reachable but TURN relay not configured/open. Ensure `TURN_SERVER` + `TURN_SECRET` are set and `3478` + `49152-65535/udp` are open on the firewall. |
 | Browser can't reach `wss://…:9090` (mixed content / cert error) | No TLS configured, or self-signed cert. For public use, put a Let's Encrypt cert under `/etc/letsencrypt/live/<domain>/` before running `deploy.sh` (it auto-wires `TLS_CERT_PATH`/`TLS_KEY_PATH` and switches to `wss`). |
 | TURN credentials rejected | `TURN_SECRET` mismatch between the signal server, coturn (`--static-auth-secret`), and the gateway. All three must be the same value. |
-| Ran both Node and Rust deploy scripts and things conflict | Don't. The Rust script stops the Node container; pick one impl. `docker ps` + `pgrep -f signal-server-rs` to see what's running. |
+| Not sure what's running | `docker ps` (coturn) + `pgrep -f signal-server-rs` (signal server) + `cat /tmp/signal-server-rs.pid`. |
 
 ---
 
@@ -268,30 +244,20 @@ over from the gateway guide):
 
 - **Is a live signal server actually running at `punchd.keylessh.com`?** That
   hostname is only the built-in default for `RELAY_HOST`
-  (`signal-server-rs/src/config.rs`, `signal-server/src/index.ts`) and a
-  TideCloak origin binding. Whether a real signal server is deployed there for
-  your setup is not something the repo can tell you — the deploy scripts point
-  gateways at *your* VM's IP/domain, not `punchd.keylessh.com`.
+  (`signal-server-rs/src/config.rs`) and a TideCloak origin binding. Whether a
+  real signal server is deployed there for your setup is not something the repo
+  can tell you — the deploy script points gateways at *your* VM's IP/domain, not
+  `punchd.keylessh.com`.
 - **Realm/client (`myclient-stun` vs `s5`).** As in the gateway guide: the
   realm template (`script/tidecloak/realm.json`) is realm `keylessh` with
   clients `myclient` + `myclient-stun`, but the checked-in adapter config
   (`data/tidecloak.json`) is realm `s5` / client `myclient`. Confirm which
   realm/clients your deployment uses.
-- **Rust server + `tidecloak.json`.** The Rust config exposes `TIDECLOAK_URL`
-  (not `TIDECLOAK_CONFIG_B64`), and the Rust deploy script does not pass a
-  TideCloak config the way the Node one does. Whether/how the Rust signal
-  server itself verifies JWTs (vs. leaving all JWT checks to the gateway) is a
-  detail to confirm against `signal-server-rs/src/` for your version before
-  relying on it.
-- **Node vs Rust in production — genuinely ambiguous.** Both implementations
-  and both deploy scripts exist and work. Signals *toward Rust*: its deploy
-  script tears down the Node container and reuses its `.env`, README "Component
-  docs" links `signal-server-rs/`, and it matches the Rust gateway. Signals
-  *toward Node*: the Node deploy is the one most guides reach for first, it has
-  the more complete feature set (TideCloak proxy, timing-safe secret check), and
-  the Rust one reads as an in-progress migration. This guide picked Rust for
-  consistency with the gateway doc, but **confirm which one your ops actually
-  run** before treating either as canonical.
+- **Rust server + `tidecloak.json`.** The Rust config exposes `TIDECLOAK_URL`,
+  and the Rust `deploy.sh` does not push a `tidecloak.json` into the signal
+  server the way it configures coturn. Whether/how the signal server itself
+  verifies JWTs (vs. leaving all JWT checks to the gateway) is a detail to
+  confirm against `signal-server-rs/src/` for your version before relying on it.
 - **TLS in practice.** The scripts only auto-wire TLS if
   `/etc/letsencrypt/live/` already contains a cert. Obtaining/renewing that
   cert is on you (not automated by `deploy.sh`).

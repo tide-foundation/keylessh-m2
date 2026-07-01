@@ -84,8 +84,8 @@ Two programs make up the punchd system. You may need one or both.
 
 | Piece | Where it lives in the repo | What it does | Where it runs |
 |-------|----------------------------|--------------|---------------|
-| **Punchd gateway** | `bridges/punchd-bridge-rs/` (Rust, current) — a legacy Node version is at `bridges/punchd-bridge/gateway/` | Dials out to the signal server; proxies your SSH/HTTP/RDP backends | Inside the private network, next to the target |
-| **Signal server** | `signal-server/` (Node) / `signal-server-rs/` (Rust) | Public rendezvous point: matches browsers with gateways, hands out STUN/TURN info | A public-facing VM (paired with a `coturn` STUN/TURN sidecar) |
+| **Punchd gateway** | `bridges/punchd-bridge-rs/` (Rust) | Dials out to the signal server; proxies your SSH/HTTP/RDP backends | Inside the private network, next to the target |
+| **Signal server** | `signal-server-rs/` (Rust) | Public rendezvous point: matches browsers with gateways, hands out STUN/TURN info | A public-facing VM (paired with a `coturn` STUN/TURN sidecar) |
 
 **You can skip the signal server entirely** if the browser and gateway are on
 the same network (local/offline mode). You only need the signal server for
@@ -322,10 +322,6 @@ for your environment:
   adapter config (`data/tidecloak.json`) is realm `s5` / client `myclient`.
   Confirm which realm your deployment actually runs and whether `myclient-stun`
   exists there.
-- **Node vs Rust gateway.** Both `bridges/punchd-bridge/gateway/` (Node) and
-  `bridges/punchd-bridge-rs/` (Rust) implement the protocol. This guide uses the
-  Rust one (current). The `gateway.toml` keys are verified against the Rust
-  `config.rs`; the Node gateway is env-var driven.
 - **Exact SSH-over-QUIC/WebRTC transport selection.** For gateway sessions the
   client can use a WebRTC/QUIC data path in addition to the `/ws/ssh` WebSocket
   relay (`client/src/lib/sshClient.ts`). The plain `/ws/ssh` WebSocket path is
