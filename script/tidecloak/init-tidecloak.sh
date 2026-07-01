@@ -161,76 +161,78 @@ get_admin_token() {
     -d "client_id=admin-cli" | jq -r '.access_token'
 }
 
-# Map the script's plural change-set TYPE to the iga-core entityType value.
-cr_entity_type() {
-  case "$1" in
-    clients) echo "CLIENT" ;;
-    users)   echo "USER" ;;
-    roles)   echo "ROLE" ;;
-    *)       echo "$(echo "$1" | tr '[:lower:]' '[:upper:]')" ;;
-  esac
-}
+# Sign ALL pending change-requests, regardless of entity type. The new iga-core
+# model has no per-CLIENT change-set step; you simply authorize+commit every
+# pending change request after realm/IGA init.
+#
+# This mirrors the ecosystem-canonical drain used by the iga-engine tests
+# (tidecloak-iga-engine-tests/lib/iga.ts `drainPending`): list PENDING, then for
+# each CR POST .../{id}/authorize {} followed by POST .../{id}/commit {}; loop up
+# to a max number of passes, re-listing each pass (committing some CRs can
+# generate/unblock others), and stop early when the pass makes no forward
+# progress so it can never hang.
+sign_all_change_requests() {
+  local max_passes=8
+  local pass=0
+  while [ "$pass" -lt "$max_passes" ]; do
+    pass=$((pass + 1))
+    TOKEN="$(get_admin_token)"
+    if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+      log_error "Failed to get admin token for signing change-requests"
+      return 1
+    fi
 
-approve_and_commit() {
-  local TYPE=$1
-  local ENTITY_TYPE
-  ENTITY_TYPE="$(cr_entity_type "$TYPE")"
-  log_info "Processing ${TYPE} change-sets..."
-  TOKEN="$(get_admin_token)"
+    # Flat list of ALL pending change requests (every entity type).
+    local pending id_count
+    pending=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests?status=PENDING" \
+      -H "Authorization: Bearer $TOKEN" 2>/dev/null || echo "[]")
+    if ! echo "$pending" | jq -e 'type == "array"' > /dev/null 2>&1; then
+      log_error "Unexpected response from change-request API: $pending"
+      return 1
+    fi
 
-  if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-    log_error "Failed to get admin token for ${TYPE} change-sets"
-    return 1
-  fi
+    id_count=$(echo "$pending" | jq 'length' 2>/dev/null || echo "0")
+    if [ "$id_count" = "0" ] || [ "$id_count" = "" ]; then
+      log_info "No pending change-requests remain."
+      return 0
+    fi
 
-  # New consolidated iga-core surface: a single GET /iga/change-requests returns
-  # a flat list of PENDING change requests for ALL entity types; filter by
-  # entityType here (the old per-type /tide-admin/change-set/${TYPE}/requests was
-  # removed and now routes to "Realm not found").
-  local all_requests requests
-  all_requests=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests?status=PENDING" \
-    -H "Authorization: Bearer $TOKEN" 2>/dev/null || echo "[]")
+    log_info "Signing $id_count pending change-request(s) (pass $pass)..."
+    local progressed=0
+    # Iterate CR ids (subshell-free so `progressed` survives the loop).
+    while read -r cr_id; do
+      [ -z "$cr_id" ] && continue
 
-  # Validate response is a JSON array before filtering.
-  if ! echo "$all_requests" | jq -e 'type == "array"' > /dev/null 2>&1; then
-    log_error "Unexpected response from change-request API: $all_requests"
-    return 1
-  fi
-  requests=$(echo "$all_requests" | jq -c --arg et "$ENTITY_TYPE" '[.[] | select(.entityType == $et)]')
-
-  local count
-  count=$(echo "$requests" | jq 'length' 2>/dev/null || echo "0")
-
-  if [ "$count" = "0" ] || [ "$count" = "" ]; then
-    log_info "No ${TYPE} change-sets to process"
-  else
-    log_info "Processing $count ${TYPE} change-sets..."
-    echo "$requests" | jq -c '.[]' | while read -r req; do
-      local cr_id=$(echo "$req" | jq -r '.id')
-
-      # Approve: at bootstrap the realm is firstAdmin, so the empty-body phase-1
-      # /approve records AND auto-commits in one call (replaces the old
-      # sign + commit two-step). Falls back to an explicit /commit if the CR is
-      # left PENDING (e.g. a non-firstAdmin stage).
-      local approve_response approve_status
-      approve_response=$(curl -s $CURL_OPTS -w "\n%{http_code}" -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests/${cr_id}/approve" \
+      # authorize then commit (canonical drainPending flow, both empty-body).
+      curl -s $CURL_OPTS -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests/${cr_id}/authorize" \
         -H "Authorization: Bearer $TOKEN" \
         -H "Content-Type: application/json" \
-        -d "{}" 2>&1)
-      approve_status=$(echo "$approve_response" | tail -1)
-      if [[ ! "$approve_status" =~ ^2 ]]; then
-        log_error "Failed to approve ${TYPE} change-set (HTTP $approve_status): ${cr_id}"
-        return 1
-      fi
+        -d "{}" > /dev/null 2>&1 || true
 
-      # Best-effort explicit commit for any CR still PENDING after approve
-      # (auto-commit at firstAdmin already handled the common case; a non-2xx
-      # here is tolerated because /approve may have already committed).
-      curl -s $CURL_OPTS -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests/${cr_id}/commit" \
-        -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1 || true
-    done
-  fi
-  log_info "${TYPE} change-sets done."
+      local commit_status
+      commit_status=$(curl -s $CURL_OPTS -o /dev/null -w "%{http_code}" -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests/${cr_id}/commit" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{}" 2>/dev/null || echo "000")
+      if [[ "$commit_status" =~ ^2 ]]; then
+        progressed=$((progressed + 1))
+      else
+        log_warn "CR ${cr_id} not committed (HTTP $commit_status); will retry next pass"
+      fi
+    done < <(echo "$pending" | jq -r '.[].id')
+
+    # No forward progress this pass -> stop rather than spin (a CR that stays
+    # PENDING needs a role/quorum this bootstrap admin cannot satisfy).
+    if [ "$progressed" -eq 0 ]; then
+      log_warn "No change-requests committed this pass; stopping ($id_count still pending)."
+      return 0
+    fi
+
+    sleep 2
+  done
+
+  log_warn "Reached max sign-all passes ($max_passes); some change-requests may remain pending."
+  return 0
 }
 
 # =============================================
@@ -306,27 +308,28 @@ curl -s $CURL_OPTS -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/tide-adm
 log_info "Tide realm + IGA initialized."
 
 # =============================================
-#  3. Approve client change-sets
+#  3. Sign all pending change-requests
 # =============================================
 
-# Wait for change-sets to be generated
-log_info "Waiting for client change-sets to be generated..."
+# Wait for ANY pending change-request to appear (not client-specific: the new
+# iga-core model has no per-CLIENT change-set step).
+log_info "Waiting for pending change-requests to be generated..."
 for i in $(seq 1 12); do
   TOKEN="$(get_admin_token)"
   cs_count=$(curl -s $CURL_OPTS "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests?status=PENDING" \
-    -H "Authorization: Bearer $TOKEN" 2>/dev/null | jq '[.[] | select(.entityType == "CLIENT")] | length' 2>/dev/null || echo "0")
+    -H "Authorization: Bearer $TOKEN" 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
   if [ "$cs_count" -gt 0 ] 2>/dev/null; then
-    log_info "Found $cs_count client change-sets."
+    log_info "Found $cs_count pending change-request(s)."
     break
   fi
   if [ $i -eq 12 ]; then
-    log_warn "No client change-sets found after 60s. They may have been committed already."
+    log_warn "No pending change-requests found after 60s. They may have been committed already."
     break
   fi
   sleep 5
 done
 
-approve_and_commit clients
+sign_all_change_requests
 
 # =============================================
 #  4. Create admin user
@@ -459,10 +462,12 @@ while true; do
 done
 
 # =============================================
-#  8. Approve user change-sets
+#  8. Sign all pending change-requests (post user creation)
 # =============================================
 
-approve_and_commit users
+# User creation above may have generated new pending change-requests; drain them
+# all (same sign-all pass; no per-type change-set step in the new iga-core).
+sign_all_change_requests
 
 # =============================================
 #  9. Update CustomAdminUIDomain
