@@ -161,6 +161,11 @@ export type SSHSignatureRequest = {
   publicKey?: Uint8Array;
   username: string;
   serverId: string;
+  /**
+   * Gateway through which this SSH connection is being made. Required for resolving
+   * the gateway-qualified policy role (`ssh:<gatewayId>:<serverId>:<username>`).
+   */
+  gatewayId?: string;
 };
 
 export type SSHSigner = (req: SSHSignatureRequest) => Promise<Uint8Array>;
@@ -473,10 +478,8 @@ export class BrowserSSHClient {
 
       this.options.onStatusChange("connecting");
 
-      // Create session record (skip in gateway mode — gateway creates its own)
-      if (!this.options.gatewayUrl) {
-        this.sessionId = await this.createSessionRecord();
-      }
+      // Create session record (needed for recording + session tracking)
+      this.sessionId = await this.createSessionRecord();
       this.sessionEnded = false;
 
       // Register browser close/navigate handlers to end session on unexpected exit
@@ -560,6 +563,7 @@ export class BrowserSSHClient {
                   publicKey: publicKey ? new Uint8Array(publicKey) : undefined,
                   username: this.options.username,
                   serverId: this.options.serverId,
+                  gatewayId: this.options.gatewayId,
                 });
                 return Buffer.from(sig);
               }),
@@ -655,6 +659,10 @@ export class BrowserSSHClient {
       body: JSON.stringify({
         serverId: this.options.serverId,
         sshUser: this.options.username,
+        ...(this.options.gatewayUrl ? {
+          gatewayId: this.options.gatewayId,
+          backendName: this.options.serverId,
+        } : {}),
       }),
     });
 
