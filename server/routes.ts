@@ -134,6 +134,7 @@ import {
   AddApprovalWithSignedRequest,
   GetClientEvents,
   getAdminPolicy,
+  AdminPolicyFetchError,
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
@@ -2209,13 +2210,26 @@ export async function registerRoutes(
         const token = req.accessToken!;
         const policy = await getAdminPolicy(token);
         if (!policy) {
-          res.status(404).json({ error: "Admin policy not found" });
+          res.status(404).json({ error: "tide-realm-admin policy not found (empty .policy on this realm)" });
           return;
         }
         res.json({ policy });
       } catch (error) {
+        // Surface the TRUE cause. If the iga-core call itself failed, propagate
+        // its real status + body (401/403 = the admin token cannot reach the iga
+        // admin surface; 404 = no tide-realm-admin policy on this realm) instead
+        // of collapsing everything to a 500 that hides the root cause.
         const msg = error instanceof Error ? error.message : String(error);
+        console.error("[admin-policy] Failed to fetch admin policy:", error);
         log(`Failed to fetch admin policy: ${msg}`);
+        if (error instanceof AdminPolicyFetchError) {
+          res.status(error.status && error.status >= 400 ? error.status : 502).json({
+            error: "Failed to fetch tide-realm-admin policy from iga-core",
+            upstreamStatus: error.status,
+            upstreamBody: error.body?.slice(0, 500),
+          });
+          return;
+        }
         res.status(500).json({ error: `Failed to fetch admin policy: ${msg}` });
       }
     }

@@ -174,17 +174,37 @@ export const syncPolicyToTideCloak = async (
 // admin row's base64 policy bytes (replaces the removed bare-base64 body from
 // GET /tide-policy-resources/admin-policy). This read is authenticated-only
 // (no requireManageRealm) but still needs a valid bearer token.
+// Error carrying the upstream iga-core status + body so callers can propagate
+// the true cause (401/403/404) instead of collapsing to a bare 500.
+export class AdminPolicyFetchError extends Error {
+  constructor(public status: number, public body: string, public url: string) {
+    super(`iga-core GET ${url} -> HTTP ${status}: ${body}`);
+    this.name = "AdminPolicyFetchError";
+  }
+}
+
 export const getAdminPolicy = async (token: string): Promise<string> => {
-  const response = await fetch(`${getTcUrl()}/iga/role-policies/name/tide-realm-admin`, {
+  const url = `${getTcUrl()}/iga/role-policies/name/tide-realm-admin`;
+  const response = await fetch(url, {
     headers: {
       accept: "application/json",
       Authorization: `Bearer ${token}`,
     },
   });
+  const text = await response.text();
   if (!response.ok) {
-    throw new Error(`Error fetching admin policy: ${response.status} ${await response.text()}`);
+    // Surface the REAL upstream status + body (e.g. 401/403 = token can't reach
+    // the iga admin surface; 404 = no tide-realm-admin policy on this realm).
+    console.error(`[getAdminPolicy] iga-core GET ${url} -> HTTP ${response.status}: ${text.slice(0, 500)}`);
+    throw new AdminPolicyFetchError(response.status, text, url);
   }
-  const rep = await response.json();
+  let rep: any;
+  try {
+    rep = JSON.parse(text);
+  } catch (e) {
+    console.error(`[getAdminPolicy] non-JSON body from ${url}: ${text.slice(0, 200)}`);
+    throw new AdminPolicyFetchError(response.status, `non-JSON response: ${text.slice(0, 200)}`, url);
+  }
   // Returns base64-encoded policy bytes in the `.policy` field.
   return rep?.policy ?? "";
 };
