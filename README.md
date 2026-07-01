@@ -79,6 +79,7 @@ keylessh/
 - Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Deployment: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - Punchd gateway (easy guide): [docs/PUNCHD-GATEWAY.md](docs/PUNCHD-GATEWAY.md) — what punchd is, when you need it, and the simplest SSH-gateway setup
+- Signal server / STUN (easy guide): [docs/SIGNAL-SERVER.md](docs/SIGNAL-SERVER.md) — the signal server + coturn (STUN/TURN) that gateways register with for remote NAT traversal
 - Developer guide: [docs/DEVELOPERS.md](docs/DEVELOPERS.md)
 
 ### Component docs
