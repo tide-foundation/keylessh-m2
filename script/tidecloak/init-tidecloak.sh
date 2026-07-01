@@ -426,23 +426,32 @@ log_info "Tide realm + IGA initialized."
 #  3. Sign all pending change-requests
 # =============================================
 
-# Wait for ANY pending change-request to appear (not client-specific: the new
-# iga-core model has no per-CLIENT change-set step).
-log_info "Waiting for pending change-requests to be generated..."
-for i in $(seq 1 12); do
+# On a fresh firstAdmin realm, setUpTideRealm + toggle-iga AUTO-COMMIT their
+# baseline/ADOPT change-requests (the firstAdmin auto-commit sweep), so there are
+# typically ZERO PENDING CRs at this point (verified live on staging: init CRs
+# land as APPROVED, none PENDING). Do NOT block waiting for them. We poll briefly
+# (bounded, short) only to opportunistically catch any that are momentarily
+# PENDING, then ALWAYS proceed; sign_all_change_requests() no-ops cleanly if the
+# pending list is empty. This replaces the old 60s "wait for CRs" that hung the
+# run when (as expected) nothing was pending.
+log_info "Checking for any pending change-requests (init CRs usually auto-commit on firstAdmin)..."
+WAIT_POLLS=6      # bounded: 6 polls
+WAIT_SLEEP=2      # 2s apart -> max ~12s, then proceed regardless
+cs_count=0
+for i in $(seq 1 $WAIT_POLLS); do
   TOKEN="$(get_admin_token)"
   cs_count=$(curl -s $CURL_OPTS "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests?status=PENDING" \
     -H "Authorization: Bearer $TOKEN" 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+  log_info "[diag] pending-CR poll ${i}/${WAIT_POLLS}: status=PENDING count=${cs_count}"
   if [ "$cs_count" -gt 0 ] 2>/dev/null; then
-    log_info "Found $cs_count pending change-request(s)."
+    log_info "Found $cs_count pending change-request(s); proceeding to sign."
     break
   fi
-  if [ $i -eq 12 ]; then
-    log_warn "No pending change-requests found after 60s. They may have been committed already."
-    break
-  fi
-  sleep 5
+  [ "$i" -lt "$WAIT_POLLS" ] && sleep "$WAIT_SLEEP"
 done
+if [ "$cs_count" = "0" ] || [ -z "$cs_count" ]; then
+  log_info "No pending change-requests at init (auto-committed on firstAdmin); proceeding."
+fi
 
 sign_all_change_requests
 
