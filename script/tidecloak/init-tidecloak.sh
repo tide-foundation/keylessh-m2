@@ -161,8 +161,20 @@ get_admin_token() {
     -d "client_id=admin-cli" | jq -r '.access_token'
 }
 
+# Map the script's plural change-set TYPE to the iga-core entityType value.
+cr_entity_type() {
+  case "$1" in
+    clients) echo "CLIENT" ;;
+    users)   echo "USER" ;;
+    roles)   echo "ROLE" ;;
+    *)       echo "$(echo "$1" | tr '[:lower:]' '[:upper:]')" ;;
+  esac
+}
+
 approve_and_commit() {
   local TYPE=$1
+  local ENTITY_TYPE
+  ENTITY_TYPE="$(cr_entity_type "$TYPE")"
   log_info "Processing ${TYPE} change-sets..."
   TOKEN="$(get_admin_token)"
 
@@ -171,15 +183,20 @@ approve_and_commit() {
     return 1
   fi
 
-  local requests
-  requests=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/tide-admin/change-set/${TYPE}/requests" \
+  # New consolidated iga-core surface: a single GET /iga/change-requests returns
+  # a flat list of PENDING change requests for ALL entity types; filter by
+  # entityType here (the old per-type /tide-admin/change-set/${TYPE}/requests was
+  # removed and now routes to "Realm not found").
+  local all_requests requests
+  all_requests=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests?status=PENDING" \
     -H "Authorization: Bearer $TOKEN" 2>/dev/null || echo "[]")
 
-  # Validate response is a JSON array
-  if ! echo "$requests" | jq -e 'type == "array"' > /dev/null 2>&1; then
-    log_error "Unexpected response from ${TYPE} change-set API: $requests"
+  # Validate response is a JSON array before filtering.
+  if ! echo "$all_requests" | jq -e 'type == "array"' > /dev/null 2>&1; then
+    log_error "Unexpected response from change-request API: $all_requests"
     return 1
   fi
+  requests=$(echo "$all_requests" | jq -c --arg et "$ENTITY_TYPE" '[.[] | select(.entityType == $et)]')
 
   local count
   count=$(echo "$requests" | jq 'length' 2>/dev/null || echo "0")
@@ -189,35 +206,28 @@ approve_and_commit() {
   else
     log_info "Processing $count ${TYPE} change-sets..."
     echo "$requests" | jq -c '.[]' | while read -r req; do
-      local draft_id=$(echo "$req" | jq -r '.draftRecordId')
-      local cs_type=$(echo "$req" | jq -r '.changeSetType')
-      local action_type=$(echo "$req" | jq -r '.actionType')
-      payload=$(jq -n --arg id "$draft_id" --arg cst "$cs_type" --arg at "$action_type" \
-                      '{changeSetId:$id,changeSetType:$cst,actionType:$at}')
+      local cr_id=$(echo "$req" | jq -r '.id')
 
-      # Sign
-      local sign_response
-      sign_response=$(curl -s $CURL_OPTS -w "\n%{http_code}" -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/tide-admin/change-set/sign" \
+      # Approve: at bootstrap the realm is firstAdmin, so the empty-body phase-1
+      # /approve records AND auto-commits in one call (replaces the old
+      # sign + commit two-step). Falls back to an explicit /commit if the CR is
+      # left PENDING (e.g. a non-firstAdmin stage).
+      local approve_response approve_status
+      approve_response=$(curl -s $CURL_OPTS -w "\n%{http_code}" -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests/${cr_id}/approve" \
         -H "Authorization: Bearer $TOKEN" \
         -H "Content-Type: application/json" \
-        -d "$payload" 2>&1)
-      local sign_status=$(echo "$sign_response" | tail -1)
-      if [[ ! "$sign_status" =~ ^2 ]]; then
-        log_error "Failed to sign ${TYPE} change-set (HTTP $sign_status): $(echo "$req" | jq -r .draftRecordId)"
+        -d "{}" 2>&1)
+      approve_status=$(echo "$approve_response" | tail -1)
+      if [[ ! "$approve_status" =~ ^2 ]]; then
+        log_error "Failed to approve ${TYPE} change-set (HTTP $approve_status): ${cr_id}"
         return 1
       fi
 
-      # Commit
-      local commit_response
-      commit_response=$(curl -s $CURL_OPTS -w "\n%{http_code}" -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/tide-admin/change-set/commit" \
-        -H "Authorization: Bearer $TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "$payload" 2>&1)
-      local commit_status=$(echo "$commit_response" | tail -1)
-      if [[ ! "$commit_status" =~ ^2 ]]; then
-        log_error "Failed to commit ${TYPE} change-set (HTTP $commit_status): $(echo "$req" | jq -r .draftRecordId)"
-        return 1
-      fi
+      # Best-effort explicit commit for any CR still PENDING after approve
+      # (auto-commit at firstAdmin already handled the common case; a non-2xx
+      # here is tolerated because /approve may have already committed).
+      curl -s $CURL_OPTS -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests/${cr_id}/commit" \
+        -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1 || true
     done
   fi
   log_info "${TYPE} change-sets done."
@@ -303,8 +313,8 @@ log_info "Tide realm + IGA initialized."
 log_info "Waiting for client change-sets to be generated..."
 for i in $(seq 1 12); do
   TOKEN="$(get_admin_token)"
-  cs_count=$(curl -s $CURL_OPTS "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/tide-admin/change-set/clients/requests" \
-    -H "Authorization: Bearer $TOKEN" 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+  cs_count=$(curl -s $CURL_OPTS "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests?status=PENDING" \
+    -H "Authorization: Bearer $TOKEN" 2>/dev/null | jq '[.[] | select(.entityType == "CLIENT")] | length' 2>/dev/null || echo "0")
   if [ "$cs_count" -gt 0 ] 2>/dev/null; then
     log_info "Found $cs_count client change-sets."
     break
