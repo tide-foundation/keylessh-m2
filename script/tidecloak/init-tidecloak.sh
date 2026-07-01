@@ -712,6 +712,20 @@ curl -s $CURL_OPTS -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/vendorRe
 log_info "CustomAdminUIDomain updated and signed."
 
 # =============================================
+#  Final drain: commit any remaining pending change-requests
+# =============================================
+
+# Defensive catch-all: after ALL setup steps, drain any still-pending CRs so the
+# bootstrap always leaves ZERO pending. Today the earlier per-step sign_all calls
+# (post user-create + role-grant) plus firstAdmin auto-commit already cover every
+# CR the flow produces, and the trailing IdP/adapter steps create none — so this
+# is normally a no-op. It exists so a future step that starts producing a CR can
+# never silently leave one un-committed. Reuses sign_all_change_requests() (list
+# PENDING -> authorize+commit each, loops until empty, no-op on empty).
+log_info "Final drain: committing any remaining pending change-requests..."
+sign_all_change_requests
+
+# =============================================
 #  Summary
 # =============================================
 
