@@ -5,7 +5,7 @@
  */
 import { appFetch } from "./appFetch";
 import type { AdminUser, AdminRole } from "@shared/schema";
-import type { ChangeSetRequest, AccessApproval, RoleApproval, TidecloakEvent } from "./api";
+import type { TidecloakEvent } from "./api";
 
 const ADMIN_ROLE = "tide-realm-admin";
 const REALM_MGMT = "realm-management";
@@ -54,128 +54,13 @@ async function tcFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-// --- Access Approvals (User Change Requests) ---
-
-export async function listAccessApprovals(): Promise<AccessApproval[]> {
-  const data = await tcFetch<any[]>("/tide-admin/change-set/users/requests");
-
-  return data.map((item) => {
-    const firstUserRecord =
-      item.userRecord && item.userRecord.length > 0 ? item.userRecord[0] : null;
-
-    return {
-      id: item.draftRecordId,
-      timestamp: new Date().toISOString(),
-      username: firstUserRecord?.username || "Unknown",
-      role: item.role || "Unknown",
-      clientId: item.clientId || "Unknown",
-      commitReady:
-        item.status === "APPROVED" || item.deleteStatus === "APPROVED" || false,
-      decisionMade: false,
-      rejectionFound: false,
-      retrievalInfo: {
-        changeSetId: item.draftRecordId,
-        changeSetType: item.changeSetType,
-        actionType: item.actionType,
-      },
-      data: item,
-    } as AccessApproval;
-  });
-}
-
-// --- Role Approvals (Role Change Requests) ---
-
-export async function listRoleApprovals(): Promise<RoleApproval[]> {
-  const data = await tcFetch<any[]>("/tide-admin/change-set/roles/requests");
-
-  return data.map((item) => ({
-    id: item.draftRecordId,
-    requestType: item.actionType || item.action,
-    status: item.status,
-    requestedBy: item.userRecord?.[0]?.username || "Unknown",
-    requestedAt: item.createdAt || new Date().toISOString(),
-    role: item.role,
-    compositeRole: item.compositeRole,
-    clientId: item.clientId,
-    changeSetType: item.changeSetType,
-    userRecords: item.userRecord || [],
-    retrievalInfo: {
-      changeSetId: item.draftRecordId,
-      changeSetType: item.changeSetType,
-      actionType: item.actionType,
-    },
-  })) as RoleApproval[];
-}
-
-// --- Shared approval operations ---
-
-export async function getRawChangeSet(
-  changeSet: ChangeSetRequest
-): Promise<
-  Array<{
-    changesetId: string;
-    changeSetDraftRequests: string;
-    requiresApprovalPopup: boolean | string;
-  }>
-> {
-  return tcFetch("/tide-admin/change-set/sign/batch", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ changeSets: [changeSet] }),
-  });
-}
-
-export async function approveChangeRequest(
-  changeSet: ChangeSetRequest,
-  signedRequest?: string
-): Promise<void> {
-  const formData = new FormData();
-  formData.append("changeSetId", changeSet.changeSetId);
-  formData.append("actionType", changeSet.actionType);
-  formData.append("changeSetType", changeSet.changeSetType);
-  if (signedRequest) {
-    formData.append("requests", signedRequest);
-  }
-
-  await tcFetch("/tideAdminResources/add-review", {
-    method: "POST",
-    body: formData,
-  });
-}
-
-export async function rejectChangeRequest(
-  changeSet: ChangeSetRequest
-): Promise<void> {
-  const formData = new FormData();
-  formData.append("actionType", changeSet.actionType);
-  formData.append("changeSetId", changeSet.changeSetId);
-  formData.append("changeSetType", changeSet.changeSetType);
-
-  await tcFetch("/tideAdminResources/add-rejection", {
-    method: "POST",
-    body: formData,
-  });
-}
-
-export async function commitChangeRequest(
-  changeSet: ChangeSetRequest
-): Promise<void> {
-  await tcFetch("/tide-admin/change-set/commit", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(changeSet),
-  });
-}
-
-export async function cancelChangeRequest(
-  changeSet: ChangeSetRequest
-): Promise<void> {
-  await tcFetch("/tide-admin/change-set/cancel", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(changeSet),
-  });
-}
+// NOTE: The former client-direct change-request helpers (listAccessApprovals,
+// listRoleApprovals, getRawChangeSet, approveChangeRequest, rejectChangeRequest,
+// commitChangeRequest, cancelChangeRequest) were removed here: they targeted the
+// REMOVED /tide-admin/change-set/* and /tideAdminResources/add-review|add-rejection
+// endpoints, had no callers (the live CR flow runs through ./tidecloakAdmin via
+// api.ts and the server relay), and would 404 against the consolidated iga-core
+// surface. Deleted rather than repointed since nothing referenced them.
 
 // --- Helper: resolve client internal UUID from clientId string ---
 
