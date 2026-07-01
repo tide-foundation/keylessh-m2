@@ -549,6 +549,15 @@ export async function addApprovalWithSignedRequest(
 // SSH Policy Sync (still goes through server)
 // ============================================
 
+// Repointed to the consolidated iga-core role-policies / forseti-contracts
+// surface (the old PUT /tide-admin/ssh-policies was removed). Two writes over
+// the same DPoP-bound admin token (NO mTLS/delegation):
+//   1. POST /iga/forseti-contracts {contractCode, name} -> {id}
+//   2. POST /iga/role-policies {name, policy, policySig, contractId, ...}
+// policySig is the detached 64-byte Ed25519 signature (Base64, <=512 chars) the
+// server returns in syncData — the same signature keylessh already produced via
+// the enclave/ORK sign. iga-core keys policies by NAME; keylessh uses the role
+// name (roleId). Note: the reserved name `tide-realm-admin` is rejected (400).
 export async function syncPolicyToTideCloak(policy: {
   roleId: string;
   contractCode?: string;
@@ -556,10 +565,34 @@ export async function syncPolicyToTideCloak(policy: {
   executionType: string;
   threshold: number;
   policyData: string;
+  policySig: string;
 }): Promise<void> {
-  await tcFetch("/tide-admin/ssh-policies", {
-    method: "PUT",
+  // Step 1: upsert the Forseti contract (if supplied) to obtain a contractId.
+  let contractId: string | undefined;
+  if (policy.contractCode) {
+    const contract = await tcFetch<{ id?: string }>("/iga/forseti-contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contractCode: policy.contractCode, name: policy.roleId }),
+    });
+    contractId = contract?.id;
+  }
+
+  // Step 2: upsert the role policy keyed by the role NAME.
+  await tcFetch("/iga/role-policies", {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(policy),
+    body: JSON.stringify({
+      name: policy.roleId,
+      contractId,
+      approvalType: policy.approvalType,
+      executionType: policy.executionType,
+      threshold: policy.threshold,
+      // policy = combined signed blob (uncapped TEXT). policySig = detached
+      // 64-byte Ed25519 sig Base64 (~88 chars, under the VARCHAR(512) cap).
+      policy: policy.policyData,
+      policySig: policy.policySig,
+      policyData: policy.policyData,
+    }),
   });
 }

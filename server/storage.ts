@@ -1143,7 +1143,7 @@ export class PendingPolicyStorage {
 
   // Get all pending policies (not yet committed or cancelled)
   // For commit-ready policies, adds the admin policy to the request (required for Ork commit)
-  async getAllPendingPolicies(): Promise<PendingSshPolicy[]> {
+  async getAllPendingPolicies(adminToken?: string): Promise<PendingSshPolicy[]> {
     const rows = sqlite.prepare(`
       SELECT p.*,
         (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approval_count,
@@ -1155,14 +1155,20 @@ export class PendingPolicyStorage {
       ORDER BY p.created_at DESC
     `).all() as any[];
 
-    // Fetch admin policy from TideCloak (needed to authorize commits)
+    // Fetch admin policy from TideCloak (needed to authorize commits). The new
+    // iga-core GET /iga/role-policies/name/tide-realm-admin requires a valid
+    // bearer token, so an admin token must be threaded in from the request.
     let adminPolicyBytes: Uint8Array | null = null;
-    try {
-      const adminPolicyBase64 = await getAdminPolicy();
-      adminPolicyBytes = base64ToBytes(adminPolicyBase64);
-    } catch (error) {
-      console.error("Failed to fetch admin policy:", error);
-      // Continue without admin policy - commits will fail but approvals still work
+    if (adminToken) {
+      try {
+        const adminPolicyBase64 = await getAdminPolicy(adminToken);
+        adminPolicyBytes = base64ToBytes(adminPolicyBase64);
+      } catch (error) {
+        console.error("Failed to fetch admin policy:", error);
+        // Continue without admin policy - commits will fail but approvals still work
+      }
+    } else {
+      console.warn("No admin token provided to getAllPendingPolicies; skipping admin-policy fetch");
     }
 
     const policies = await Promise.all(rows.map(async row => {
