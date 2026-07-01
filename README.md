@@ -176,18 +176,21 @@ sudo docker run -d \
    - Update Username: user (auto-changes to `ssh:user`)
    - Scroll down and Click `Create Role`
 
-4. Go to [Users](http://localhost:3000/admin/users)
+3. Go to [Change Requests](http://localhost:3000/admin/approvals) and switch to the `Roles` tab
+   - Click `Review` for the `ssh:user` role > confirm with `Y` > `Submit Approvals` > `Commit`
+
+4. Switch to the `Policies` tab (click `Refresh` if empty)
+   - Click `Review` for `ssh:user` > confirm with `Y` > `Submit Approvals` > `Commit`
+
+5. Go to [Users](http://localhost:3000/admin/users)
    - Click the `Action` button for the default admin user
    - Click the `ssh:user` tag in `Available Roles` to move it to `Assigned Roles`
    - Click `Save Changes`
 
-5. Go to [Change Requests](http://localhost:3000/admin/approvals)
+6. Go to [Change Requests](http://localhost:3000/admin/approvals) on the `Access` tab (the first tab)
    - Click `Review` for the user admin > confirm with `Y` > `Submit Approvals` > `Commit`
-   - Click `Review` for the `ssh:user` role add > confirm with `Y` > `Submit Approvals` > `Commit`
-   - Switch to the `Policies` tab (click `Refresh` if empty)
-   - Click `Review` for `ssh:user` > confirm with `Y` > `Submit Approvals` > `Commit`
 
-6. Expand your user profile (bottom-left icon) > click `Restart session`
+7. Expand your user profile (bottom-left icon) > click `Restart session`
 
 ### Step 3: Get the public key
 
