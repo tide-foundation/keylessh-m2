@@ -30,6 +30,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { queryClient } from "@/lib/queryClient";
 import { api, AccessApproval, RoleApproval, PendingSshPolicy, SshPolicyDecision } from "@/lib/api";
+import * as tc from "@/lib/tidecloakAdmin";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
 import { CheckSquare, X, Upload, User, Shield, FileKey, Eye, Check, Clock, CheckCircle2, XCircle, ChevronDown, ChevronRight, Code, Trash2, Undo2, Users } from "lucide-react";
 import { SSH_FORSETI_CONTRACT } from "@/lib/sshPolicy";
@@ -816,12 +817,16 @@ function PolicyApprovalsTab({ isActive }: { isActive: boolean }) {
 
       // Fetch the tide-realm-admin authorization policy that the ORK PreSign
       // requires attached to a policy-commit model. We attach it here, right
-      // before signing, so the model ALWAYS carries its policy regardless of
-      // whether the list-time server attachment ran. Without it the ORK rejects
-      // with "Model does not have a policy passed with it".
+      // before signing, so the model ALWAYS carries its policy. This uses the
+      // CLIENT-DIRECT DPoP path (tc.getAdminPolicy -> tcFetch, the same DPoP-
+      // authenticated mechanism the CR approve/commit ops use). The server-relay
+      // path (api.admin.sshPolicies.getAdminPolicy) 401s because the forwarded
+      // plain Bearer token has no DPoP proof and iga-core's admin surface rejects
+      // it. Without the policy the ORK rejects with "Model does not have a policy
+      // passed with it".
       let adminPolicyBytes: Uint8Array | null = null;
       try {
-        const { policy: adminPolicyB64 } = await api.admin.sshPolicies.getAdminPolicy();
+        const adminPolicyB64 = await tc.getAdminPolicy();
         if (adminPolicyB64) {
           adminPolicyBytes = base64ToBytes(adminPolicyB64);
         }

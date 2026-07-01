@@ -39,7 +39,6 @@ import {
   type LicenseInfo,
   type LimitCheck,
 } from "@shared/schema";
-import { getAdminPolicy } from "./lib/tidecloakApi";
 import { isStripeConfigured } from "./lib/stripe";
 import { createRequire } from "module";
 
@@ -1141,9 +1140,15 @@ export class PendingPolicyStorage {
     };
   }
 
-  // Get all pending policies (not yet committed or cancelled)
-  // For commit-ready policies, adds the admin policy to the request (required for Ork commit)
-  async getAllPendingPolicies(adminToken?: string): Promise<PendingSshPolicy[]> {
+  // Get all pending policies (not yet committed or cancelled).
+  // NOTE: the tide-realm-admin admin policy that the ORK PreSign requires is
+  // attached CLIENT-SIDE at commit time (AdminApprovals.commitPolicies ->
+  // tc.getAdminPolicy via the DPoP-authenticated path), NOT here. The former
+  // server-side list-time attach fetched the policy with the forwarded plain
+  // Bearer token, which iga-core's admin surface rejects with 401, so it never
+  // actually attached (it silently continued). It was removed to leave a single
+  // working path.
+  async getAllPendingPolicies(): Promise<PendingSshPolicy[]> {
     const rows = sqlite.prepare(`
       SELECT p.*,
         (SELECT COUNT(*) FROM ssh_policy_decisions d WHERE d.policy_request_id = p.id AND d.decision = 1) as approval_count,
@@ -1155,44 +1160,9 @@ export class PendingPolicyStorage {
       ORDER BY p.created_at DESC
     `).all() as any[];
 
-    // Fetch admin policy from TideCloak (needed to authorize commits). The new
-    // iga-core GET /iga/role-policies/name/tide-realm-admin requires a valid
-    // bearer token, so an admin token must be threaded in from the request.
-    let adminPolicyBytes: Uint8Array | null = null;
-    if (adminToken) {
-      try {
-        const adminPolicyBase64 = await getAdminPolicy(adminToken);
-        adminPolicyBytes = base64ToBytes(adminPolicyBase64);
-      } catch (error) {
-        console.error("Failed to fetch admin policy:", error);
-        // Continue without admin policy - commits will fail but approvals still work
-      }
-    } else {
-      console.warn("No admin token provided to getAllPendingPolicies; skipping admin-policy fetch");
-    }
-
     const policies = await Promise.all(rows.map(async row => {
+      const policyRequestData = row.policy_request_data;
       const isCommitReady = (row.approval_count || 0) >= row.threshold;
-      let policyRequestData = row.policy_request_data;
-
-      // If commit-ready and we have admin policy, add it to the request
-      if (isCommitReady && adminPolicyBytes) {
-        try {
-          const request = PolicySignRequest.decode(base64ToBytes(policyRequestData));
-          // Add the admin policy to authorize the commit
-          request.addPolicy(adminPolicyBytes);
-          const updatedData = bytesToBase64(request.encode());
-
-          // Update the request in the database with admin policy attached
-          sqlite.prepare(`
-            UPDATE pending_ssh_policies SET policy_request_data = ? WHERE id = ?
-          `).run(updatedData, row.id);
-
-          policyRequestData = updatedData;
-        } catch (error) {
-          console.error(`Failed to add admin policy to request ${row.id}:`, error);
-        }
-      }
 
       return {
         id: row.id,

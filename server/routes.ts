@@ -133,8 +133,6 @@ import {
   GetRawChangeSetRequest,
   AddApprovalWithSignedRequest,
   GetClientEvents,
-  getAdminPolicy,
-  AdminPolicyFetchError,
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
@@ -2194,47 +2192,6 @@ export async function registerRoutes(
     }
   );
 
-  // GET /api/admin/ssh-policies/admin-policy - Return the tide-realm-admin
-  // authorization policy (base64) that the ORK PreSign requires attached to a
-  // policy-commit sign-model. Sourced from the new iga-core surface
-  // (GET /iga/role-policies/name/tide-realm-admin, via getAdminPolicy). The
-  // client attaches this to the PolicySignRequest right before signing so the
-  // ORK never gets a model without its policy ("Model does not have a policy
-  // passed with it").
-  app.get(
-    "/api/admin/ssh-policies/admin-policy",
-    authenticate,
-    requireAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const token = req.accessToken!;
-        const policy = await getAdminPolicy(token);
-        if (!policy) {
-          res.status(404).json({ error: "tide-realm-admin policy not found (empty .policy on this realm)" });
-          return;
-        }
-        res.json({ policy });
-      } catch (error) {
-        // Surface the TRUE cause. If the iga-core call itself failed, propagate
-        // its real status + body (401/403 = the admin token cannot reach the iga
-        // admin surface; 404 = no tide-realm-admin policy on this realm) instead
-        // of collapsing everything to a 500 that hides the root cause.
-        const msg = error instanceof Error ? error.message : String(error);
-        console.error("[admin-policy] Failed to fetch admin policy:", error);
-        log(`Failed to fetch admin policy: ${msg}`);
-        if (error instanceof AdminPolicyFetchError) {
-          res.status(error.status && error.status >= 400 ? error.status : 502).json({
-            error: "Failed to fetch tide-realm-admin policy from iga-core",
-            upstreamStatus: error.status,
-            upstreamBody: error.body?.slice(0, 500),
-          });
-          return;
-        }
-        res.status(500).json({ error: `Failed to fetch admin policy: ${msg}` });
-      }
-    }
-  );
-
   // ============================================
   // SSH Policy Approval Routes
   // ============================================
@@ -2287,7 +2244,7 @@ export async function registerRoutes(
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const policies = await pendingPolicyStorage.getAllPendingPolicies(req.accessToken);
+        const policies = await pendingPolicyStorage.getAllPendingPolicies();
         res.json({ policies });
       } catch (error) {
         log(`Failed to fetch pending policies: ${error}`);

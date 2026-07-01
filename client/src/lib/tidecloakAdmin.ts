@@ -567,6 +567,28 @@ export async function addApprovalWithSignedRequest(
 }
 
 // ============================================
+// Admin policy (for policy-commit ORK PreSign)
+// ============================================
+
+// Fetch the tide-realm-admin authorization policy (base64) that the ORK PreSign
+// requires attached to a policy-commit sign-model. This uses the CLIENT-DIRECT
+// DPoP path (tcFetch -> IAMService.getToken() DPoP token + appFetch DPoP proof,
+// against {authServerUrl}/admin/realms/{realm}), the SAME mechanism the CR ops
+// (getUserChangeRequests / addApprovalWithSignedRequest / commitChangeRequest)
+// use to reach iga-core. The server-relay Bearer path 401s at iga-core because
+// the forwarded token carries no DPoP proof; this DPoP-authenticated request is
+// what iga-core's admin surface accepts. The role-policies READ is
+// authenticated-only (less privileged than the /iga/change-requests endpoints
+// the CR path already hits), so the same DPoP token satisfies it. Returns the
+// base64 `.policy` field of the IgaRolePolicyRepresentation.
+export async function getAdminPolicy(): Promise<string> {
+  const rep = await tcFetch<{ policy?: string }>(
+    "/iga/role-policies/name/tide-realm-admin"
+  );
+  return rep?.policy ?? "";
+}
+
+// ============================================
 // SSH Policy Sync (still goes through server)
 // ============================================
 

@@ -405,10 +405,6 @@ export const api = {
     sshPolicies: {
       listPending: () =>
         apiRequest<{ policies: PendingSshPolicy[] }>("/api/admin/ssh-policies/pending"),
-      // The tide-realm-admin authorization policy (base64) the ORK PreSign
-      // requires attached to a policy-commit sign-model.
-      getAdminPolicy: () =>
-        apiRequest<{ policy: string }>("/api/admin/ssh-policies/admin-policy"),
       getPending: (id: string) =>
         apiRequest<{ policy: PendingSshPolicy; decisions: SshPolicyDecision[] }>(
           `/api/admin/ssh-policies/pending/${id}`

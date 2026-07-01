@@ -168,46 +168,13 @@ export const syncPolicyToTideCloak = async (
   }
 };
 
-// Fetch the admin policy from TideCloak (used to authorize policy commits).
-// New iga-core surface: GET /iga/role-policies/name/tide-realm-admin returns an
-// IgaRolePolicyRepresentation JSON whose `.policy` field carries the reserved
-// admin row's base64 policy bytes (replaces the removed bare-base64 body from
-// GET /tide-policy-resources/admin-policy). This read is authenticated-only
-// (no requireManageRealm) but still needs a valid bearer token.
-// Error carrying the upstream iga-core status + body so callers can propagate
-// the true cause (401/403/404) instead of collapsing to a bare 500.
-export class AdminPolicyFetchError extends Error {
-  constructor(public status: number, public body: string, public url: string) {
-    super(`iga-core GET ${url} -> HTTP ${status}: ${body}`);
-    this.name = "AdminPolicyFetchError";
-  }
-}
-
-export const getAdminPolicy = async (token: string): Promise<string> => {
-  const url = `${getTcUrl()}/iga/role-policies/name/tide-realm-admin`;
-  const response = await fetch(url, {
-    headers: {
-      accept: "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    // Surface the REAL upstream status + body (e.g. 401/403 = token can't reach
-    // the iga admin surface; 404 = no tide-realm-admin policy on this realm).
-    console.error(`[getAdminPolicy] iga-core GET ${url} -> HTTP ${response.status}: ${text.slice(0, 500)}`);
-    throw new AdminPolicyFetchError(response.status, text, url);
-  }
-  let rep: any;
-  try {
-    rep = JSON.parse(text);
-  } catch (e) {
-    console.error(`[getAdminPolicy] non-JSON body from ${url}: ${text.slice(0, 200)}`);
-    throw new AdminPolicyFetchError(response.status, `non-JSON response: ${text.slice(0, 200)}`, url);
-  }
-  // Returns base64-encoded policy bytes in the `.policy` field.
-  return rep?.policy ?? "";
-};
+// NOTE: the tide-realm-admin admin policy that the ORK PreSign requires is now
+// fetched CLIENT-SIDE via the DPoP-authenticated path (client/src/lib/
+// tidecloakAdmin.ts `getAdminPolicy` -> tcFetch), not server-side. The old
+// server-side getAdminPolicy fetched GET /iga/role-policies/name/tide-realm-admin
+// with the forwarded plain Bearer token, which iga-core's admin surface rejects
+// with 401 (no DPoP proof), so it never worked. It was removed to leave a single
+// working path.
 
 export interface KeycloakEvent {
   id: string;
