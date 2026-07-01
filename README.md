@@ -78,6 +78,7 @@ keylessh/
 
 - Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Deployment: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- Punchd gateway (easy guide): [docs/PUNCHD-GATEWAY.md](docs/PUNCHD-GATEWAY.md) — what punchd is, when you need it, and the simplest SSH-gateway setup
 - Developer guide: [docs/DEVELOPERS.md](docs/DEVELOPERS.md)
 
 ### Component docs
