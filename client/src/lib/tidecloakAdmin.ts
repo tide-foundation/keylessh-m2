@@ -454,95 +454,116 @@ export async function getClientEvents(first: number = 0, max: number = 100): Pro
 // Change Set / Approval Operations
 // ============================================
 
-export async function getUserChangeRequests(): Promise<any[]> {
-  const data = await tcFetch<any[]>("/tide-admin/change-set/users/requests");
-  return data.map(d => ({
-    data: d,
+// Repointed to the consolidated iga-core surface (the old /tide-admin/change-set/*
+// + /tideAdminResources/add-review|add-rejection endpoints were removed). This is
+// the LIVE admin-UI CR path (AdminApprovals.tsx -> api.ts -> here), running
+// client-direct over the DPoP-bound admin token via tcFetch (NO mTLS/delegation).
+// The /iga/* admin endpoints require a manage-realm-capable token, which the
+// admin-console user's token carries. The enclave-sign round-trip shape
+// (getRawChangeSetRequest -> sign -> addApprovalWithSignedRequest) is preserved.
+
+// GET /iga/change-requests?status=PENDING returns a flat list for ALL entity
+// types; filter by entityType here. Field renames vs the old surface:
+//   draftRecordId -> id ; changeSetType -> entityType ; state -> status.
+// The api.ts list mappers read item.data.draftRecordId, so we alias id ->
+// draftRecordId on the `data` object to keep them working unchanged.
+async function getPendingChangeRequests(): Promise<any[]> {
+  return tcFetch<any[]>("/iga/change-requests?status=PENDING");
+}
+
+function toRetrieval(d: any) {
+  return {
+    // Preserve the legacy `data` field names the api.ts mappers read
+    // (draftRecordId / changeSetType), aliased from the new rep.
+    data: { ...d, draftRecordId: d.id, changeSetType: d.entityType },
     retrievalInfo: {
-      changeSetId: d.draftRecordId,
-      changeSetType: d.changeSetType,
+      changeSetId: d.id,
+      changeSetType: d.entityType,
       actionType: d.actionType,
     } as ChangeSetRequest,
-  }));
+  };
+}
+
+export async function getUserChangeRequests(): Promise<any[]> {
+  const all = await getPendingChangeRequests();
+  return all.filter(d => d.entityType === "USER").map(toRetrieval);
 }
 
 export async function getRoleChangeRequests(): Promise<any[]> {
-  const data = await tcFetch<any[]>("/tide-admin/change-set/roles/requests");
-  return data.map(d => ({
-    data: d,
-    retrievalInfo: {
-      changeSetId: d.draftRecordId,
-      changeSetType: d.changeSetType,
-      actionType: d.actionType,
-    } as ChangeSetRequest,
-  }));
+  const all = await getPendingChangeRequests();
+  return all.filter(d => d.entityType === "ROLE").map(toRetrieval);
 }
 
+// Phase-1 /approve with empty body. multiAdmin returns
+// {mode:"needs-approval", requestModel,...}; firstAdmin/simple records AND
+// auto-commits in one call. Replaces the old add-review no-signature approve.
 export async function addApprovalToChangeRequest(changeSet: ChangeSetRequest): Promise<void> {
-  const formData = new FormData();
-  formData.append("changeSetId", changeSet.changeSetId);
-  formData.append("actionType", changeSet.actionType);
-  formData.append("changeSetType", changeSet.changeSetType);
-
-  const token = await IAMService.getToken();
-  const base = await getTcUrl();
-  const url = `${base}/tideAdminResources/add-review`;
-  const response = await appFetch(url, { method: "POST", body: formData, headers: { Authorization: `Bearer ${token}` } });
-  if (!response.ok) throw new Error(`Error adding approval: ${await response.text()}`);
+  await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
 }
 
+// REJECT maps to /deny on the new surface (the old add-rejection is gone).
 export async function addRejectionToChangeRequest(changeSet: ChangeSetRequest): Promise<void> {
-  const formData = new FormData();
-  formData.append("actionType", changeSet.actionType);
-  formData.append("changeSetId", changeSet.changeSetId);
-  formData.append("changeSetType", changeSet.changeSetType);
-
-  const token = await IAMService.getToken();
-  const base = await getTcUrl();
-  const url = `${base}/tideAdminResources/add-rejection`;
-  const response = await appFetch(url, { method: "POST", body: formData, headers: { Authorization: `Bearer ${token}` } });
-  if (!response.ok) throw new Error(`Error adding rejection: ${await response.text()}`);
+  await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/deny`, {
+    method: "POST",
+  });
 }
 
+// Apply-only. Usually unnecessary (/approve auto-commits at quorum). id in path,
+// empty body. Replaces the removed /tide-admin/change-set/commit.
 export async function commitChangeRequest(changeSet: ChangeSetRequest): Promise<void> {
-  await tcFetch("/tide-admin/change-set/commit", {
+  await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/commit`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(changeSet),
   });
 }
 
+// CANCEL maps to /deny on the new surface (the old change-set/cancel is gone).
 export async function cancelChangeRequest(changeSet: ChangeSetRequest): Promise<void> {
-  await tcFetch("/tide-admin/change-set/cancel", {
+  await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/deny`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(changeSet),
   });
 }
 
+// "Get raw request to sign" is now PHASE 1 of /approve: the empty-body call
+// returns the requestModel (multiAdmin) that the enclave signs. We adapt it into
+// the legacy [{changesetId, changeSetDraftRequests, requiresApprovalPopup}] shape
+// that AdminApprovals.tsx already consumes. If mode !== "needs-approval"
+// (firstAdmin/simple realms) the CR was already recorded/committed and there is
+// nothing to sign; return [] so the caller treats it as "no popup required".
 export async function getRawChangeSetRequest(changeSet: ChangeSetRequest): Promise<any[]> {
-  return tcFetch("/tide-admin/change-set/sign/batch", {
+  const phase1 = await tcFetch<any>(`/iga/change-requests/${changeSet.changeSetId}/approve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ changeSets: [changeSet] }),
+    body: JSON.stringify({}),
   });
+  const needsApproval = phase1?.mode === "needs-approval" && !!phase1?.requestModel;
+  if (!needsApproval) {
+    return [];
+  }
+  return [
+    {
+      changesetId: phase1.changeRequestId ?? changeSet.changeSetId,
+      changeSetDraftRequests: phase1.requestModel as string,
+      requiresApprovalPopup: true,
+    },
+  ];
 }
 
+// PHASE 2: submit the enclave-signed doken toward the CR's threshold via
+// /approve {requestModel:<signed>}. Auto-commits at quorum. Replaces the old
+// multipart add-review with a `requests` form field.
 export async function addApprovalWithSignedRequest(
   changeSet: ChangeSetRequest,
   signedRequest: string
 ): Promise<void> {
-  const formData = new FormData();
-  formData.append("changeSetId", changeSet.changeSetId);
-  formData.append("actionType", changeSet.actionType);
-  formData.append("changeSetType", changeSet.changeSetType);
-  formData.append("requests", signedRequest);
-
-  const token = await IAMService.getToken();
-  const base = await getTcUrl();
-  const url = `${base}/tideAdminResources/add-review`;
-  const response = await appFetch(url, { method: "POST", body: formData, headers: { Authorization: `Bearer ${token}` } });
-  if (!response.ok) throw new Error(`Error adding approval with signed request: ${await response.text()}`);
+  await tcFetch(`/iga/change-requests/${changeSet.changeSetId}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ requestModel: signedRequest }),
+  });
 }
 
 // ============================================
