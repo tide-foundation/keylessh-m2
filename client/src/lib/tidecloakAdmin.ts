@@ -471,11 +471,95 @@ async function getPendingChangeRequests(): Promise<any[]> {
   return tcFetch<any[]>("/iga/change-requests?status=PENDING");
 }
 
-function toRetrieval(d: any) {
+// Lookups the display mappers need to turn the new `rows` (which carry only
+// UUIDs for GRANT_ROLES) back into human-readable User / Role / Client values.
+interface CrLookups {
+  usersById: Map<string, UserRepresentation>;
+  rolesById: Map<string, RoleRepresentation>;
+  clientIdByUuid: Map<string, string>;
+}
+
+async function buildCrLookups(): Promise<CrLookups> {
+  const [users, roles, appClientId] = await Promise.all([
+    getUsers().catch(() => [] as UserRepresentation[]),
+    getAllRoles().catch(() => [] as RoleRepresentation[]),
+    getClientId(),
+  ]);
+  const usersById = new Map<string, UserRepresentation>();
+  for (const u of users) if (u.id) usersById.set(u.id, u);
+  const rolesById = new Map<string, RoleRepresentation>();
+  for (const r of roles) if (r.id) rolesById.set(r.id, r);
+
+  // Map a role's container (client) UUID to its clientId string so a
+  // resolved role can name its client. Only the two clients we ever touch
+  // (the app client + realm-management) need resolving.
+  const clientIdByUuid = new Map<string, string>();
+  const [appClient, rmClient] = await Promise.all([
+    getClientByClientId(appClientId).catch(() => null),
+    getClientByClientId(REALM_MGMT).catch(() => null),
+  ]);
+  if (appClient?.id) clientIdByUuid.set(appClient.id, appClient.clientId || appClientId);
+  if (rmClient?.id) clientIdByUuid.set(rmClient.id, rmClient.clientId || REALM_MGMT);
+  return { usersById, rolesById, clientIdByUuid };
+}
+
+// Pull display-friendly User / Role / Client out of the new iga-core CR `rows`.
+// `rows` is DB-row shaped with UPPERCASE column names that vary by actionType:
+//   GRANT_ROLES : [{ USER_ID, ROLE_ID }]              (UUIDs only, resolve to names)
+//   CREATE_USER : [{ ID, USERNAME, REP_JSON, ... }]   (USERNAME present)
+//   CREATE_ROLE : [{ ID, NAME, CLIENT_ID, ... }]      (NAME + CLIENT_ID present)
+function extractCrDisplay(d: any, lk: CrLookups): {
+  userRecord: { username: string }[];
+  role: string;
+  compositeRole: string | undefined;
+  clientId: string;
+} {
+  const rows: any[] = Array.isArray(d.rows) ? d.rows : [];
+  const row = rows[0] || {};
+  let username: string | undefined;
+  let role: string | undefined;
+  let compositeRole: string | undefined;
+  let clientId: string | undefined;
+
+  // User: prefer an explicit USERNAME (CREATE_USER), else resolve USER_ID.
+  const userId = row.USER_ID || row.ID || d.entityId;
+  username = row.USERNAME || (userId ? lk.usersById.get(userId)?.username : undefined);
+
+  // Role: prefer an explicit NAME (CREATE_ROLE), else resolve ROLE_ID.
+  const roleId = row.ROLE_ID || (d.entityType === "ROLE" ? row.ID || d.entityId : undefined);
+  const resolvedRole = roleId ? lk.rolesById.get(roleId) : undefined;
+  role = row.NAME || resolvedRole?.name;
+  compositeRole = resolvedRole?.composite ? resolvedRole?.name : undefined;
+
+  // Client: explicit CLIENT_ID (CREATE_ROLE), else the resolved role's container.
+  const containerUuid = row.CLIENT_UUID || resolvedRole?.containerId;
+  clientId = row.CLIENT_ID || (containerUuid ? lk.clientIdByUuid.get(containerUuid) : undefined);
+
+  return {
+    userRecord: username ? [{ username }] : [],
+    role: role || "Unknown",
+    compositeRole,
+    clientId: clientId || "Unknown",
+  };
+}
+
+function toRetrieval(d: any, lk: CrLookups) {
+  const display = extractCrDisplay(d, lk);
   return {
     // Preserve the legacy `data` field names the api.ts mappers read
-    // (draftRecordId / changeSetType), aliased from the new rep.
-    data: { ...d, draftRecordId: d.id, changeSetType: d.entityType },
+    // (draftRecordId / changeSetType), aliased from the new rep. Also inject
+    // the display fields (userRecord / role / compositeRole / clientId) the
+    // api.ts list mappers pull out of the OLD payload shape, recomputed from
+    // the new `rows`/`entityType`.
+    data: {
+      ...d,
+      draftRecordId: d.id,
+      changeSetType: d.entityType,
+      userRecord: display.userRecord,
+      role: display.role,
+      compositeRole: display.compositeRole,
+      clientId: display.clientId,
+    },
     retrievalInfo: {
       changeSetId: d.id,
       changeSetType: d.entityType,
@@ -486,12 +570,18 @@ function toRetrieval(d: any) {
 
 export async function getUserChangeRequests(): Promise<any[]> {
   const all = await getPendingChangeRequests();
-  return all.filter(d => d.entityType === "USER").map(toRetrieval);
+  const userCrs = all.filter(d => d.entityType === "USER");
+  if (userCrs.length === 0) return [];
+  const lk = await buildCrLookups();
+  return userCrs.map(d => toRetrieval(d, lk));
 }
 
 export async function getRoleChangeRequests(): Promise<any[]> {
   const all = await getPendingChangeRequests();
-  return all.filter(d => d.entityType === "ROLE").map(toRetrieval);
+  const roleCrs = all.filter(d => d.entityType === "ROLE");
+  if (roleCrs.length === 0) return [];
+  const lk = await buildCrLookups();
+  return roleCrs.map(d => toRetrieval(d, lk));
 }
 
 // Phase-1 /approve with empty body. multiAdmin returns
