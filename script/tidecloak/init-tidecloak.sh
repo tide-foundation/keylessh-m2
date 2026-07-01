@@ -514,6 +514,27 @@ curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/vendorRes
 
 log_info "Adapter config saved to $ADAPTER_OUTPUT_PATH"
 
+# Validate the fetched adapter before installing it, then copy it to the location
+# the app ACTUALLY reads at runtime: <repo>/data/tidecloak.json. The server serves
+# this file to the browser via GET /api/auth/config (server/lib/auth/tidecloakConfig.ts
+# -> process.cwd()/data/tidecloak.json), and the OIDC login redirect is built from
+# its auth-server-url/realm/resource. Without this copy the app keeps using a STALE
+# data/tidecloak.json (wrong host/realm) and never picks up the freshly-generated one.
+if ! jq -e '.realm and ."auth-server-url" and .resource' "$ADAPTER_OUTPUT_PATH" > /dev/null 2>&1; then
+  log_error "Fetched adapter at ${ADAPTER_OUTPUT_PATH} is not valid or missing realm/auth-server-url/resource:"
+  head -c 400 "$ADAPTER_OUTPUT_PATH" 2>/dev/null; echo ""
+  log_error "Not installing a bad adapter into data/. The app would fail to log in."
+  rm -f "$TMP_REALM_JSON"
+  exit 1
+fi
+
+# <repo>/data is two levels up from this script dir (script/tidecloak/..).
+DATA_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)/data"
+mkdir -p "$DATA_DIR"
+APP_ADAPTER_PATH="${DATA_DIR}/tidecloak.json"
+cp "$ADAPTER_OUTPUT_PATH" "$APP_ADAPTER_PATH"
+log_info "Installed adapter to app read path: ${APP_ADAPTER_PATH} (realm=$(jq -r '.realm' "$APP_ADAPTER_PATH"), auth-server-url=$(jq -r '."auth-server-url"' "$APP_ADAPTER_PATH"), resource=$(jq -r '.resource' "$APP_ADAPTER_PATH"))"
+
 rm -f "$TMP_REALM_JSON"
 
 # =============================================
