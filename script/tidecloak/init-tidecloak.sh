@@ -462,26 +462,42 @@ sign_all_change_requests
 TOKEN="$(get_admin_token)"
 log_info "Creating admin user..."
 
+# NOTE (async IGA model): POST /users returns 202 and captures a CREATE_USER
+# change-request; the user does NOT exist until that CR is committed. The user is
+# created with tideInvitable=true so the invite link (step 7) can be generated
+# (that attribute is required, and it too is captured as a SET_USER_ATTRIBUTE CR
+# that must be committed). We therefore create the user, then sign_all to commit
+# the CREATE_USER (+ tideInvitable) CRs, then verify the user actually exists.
+# The tide-realm-admin role is NOT assigned here: it can only be granted AFTER
+# the user is linked to the Tide IdP (verified live: assigning it to an unlinked
+# user returns 400 "target user is not linked to the Tide identity provider").
+# The role grant therefore happens after the wait-for-link step below.
 curl -s $CURL_OPTS -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/users" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","email":"admin@yourorg.com","firstName":"admin","lastName":"user","enabled":true,"emailVerified":false,"requiredActions":[],"attributes":{"locale":""},"groups":[]}' > /dev/null 2>&1
+  -d '{"username":"admin","email":"admin@yourorg.com","firstName":"admin","lastName":"user","enabled":true,"emailVerified":false,"requiredActions":[],"attributes":{"locale":"","tideInvitable":["true"]},"groups":[]}' > /dev/null 2>&1
 
-USER_ID=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/users?username=admin" \
-  -H "Authorization: Bearer $TOKEN" | jq -r '.[0].id')
+# Commit the CREATE_USER (+ tideInvitable SET_USER_ATTRIBUTE) change-requests so
+# the user genuinely exists before anything depends on it.
+log_info "Committing admin-user change-request(s)..."
+sign_all_change_requests
 
-CLIENT_UUID=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/clients?clientId=${REALM_MGMT_CLIENT_ID}" \
-  -H "Authorization: Bearer $TOKEN" | jq -r '.[0].id')
-
-ROLE_JSON=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/clients/$CLIENT_UUID/roles/${ADMIN_ROLE_NAME}" \
-  -H "Authorization: Bearer $TOKEN")
-
-curl -s $CURL_OPTS -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/users/$USER_ID/role-mappings/clients/$CLIENT_UUID" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "[$ROLE_JSON]" > /dev/null 2>&1
-
-log_info "Admin user created with ${ADMIN_ROLE_NAME} role."
+# Verify the user now exists with a real id (short retry in case commit + read
+# are eventually-consistent). Hard-fail with a clear message if it never lands.
+USER_ID=""
+for i in $(seq 1 6); do
+  TOKEN="$(get_admin_token)"
+  USER_ID=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/users?username=admin" \
+    -H "Authorization: Bearer $TOKEN" | jq -r '.[0].id // empty')
+  [ -n "$USER_ID" ] && break
+  log_info "[diag] admin user not visible yet (attempt ${i}/6); retrying..."
+  sleep 2
+done
+if [ -z "$USER_ID" ]; then
+  log_error "Admin user was not created (no id after committing CREATE_USER CR). Aborting."
+  exit 1
+fi
+log_info "Admin user created (id=${USER_ID}). tide-realm-admin will be granted after Tide linking."
 
 # =============================================
 #  5. Fetch adapter config
@@ -559,6 +575,15 @@ RAW_INVITE_LINK=$(curl -s $CURL_OPTS -X POST "${TIDECLOAK_URL}/admin/realms/${RE
   -H "Content-Type: application/json" \
   -d '["link-tide-account-action"]')
 
+# Fail clearly if link generation errored (e.g. user not yet committed, or the
+# tideInvitable attribute is not set/committed) instead of printing a bogus link
+# and then hanging forever in the "waiting for link" loop below.
+if [ -z "$RAW_INVITE_LINK" ] || echo "$RAW_INVITE_LINK" | jq -e '.error? // .errorMessage? // empty' > /dev/null 2>&1; then
+  log_error "Invite-link generation failed: $(echo "$RAW_INVITE_LINK" | head -c 300)"
+  log_error "The admin user must exist AND have tideInvitable=true committed before an invite link can be generated."
+  exit 1
+fi
+
 echo ""
 echo -e "${GREEN}================================================${NC}"
 echo -e "${GREEN}  INVITE LINK (open in browser):${NC}"
@@ -586,12 +611,46 @@ while true; do
 done
 
 # =============================================
-#  8. Sign all pending change-requests (post user creation)
+#  8. Grant tide-realm-admin (now that the user is Tide-linked) + sign
 # =============================================
 
-# User creation above may have generated new pending change-requests; drain them
-# all (same sign-all pass; no per-type change-set step in the new iga-core).
+# tide-realm-admin can ONLY be assigned to a user already linked to the Tide IdP
+# (assigning it to an unlinked user returns 400). We are past the wait-for-link
+# loop above, so the admin user is linked and the grant will be accepted. The
+# grant may itself be captured as a change-request (e.g. GRANT_ROLES) in the
+# async IGA model, so we sign_all afterwards to commit it and make the role land.
+TOKEN="$(get_admin_token)"
+log_info "Granting ${ADMIN_ROLE_NAME} to the linked admin user..."
+
+CLIENT_UUID=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/clients?clientId=${REALM_MGMT_CLIENT_ID}" \
+  -H "Authorization: Bearer $TOKEN" | jq -r '.[0].id')
+
+ROLE_JSON=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/clients/$CLIENT_UUID/roles/${ADMIN_ROLE_NAME}" \
+  -H "Authorization: Bearer $TOKEN")
+
+grant_status=$(curl -s $CURL_OPTS -o /dev/null -w "%{http_code}" -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/users/$USER_ID/role-mappings/clients/$CLIENT_UUID" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "[$ROLE_JSON]")
+log_info "[diag] role-mapping POST -> HTTP ${grant_status}"
+if [[ ! "$grant_status" =~ ^2 ]]; then
+  log_error "Failed to grant ${ADMIN_ROLE_NAME} (HTTP ${grant_status}). The user may not be Tide-linked."
+  exit 1
+fi
+
+# Commit any change-request the grant produced (async GRANT_ROLES), plus any
+# other still-pending CRs, so the role actually lands.
 sign_all_change_requests
+
+# Verify the role is actually present on the user (role-mappings realm/client).
+TOKEN="$(get_admin_token)"
+HAS_ROLE=$(curl -s $CURL_OPTS -X GET "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/users/$USER_ID/role-mappings/clients/$CLIENT_UUID" \
+  -H "Authorization: Bearer $TOKEN" 2>/dev/null | jq -r --arg r "${ADMIN_ROLE_NAME}" 'if type=="array" and (map(.name) | index($r)) then "yes" else "no" end' 2>/dev/null || echo "no")
+if [ "$HAS_ROLE" = "yes" ]; then
+  log_info "Admin user now has the ${ADMIN_ROLE_NAME} role."
+else
+  log_warn "Could not confirm ${ADMIN_ROLE_NAME} on the admin user after signing (it may commit shortly)."
+fi
 
 # =============================================
 #  9. Update CustomAdminUIDomain
