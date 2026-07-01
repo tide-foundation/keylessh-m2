@@ -161,6 +161,35 @@ get_admin_token() {
     -d "client_id=admin-cli" | jq -r '.access_token'
 }
 
+# Diagnostic: exercise the token endpoint and report the URL + HTTP status +
+# whether an access_token came back, WITHOUT printing the token or any secret.
+# Reports which realm/user/client/grant we authenticate as. Returns non-zero if
+# no token is obtained so callers can hard-fail early.
+diag_admin_token() {
+  local token_url="${TIDECLOAK_URL}/realms/master/protocol/openid-connect/token"
+  log_info "[diag] token endpoint: POST ${token_url} (realm=master user=${KC_USER} client=admin-cli grant=password)"
+  local resp status body
+  resp=$(curl -s $CURL_OPTS -w "\n%{http_code}" -X POST "$token_url" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "username=${KC_USER}" \
+    -d "password=${KC_PASSWORD}" \
+    -d "grant_type=password" \
+    -d "client_id=admin-cli" 2>&1)
+  status=$(echo "$resp" | tail -1)
+  body=$(echo "$resp" | sed '$d')
+  local have_token="no"
+  if echo "$body" | jq -e '.access_token | type == "string" and length > 0' > /dev/null 2>&1; then
+    have_token="yes"
+  fi
+  log_info "[diag] token endpoint -> HTTP ${status}, access_token returned: ${have_token}"
+  if [ "$have_token" != "yes" ]; then
+    # Print only the error/error_description fields (never the token), if present.
+    log_error "[diag] token request did NOT return an access_token. error: $(echo "$body" | jq -r '{error, error_description} | select(.error != null)' 2>/dev/null | tr -d '\n' | head -c 300)"
+    return 1
+  fi
+  return 0
+}
+
 # Sign ALL pending change-requests, regardless of entity type. The new iga-core
 # model has no per-CLIENT change-set step; you simply authorize+commit every
 # pending change request after realm/IGA init.
@@ -267,23 +296,64 @@ sign_all_change_requests() {
 # =============================================
 
 log_info "Creating realm '${REALM_NAME}'..."
+
+# Diagnostic: verify we can actually get an admin token before doing anything.
+if ! diag_admin_token; then
+  log_error "Cannot obtain an admin token from staging master; aborting before realm create."
+  exit 1
+fi
+
 TMP_REALM_JSON="$(mktemp)"
 cp "$REALM_JSON_PATH" "$TMP_REALM_JSON"
 sed -i "s|KEYLESSH|$REALM_NAME|g" "$TMP_REALM_JSON"
 
+# Diagnostic: the realm name the create body will actually use vs REALM_NAME.
+# NOTE: the sed above substitutes the token "KEYLESSH"; if realm.json does not
+# contain that exact (case-sensitive) token, the body's .realm is left as-is and
+# will NOT equal REALM_NAME.
+BODY_REALM="$(jq -r '.realm // "(none)"' "$TMP_REALM_JSON" 2>/dev/null || echo '(unparseable)')"
+log_info "[diag] REALM_NAME='${REALM_NAME}' ; realm.json body .realm='${BODY_REALM}'"
+if [ "$BODY_REALM" != "$REALM_NAME" ]; then
+  log_warn "[diag] MISMATCH: create body will create realm '${BODY_REALM}', NOT '${REALM_NAME}'. All later /admin/realms/${REALM_NAME}/* calls will 404 with 'Realm not found'."
+fi
+
 TOKEN="$(get_admin_token)"
-status=$(curl -s $CURL_OPTS -o /dev/null -w "%{http_code}" \
-  -X POST "${TIDECLOAK_URL}/admin/realms" \
+CREATE_URL="${TIDECLOAK_URL}/admin/realms"
+create_resp=$(curl -s $CURL_OPTS -w "\n%{http_code}" \
+  -X POST "$CREATE_URL" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  --data-binary @"$TMP_REALM_JSON")
+  --data-binary @"$TMP_REALM_JSON" 2>&1)
+status=$(echo "$create_resp" | tail -1)
+create_body=$(echo "$create_resp" | sed '$d')
+log_info "[diag] POST ${CREATE_URL} (body .realm=${BODY_REALM}) -> HTTP ${status} :: $(echo "$create_body" | head -c 400)"
 
 if [[ $status == 2* ]]; then
   log_info "Realm '${REALM_NAME}' created."
 elif [[ $status == 409 ]]; then
   log_warn "Realm '${REALM_NAME}' already exists. Continuing..."
 else
-  log_error "Realm creation failed (HTTP $status)"
+  log_error "Realm creation failed (HTTP $status): $(echo "$create_body" | head -c 400)"
+  rm -f "$TMP_REALM_JSON"
+  exit 1
+fi
+
+# VERIFY-EXISTS hard-fail: confirm the target REALM_NAME actually exists before
+# proceeding into tide-init / change-request steps. A 2xx or 409 above does NOT
+# prove REALM_NAME exists (e.g. if the create body created a differently-named
+# realm). Hard-fail with a clear message instead of running everything against a
+# non-existent realm and getting a cascade of "Realm not found".
+TOKEN="$(get_admin_token)"
+VERIFY_URL="${TIDECLOAK_URL}/admin/realms/${REALM_NAME}"
+verify_status=$(curl -s $CURL_OPTS -o /dev/null -w "%{http_code}" -X GET "$VERIFY_URL" \
+  -H "Authorization: Bearer $TOKEN" 2>/dev/null || echo "000")
+log_info "[diag] verify realm exists: GET ${VERIFY_URL} -> HTTP ${verify_status}"
+if [[ ! "$verify_status" =~ ^2 ]]; then
+  log_error "Realm '${REALM_NAME}' does NOT exist after the create step (GET ${VERIFY_URL} -> HTTP ${verify_status})."
+  log_error "The create call above reported HTTP ${status} but realm '${REALM_NAME}' is not present."
+  if [ "$BODY_REALM" != "$REALM_NAME" ]; then
+    log_error "Root cause: the create body's .realm ('${BODY_REALM}') does not match REALM_NAME ('${REALM_NAME}'). Fix realm.json / the name-substitution so the created realm is named '${REALM_NAME}'."
+  fi
   rm -f "$TMP_REALM_JSON"
   exit 1
 fi
