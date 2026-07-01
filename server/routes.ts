@@ -133,6 +133,7 @@ import {
   GetRawChangeSetRequest,
   AddApprovalWithSignedRequest,
   GetClientEvents,
+  getAdminPolicy,
 } from "./lib/tidecloakApi";
 import type { ChangeSetRequest, AccessApproval } from "./lib/auth/keycloakTypes";
 import { getAllowedSshUsersFromToken } from "./lib/auth/sshUsers";
@@ -2188,6 +2189,34 @@ export async function registerRoutes(
       } catch (error) {
         log(`Failed to fetch all roles: ${error}`);
         res.status(500).json({ error: "Internal Server Error" });
+      }
+    }
+  );
+
+  // GET /api/admin/ssh-policies/admin-policy - Return the tide-realm-admin
+  // authorization policy (base64) that the ORK PreSign requires attached to a
+  // policy-commit sign-model. Sourced from the new iga-core surface
+  // (GET /iga/role-policies/name/tide-realm-admin, via getAdminPolicy). The
+  // client attaches this to the PolicySignRequest right before signing so the
+  // ORK never gets a model without its policy ("Model does not have a policy
+  // passed with it").
+  app.get(
+    "/api/admin/ssh-policies/admin-policy",
+    authenticate,
+    requireAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const token = req.accessToken!;
+        const policy = await getAdminPolicy(token);
+        if (!policy) {
+          res.status(404).json({ error: "Admin policy not found" });
+          return;
+        }
+        res.json({ policy });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        log(`Failed to fetch admin policy: ${msg}`);
+        res.status(500).json({ error: `Failed to fetch admin policy: ${msg}` });
       }
     }
   );

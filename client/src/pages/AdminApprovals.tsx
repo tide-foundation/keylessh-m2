@@ -814,13 +814,36 @@ function PolicyApprovalsTab({ isActive }: { isActive: boolean }) {
       // Dynamic import to avoid loading heimdall-tide at page mount
       const { PolicySignRequest } = await import("heimdall-tide");
 
+      // Fetch the tide-realm-admin authorization policy that the ORK PreSign
+      // requires attached to a policy-commit model. We attach it here, right
+      // before signing, so the model ALWAYS carries its policy regardless of
+      // whether the list-time server attachment ran. Without it the ORK rejects
+      // with "Model does not have a policy passed with it".
+      let adminPolicyBytes: Uint8Array | null = null;
+      try {
+        const { policy: adminPolicyB64 } = await api.admin.sshPolicies.getAdminPolicy();
+        if (adminPolicyB64) {
+          adminPolicyBytes = base64ToBytes(adminPolicyB64);
+        }
+      } catch (e) {
+        console.error("Failed to fetch admin policy for commit:", e);
+      }
+      if (!adminPolicyBytes) {
+        throw new Error(
+          "Could not fetch the tide-realm-admin policy required to commit. The ORK will reject the sign request without it."
+        );
+      }
+
       for (const policy of policiesToCommit) {
         try {
           // Decode the stored request into a PolicySignRequest object
-          // This is critical - the PolicySignRequest.encode() method
-          // properly attaches the policy to the request for Ork
           const requestBytes = base64ToBytes(policy.policyRequestData);
           const policyRequest = PolicySignRequest.decode(requestBytes);
+
+          // Attach the admin authorization policy to the model so the ORK
+          // PreSign has its policy (idempotent if it was already attached
+          // server-side at list time). addPolicy lives on BaseTideRequest.
+          (policyRequest as any).addPolicy(adminPolicyBytes);
 
           // Re-encode to get the properly formatted request with policy attached
           const signatures = await executeTideRequest(policyRequest.encode());
