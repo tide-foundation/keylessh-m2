@@ -318,13 +318,29 @@ TMP_REALM_JSON="$(mktemp)"
 # If realm.json ever grows realm-name-embedded URLs (e.g. ".../realms/keylessh"
 # issuers/broker URLs), extend the jq below to rewrite "/realms/keylessh" ->
 # "/realms/$rn" in those specific fields only.
-jq --arg rn "$REALM_NAME" '
+#
+# Also fix the app-auth client ($CLIENT_NAME, default "myclient") so the browser
+# token exchange is not CORS-blocked: the /token endpoint sets its
+# Access-Control-Allow-Origin from the client's webOrigins. We set webOrigins to
+# ["+"] (Keycloak special value = allow CORS from every registered redirect-URI
+# origin), and ensure $CLIENT_APP_URL (the app origin, e.g. http://localhost:3000)
+# is present in redirectUris. "+" is robust: it always tracks redirectUris, so a
+# different app host only needs the redirectUri added. We do NOT touch the other
+# clients (e.g. myclient-stun / punchd.keylessh.com app identity).
+jq --arg rn "$REALM_NAME" --arg cn "$CLIENT_NAME" --arg appurl "$CLIENT_APP_URL" '
   .realm = $rn
   | (if (.defaultRole.name // "") == "default-roles-keylessh"
        then .defaultRole.name = ("default-roles-" + $rn) else . end)
   | (if has("roles") and (.roles | has("realm"))
        then .roles.realm |= map(if .name == "default-roles-keylessh"
                                   then .name = ("default-roles-" + $rn) else . end)
+       else . end)
+  | (if has("clients")
+       then .clients |= map(
+              if .clientId == $cn then
+                .webOrigins = ["+"]
+                | .redirectUris = (((.redirectUris // []) + [$appurl, ($appurl + "/*")]) | unique)
+              else . end)
        else . end)
 ' "$REALM_JSON_PATH" > "$TMP_REALM_JSON"
 
