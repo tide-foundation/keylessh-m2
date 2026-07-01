@@ -199,27 +199,54 @@ sign_all_change_requests() {
 
     log_info "Signing $id_count pending change-request(s) (pass $pass)..."
     local progressed=0
-    # Iterate CR ids (subshell-free so `progressed` survives the loop).
-    while read -r cr_id; do
-      [ -z "$cr_id" ] && continue
+    # Iterate full CR objects (one compact JSON per line); subshell-free via
+    # process substitution so `progressed` survives the loop.
+    while read -r cr; do
+      [ -z "$cr" ] && continue
 
-      # authorize then commit (canonical drainPending flow, both empty-body).
-      curl -s $CURL_OPTS -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests/${cr_id}/authorize" \
+      # Robust id extraction: the id field name has varied across iga-core
+      # versions. Per the iga-core source it is `.id`, but fall back to the
+      # legacy names so a version skew can't silently build an empty-id URL
+      # (which routes to "Realm not found").
+      local cr_id
+      cr_id=$(echo "$cr" | jq -r '.id // .draftRecordId // .changeSetRequestId // .changeRequestId // empty')
+      if [ -z "$cr_id" ] || [ "$cr_id" = "null" ]; then
+        log_error "Could not resolve change-request id from rep (no id/draftRecordId/changeSetRequestId/changeRequestId). Raw CR:"
+        echo "$cr" | jq . 2>/dev/null || echo "$cr"
+        return 1
+      fi
+
+      local auth_url commit_url
+      auth_url="${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests/${cr_id}/authorize"
+      commit_url="${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests/${cr_id}/commit"
+      log_info "[diag] CR id=${cr_id} entityType=$(echo "$cr" | jq -r '.entityType // "?"') actionType=$(echo "$cr" | jq -r '.actionType // "?"')"
+
+      # authorize (empty body). Capture status + body for diagnostics.
+      local auth_resp auth_status auth_body
+      auth_resp=$(curl -s $CURL_OPTS -w "\n%{http_code}" -X POST "$auth_url" \
         -H "Authorization: Bearer $TOKEN" \
         -H "Content-Type: application/json" \
-        -d "{}" > /dev/null 2>&1 || true
+        -d "{}" 2>&1)
+      auth_status=$(echo "$auth_resp" | tail -1)
+      auth_body=$(echo "$auth_resp" | sed '$d')
+      log_info "[diag] POST ${auth_url} -> HTTP ${auth_status} :: $(echo "$auth_body" | head -c 300)"
 
-      local commit_status
-      commit_status=$(curl -s $CURL_OPTS -o /dev/null -w "%{http_code}" -X POST "${TIDECLOAK_URL}/admin/realms/${REALM_NAME}/iga/change-requests/${cr_id}/commit" \
+      # commit (empty body). Capture status + body for diagnostics.
+      local commit_resp commit_status commit_body
+      commit_resp=$(curl -s $CURL_OPTS -w "\n%{http_code}" -X POST "$commit_url" \
         -H "Authorization: Bearer $TOKEN" \
         -H "Content-Type: application/json" \
-        -d "{}" 2>/dev/null || echo "000")
+        -d "{}" 2>&1)
+      commit_status=$(echo "$commit_resp" | tail -1)
+      commit_body=$(echo "$commit_resp" | sed '$d')
+      log_info "[diag] POST ${commit_url} -> HTTP ${commit_status} :: $(echo "$commit_body" | head -c 300)"
+
       if [[ "$commit_status" =~ ^2 ]]; then
         progressed=$((progressed + 1))
       else
         log_warn "CR ${cr_id} not committed (HTTP $commit_status); will retry next pass"
       fi
-    done < <(echo "$pending" | jq -r '.[].id')
+    done < <(echo "$pending" | jq -c '.[]')
 
     # No forward progress this pass -> stop rather than spin (a CR that stays
     # PENDING needs a role/quorum this bootstrap admin cannot satisfy).
