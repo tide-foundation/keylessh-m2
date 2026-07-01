@@ -304,13 +304,31 @@ if ! diag_admin_token; then
 fi
 
 TMP_REALM_JSON="$(mktemp)"
-cp "$REALM_JSON_PATH" "$TMP_REALM_JSON"
-sed -i "s|KEYLESSH|$REALM_NAME|g" "$TMP_REALM_JSON"
+
+# Field-targeted realm-name substitution via jq (the old `sed s|KEYLESSH|...`
+# matched nothing: realm.json uses lowercase "keylessh", and a blanket
+# s|keylessh|...| would clobber the app identity — punchd.keylessh.com redirect
+# URIs/webOrigins, client ids, role names). We rewrite ONLY the realm-NAME-
+# dependent fields to $REALM_NAME and leave every app-identity keylessh
+# reference untouched:
+#   .realm                              -> $rn
+#   .defaultRole.name (default-roles-*) -> default-roles-$rn
+#   .roles.realm[] name default-roles-* -> default-roles-$rn  (must match
+#                                          .defaultRole.name or KC import fails)
+# If realm.json ever grows realm-name-embedded URLs (e.g. ".../realms/keylessh"
+# issuers/broker URLs), extend the jq below to rewrite "/realms/keylessh" ->
+# "/realms/$rn" in those specific fields only.
+jq --arg rn "$REALM_NAME" '
+  .realm = $rn
+  | (if (.defaultRole.name // "") == "default-roles-keylessh"
+       then .defaultRole.name = ("default-roles-" + $rn) else . end)
+  | (if has("roles") and (.roles | has("realm"))
+       then .roles.realm |= map(if .name == "default-roles-keylessh"
+                                  then .name = ("default-roles-" + $rn) else . end)
+       else . end)
+' "$REALM_JSON_PATH" > "$TMP_REALM_JSON"
 
 # Diagnostic: the realm name the create body will actually use vs REALM_NAME.
-# NOTE: the sed above substitutes the token "KEYLESSH"; if realm.json does not
-# contain that exact (case-sensitive) token, the body's .realm is left as-is and
-# will NOT equal REALM_NAME.
 BODY_REALM="$(jq -r '.realm // "(none)"' "$TMP_REALM_JSON" 2>/dev/null || echo '(unparseable)')"
 log_info "[diag] REALM_NAME='${REALM_NAME}' ; realm.json body .realm='${BODY_REALM}'"
 if [ "$BODY_REALM" != "$REALM_NAME" ]; then
