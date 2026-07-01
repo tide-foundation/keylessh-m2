@@ -1,4 +1,4 @@
-name: Build and Deploy Punchd Gateway
+name: Build and Push Punchd Gateway
 
 on:
   workflow_dispatch:
@@ -42,13 +42,3 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Deploy to Azure Container App
-        run: |
-          echo "Image pushed: ${{ env.GATEWAY_IMAGE }}:${{ inputs.tag || 'latest' }}"
-          echo ""
-          echo "To update the Container App, run:"
-          echo "  az containerapp update --name keylessh-tcp-bridge --resource-group KeyleSSH --image ${{ env.GATEWAY_IMAGE }}:${{ inputs.tag || 'latest' }}"
-          echo ""
-          echo "Or update the image in Azure Portal:"
-          echo "  Container Apps > keylessh-tcp-bridge > Containers > Edit and deploy > Image"

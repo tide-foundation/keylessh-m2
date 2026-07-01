@@ -215,3 +215,166 @@ impl Registry {
         self.clients.len()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests — ported from tests/signal-server/registry.test.ts (Node signal
+// server) to preserve coverage after the Node signal server was removed.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sender() -> WsSender {
+        // Detached channel; we only need the sender end for registration.
+        mpsc::unbounded_channel().0
+    }
+
+    fn meta() -> GatewayMetadata {
+        GatewayMetadata {
+            display_name: None,
+            description: None,
+            backends: None,
+            realm: None,
+            public_url: None,
+        }
+    }
+
+    #[test]
+    fn register_gateway_and_lookup() {
+        let r = Registry::new();
+        r.register_gateway("gw-1".into(), vec!["1.2.3.4:443".into()], sender(), meta(), None);
+        assert!(r.get_gateway("gw-1").is_some());
+        assert_eq!(r.get_gateway("gw-1").unwrap().id, "gw-1");
+    }
+
+    #[test]
+    fn register_gateway_stores_metadata() {
+        let r = Registry::new();
+        let m = GatewayMetadata {
+            display_name: Some("My Gateway".into()),
+            description: Some("Test gateway".into()),
+            backends: Some(vec![BackendInfo { name: "App".into(), protocol: Some("http".into()), auth: None }]),
+            realm: Some("keylessh".into()),
+            public_url: None,
+        };
+        r.register_gateway("gw-1".into(), vec!["1.2.3.4:443".into()], sender(), m, None);
+        let gw = r.get_gateway("gw-1").unwrap();
+        assert_eq!(gw.metadata.display_name.as_deref(), Some("My Gateway"));
+        assert_eq!(gw.metadata.description.as_deref(), Some("Test gateway"));
+        assert_eq!(gw.metadata.backends.as_ref().unwrap().len(), 1);
+        assert_eq!(gw.metadata.realm.as_deref(), Some("keylessh"));
+    }
+
+    #[test]
+    fn re_register_updates_addresses_and_preserves_paired_clients() {
+        let r = Registry::new();
+        r.register_gateway("gw-1".into(), vec!["1.2.3.4:443".into()], sender(), meta(), None);
+        r.register_client("client-1".into(), sender(), String::new());
+        r.get_gateway_mut("gw-1").unwrap().paired_clients.insert("client-1".into());
+
+        // Re-register with new address/sender
+        r.register_gateway("gw-1".into(), vec!["5.6.7.8:443".into()], sender(), meta(), None);
+        let gw = r.get_gateway("gw-1").unwrap();
+        assert_eq!(gw.addresses, vec!["5.6.7.8:443".to_string()]);
+        assert!(gw.paired_clients.contains("client-1"));
+    }
+
+    #[test]
+    fn register_client_defaults_to_relay_and_stores_token() {
+        let r = Registry::new();
+        r.register_client("client-1".into(), sender(), "my-jwt-token".into());
+        let c = r.get_client("client-1").unwrap();
+        assert_eq!(c.connection_type, "relay");
+        assert_eq!(c.token, "my-jwt-token");
+    }
+
+    #[test]
+    fn remove_gateway_and_client() {
+        let r = Registry::new();
+        r.register_gateway("gw-1".into(), vec![], sender(), meta(), None);
+        r.remove_gateway("gw-1");
+        assert!(r.get_gateway("gw-1").is_none());
+
+        r.register_client("client-1".into(), sender(), String::new());
+        r.remove_client("client-1");
+        assert!(r.get_client("client-1").is_none());
+    }
+
+    #[test]
+    fn removing_client_unpairs_it_from_gateway() {
+        let r = Registry::new();
+        r.register_gateway("gw-1".into(), vec![], sender(), meta(), None);
+        r.register_client("client-1".into(), sender(), String::new());
+        r.get_gateway_mut("gw-1").unwrap().paired_clients.insert("client-1".into());
+        r.get_client_mut("client-1").unwrap().paired_gateway_id = Some("gw-1".into());
+
+        r.remove_client("client-1");
+        assert!(!r.get_gateway("gw-1").unwrap().paired_clients.contains("client-1"));
+    }
+
+    #[test]
+    fn get_available_gateway_prefers_fewest_clients() {
+        let r = Registry::new();
+        assert!(r.get_available_gateway().is_none());
+
+        r.register_gateway("gw-1".into(), vec![], sender(), meta(), None);
+        assert_eq!(r.get_available_gateway().as_deref(), Some("gw-1"));
+
+        r.register_gateway("gw-2".into(), vec![], sender(), meta(), None);
+        // 3 clients on gw-1, 1 on gw-2 -> gw-2 wins
+        for c in ["c1", "c2", "c3"] {
+            r.get_gateway_mut("gw-1").unwrap().paired_clients.insert(c.into());
+        }
+        r.get_gateway_mut("gw-2").unwrap().paired_clients.insert("c4".into());
+        assert_eq!(r.get_available_gateway().as_deref(), Some("gw-2"));
+    }
+
+    #[test]
+    fn get_gateway_by_realm() {
+        let r = Registry::new();
+        let m = GatewayMetadata { realm: Some("keylessh".into()), ..meta() };
+        r.register_gateway("gw-1".into(), vec![], sender(), m, None);
+        assert_eq!(r.get_gateway_by_realm("keylessh").as_deref(), Some("gw-1"));
+        assert!(r.get_gateway_by_realm("other").is_none());
+    }
+
+    #[test]
+    fn update_client_reflexive_and_counts() {
+        let r = Registry::new();
+        assert_eq!(r.gateway_count(), 0);
+        assert_eq!(r.client_count(), 0);
+
+        r.register_client("client-1".into(), sender(), String::new());
+        r.update_client_reflexive("client-1", "203.0.113.5:12345");
+        assert_eq!(r.get_client("client-1").unwrap().reflexive_address.as_deref(), Some("203.0.113.5:12345"));
+        // no-op for unknown
+        r.update_client_reflexive("unknown", "1.2.3.4");
+
+        r.register_gateway("gw-1".into(), vec![], sender(), meta(), None);
+        r.register_gateway("gw-2".into(), vec![], sender(), meta(), None);
+        assert_eq!(r.gateway_count(), 2);
+        assert_eq!(r.client_count(), 1);
+    }
+
+    #[test]
+    fn get_all_gateways() {
+        let r = Registry::new();
+        assert!(r.get_all_gateways().is_empty());
+        r.register_gateway("gw-1".into(), vec![], sender(), meta(), None);
+        r.register_gateway("gw-2".into(), vec![], sender(), meta(), None);
+        let mut all = r.get_all_gateways();
+        all.sort();
+        assert_eq!(all, vec!["gw-1".to_string(), "gw-2".to_string()]);
+    }
+
+    #[test]
+    fn send_to_gateway_and_client_reports_presence() {
+        let r = Registry::new();
+        let (gw_tx, mut gw_rx) = mpsc::unbounded_channel();
+        r.register_gateway("gw-1".into(), vec![], gw_tx, meta(), None);
+        assert!(r.send_to_gateway("gw-1", axum::extract::ws::Message::Text("hi".to_string().into())));
+        assert!(gw_rx.try_recv().is_ok());
+        // unknown target -> false
+        assert!(!r.send_to_client("nobody", axum::extract::ws::Message::Text("x".to_string().into())));
+    }
+}

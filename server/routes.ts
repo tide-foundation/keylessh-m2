@@ -2455,6 +2455,11 @@ export async function registerRoutes(
         // length-prefix encoding). Sign #2 verifies the signature against the raw bytes
         // of section 0, so any drift here breaks "Policy signature could not be verified".
         let policyDataBase64: string | undefined;
+        // Detached 64-byte Ed25519 signature (Base64) for the iga-core
+        // role-policies `policySig` mirror field. This is exactly the signature
+        // the client already produced via the enclave/ORK sign — NOT anything
+        // delegation/mTLS-related. Under the VARCHAR(512) cap (~88 chars).
+        let policySigBase64: string | undefined;
         try {
           const request = PolicySignRequest.decode(base64ToBytes(pendingPolicy.policyRequestData));
 
@@ -2468,14 +2473,10 @@ export async function registerRoutes(
 
           if (signature) {
             const signatureBytes = base64ToBytes(signature);
-            // Stored policyData layout: TideMemory([ DataToVerify, signature ])
-            // — section 0 byte-identical to what the ORK signed, section 1 = the new signature.
-            const composed = TideMemory.CreateFromArray([dataToVerify, signatureBytes]);
-            policyDataBase64 = bytesToBase64(composed);
-            const dtvSha = createHash("sha256").update(dataToVerify).digest("hex");
-            const sigSha = createHash("sha256").update(signatureBytes).digest("hex");
-            const composedSha = createHash("sha256").update(composed).digest("hex");
-            log(`[PolicyTrace SIGN] role=${pendingPolicy.roleId} dtv_len=${dataToVerify.length} dtv_sha=${dtvSha} sig_len=${signatureBytes.length} sig_sha=${sigSha} composed_len=${composed.length} composed_sha=${composedSha}`);
+            policy.signature = signatureBytes;
+            // Preserve the detached sig for the iga-core policySig mirror field.
+            policySigBase64 = bytesToBase64(signatureBytes);
+            log(`Attached VVK signature to policy (${signatureBytes.length} bytes)`);
           } else {
             log(`Warning: No signature provided for policy commit — storing policy without signature`);
             policyDataBase64 = bytesToBase64(policyBytesNoSig);
@@ -2502,7 +2503,9 @@ export async function registerRoutes(
         await pendingPolicyStorage.commitPolicy(id, req.user?.email || "unknown");
         log(`SSH policy ${id} committed by ${req.user?.email}`);
 
-        // Return sync data so client can sync to TideCloak directly via DPoP
+        // Return sync data so client can sync to TideCloak directly via DPoP.
+        // policySig = the detached Ed25519 signature (Base64) required by the new
+        // iga-core POST /iga/role-policies surface.
         const syncData = {
           roleId: pendingPolicy.roleId,
           contractCode: pendingPolicy.contractCode,
@@ -2510,6 +2513,7 @@ export async function registerRoutes(
           executionType: "private" as const,
           threshold: pendingPolicy.threshold,
           policyData: policyDataBase64 || "",
+          policySig: policySigBase64 || "",
         };
 
         res.json({ success: true, syncData });

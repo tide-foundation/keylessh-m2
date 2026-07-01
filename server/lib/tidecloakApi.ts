@@ -85,7 +85,19 @@ const clientCache = new Map<string, { data: ClientRepresentation; expiry: number
 const CLIENT_CACHE_TTL = 300_000; // 5 minutes — clients rarely change
 
 
-// Sync a committed policy to TideCloak's SSH policies table
+// Sync a committed policy to TideCloak via the consolidated iga-core
+// role-policies / forseti-contracts surface (replaces the removed
+// PUT /tide-admin/ssh-policies). Two writes, both requireManageRealm (admin
+// bearer token; NO mTLS/delegation):
+//   1. If contractCode is present, upsert the Forseti contract
+//      (POST /iga/forseti-contracts {contractCode, name}) -> {id}, and bind the
+//      returned contractId to the role policy.
+//   2. Upsert the role policy (POST /iga/role-policies). iga-core keys policies
+//      by NAME; keylessh keys SSH policies by ROLE NAME (roleId), so name ==
+//      policy.roleId. `policySig` is REQUIRED, non-blank, and hard-capped at
+//      512 chars: it is the detached 64-byte Ed25519 signature (Base64, ~88
+//      chars) that keylessh already produced via the enclave/ORK sign — NOT the
+//      combined blob. The combined signed blob rides in `policy` (uncapped TEXT).
 export const syncPolicyToTideCloak = async (
   token: string,
   policy: {
@@ -95,36 +107,74 @@ export const syncPolicyToTideCloak = async (
     executionType: string;
     threshold: number;
     policyData: string;
+    // Base64 of the detached 64-byte Ed25519 signature (the bare sig, under the
+    // VARCHAR(512) cap). Plumbed from the commit step where the raw signature
+    // bytes exist before they are collapsed into policyData.
+    policySig: string;
   }
 ): Promise<void> => {
-  const url = `${getTcUrl()}/tide-admin/ssh-policies`;
-  console.log(`[PolicySync] PUT ${url}`, JSON.stringify(policy).substring(0, 200));
+  // Step 1: upsert the Forseti contract (if supplied) to obtain a contractId.
+  let contractId: string | undefined;
+  if (policy.contractCode) {
+    const contractUrl = `${getTcUrl()}/iga/forseti-contracts`;
+    const contractResp = await fetch(contractUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ contractCode: policy.contractCode, name: policy.roleId }),
+    });
+    const contractText = await contractResp.text();
+    if (!contractResp.ok) {
+      throw new Error(`Error upserting forseti contract: ${contractResp.status} ${contractText}`);
+    }
+    try {
+      contractId = JSON.parse(contractText)?.id;
+    } catch {
+      /* leave contractId undefined if body is not JSON */
+    }
+  }
+
+  // Step 2: upsert the role policy keyed by the role NAME.
+  const url = `${getTcUrl()}/iga/role-policies`;
+  const body = {
+    name: policy.roleId,
+    contractId,
+    approvalType: policy.approvalType,
+    executionType: policy.executionType,
+    threshold: policy.threshold,
+    // policy = combined signed blob (uncapped TEXT). policySig = detached
+    // 64-byte Ed25519 sig Base64 (~88 chars, under the VARCHAR(512) cap).
+    policy: policy.policyData,
+    policySig: policy.policySig,
+    policyData: policy.policyData,
+  };
+  console.log(`[PolicySync] POST ${url}`, JSON.stringify({ ...body, policy: "<redacted>", policySig: "<redacted>", policyData: "<redacted>" }));
   const response = await fetch(url, {
-    method: "PUT",
+    method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify(policy),
+    body: JSON.stringify(body),
   });
 
   const responseBody = await response.text();
-  console.log(`[PolicySync] Response: ${response.status} ${responseBody}`);
+  console.log(`[PolicySync] Response: ${response.status}`);
 
   if (!response.ok) {
     throw new Error(`Error syncing policy to TideCloak: ${response.status} ${responseBody}`);
   }
 };
 
-// Fetch the admin policy from TideCloak (used to authorize policy commits)
-export const getAdminPolicy = async (): Promise<string> => {
-  const response = await fetch(`${getNonAdminTcUrl()}/tide-policy-resources/admin-policy`);
-  if (!response.ok) {
-    throw new Error(`Error fetching admin policy: ${await response.text()}`);
-  }
-  // Returns base64-encoded policy bytes
-  return await response.text();
-};
+// NOTE: the tide-realm-admin admin policy that the ORK PreSign requires is now
+// fetched CLIENT-SIDE via the DPoP-authenticated path (client/src/lib/
+// tidecloakAdmin.ts `getAdminPolicy` -> tcFetch), not server-side. The old
+// server-side getAdminPolicy fetched GET /iga/role-policies/name/tide-realm-admin
+// with the forwarded plain Bearer token, which iga-core's admin surface rejects
+// with 401 (no DPoP proof), so it never worked. It was removed to leave a single
+// working path.
 
 export interface KeycloakEvent {
   id: string;
@@ -706,14 +756,19 @@ export const GetAllRoles = async (
 // TideCloak Change Set API Functions
 // ============================================
 
-export const GetUserChangeRequests = async (
-  token: string
-): Promise<{ data: any; retrievalInfo: ChangeSetRequest }[]> => {
+// NEW iga-core: a single GET /iga/change-requests?status=PENDING returns a flat
+// list of IgaChangeRequestRepresentation for ALL entity types; callers filter
+// client-side by entityType. Field renames vs the old surface:
+//   draftRecordId -> id ; changeSetType -> entityType ; payload -> rows[] ;
+//   state -> status (PENDING/APPROVED/DENIED/CANCELLED). actionType UNCHANGED.
+// requireManageRealm (admin bearer token).
+const getPendingChangeRequests = async (token: string): Promise<any[]> => {
   const response = await fetch(
-    `${getTcUrl()}/tide-admin/change-set/users/requests`,
+    `${getTcUrl()}/iga/change-requests?status=PENDING`,
     {
       method: "GET",
       headers: {
+        accept: "application/json",
         Authorization: `Bearer ${token}`,
       },
     }
@@ -721,216 +776,212 @@ export const GetUserChangeRequests = async (
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(`Error getting user change requests: ${response.statusText}`);
-    throw new Error(`Error getting user change requests: ${errorBody}`);
+    console.error(`Error getting change requests: ${response.statusText}`);
+    throw new Error(`Error getting change requests: ${errorBody}`);
   }
 
-  const json = await response.json();
-  const result = json.map((d: any) => {
-    return {
-      data: d,
-      retrievalInfo: {
-        changeSetId: d.draftRecordId,
-        changeSetType: d.changeSetType,
-        actionType: d.actionType,
-      } as ChangeSetRequest,
-    };
-  });
+  return await response.json();
+};
 
-  return result;
+// Map an IgaChangeRequestRepresentation to keylessh's {data, retrievalInfo}
+// shape. retrievalInfo carries the renamed fields (id / entityType). `data` is
+// the raw representation; callers read d.id and d.status/d.rows off it.
+const toRetrieval = (d: any): { data: any; retrievalInfo: ChangeSetRequest } => ({
+  data: d,
+  retrievalInfo: {
+    changeSetId: d.id,
+    changeSetType: d.entityType,
+    actionType: d.actionType,
+  } as ChangeSetRequest,
+});
+
+export const GetUserChangeRequests = async (
+  token: string
+): Promise<{ data: any; retrievalInfo: ChangeSetRequest }[]> => {
+  const all = await getPendingChangeRequests(token);
+  return all.filter((d: any) => d.entityType === "USER").map(toRetrieval);
 };
 
 export const GetRoleChangeRequests = async (
   token: string
 ): Promise<{ data: any; retrievalInfo: ChangeSetRequest }[]> => {
+  const all = await getPendingChangeRequests(token);
+  return all.filter((d: any) => d.entityType === "ROLE").map(toRetrieval);
+};
+
+// Response of the multiAdmin phase-1 /approve call.
+//   mode === "needs-approval" (multiAdmin) == the old requiresApprovalPopup;
+//   requestModel == the old changeSetDraftRequests (the bytes the enclave signs).
+//   mode === "recorded" (firstAdmin/simple) records AND auto-commits.
+export interface ApprovePhase1Response {
+  mode: string;
+  changeRequestId?: string;
+  actionType?: string;
+  requestModel?: string; // base64 bytes for the enclave to sign
+  authCount?: number;
+  threshold?: number;
+  committed?: boolean;
+  readyToCommit?: boolean;
+  status?: string;
+}
+
+// POST /iga/change-requests/{id}/approve.
+//   - Empty body  => PHASE 1. multiAdmin returns {mode:"needs-approval",
+//     requestModel,...}; firstAdmin/simple returns {mode:"recorded"} (records AND
+//     auto-commits at quorum in one call).
+//   - {requestModel:<signed-doken-base64>} => PHASE 2 (multiAdmin): records the
+//     signed doken toward threshold and auto-commits at quorum.
+// This single endpoint replaces the old sign/batch + add-review two-step.
+export const ApproveChangeRequest = async (
+  changeSetId: string,
+  token: string,
+  signedRequest?: string
+): Promise<ApprovePhase1Response> => {
   const response = await fetch(
-    `${getTcUrl()}/tide-admin/change-set/roles/requests`,
+    `${getTcUrl()}/iga/change-requests/${changeSetId}/approve`,
     {
-      method: "GET",
+      method: "POST",
       headers: {
+        "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
+      body: JSON.stringify(signedRequest ? { requestModel: signedRequest } : {}),
     }
   );
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(`Error getting role change requests: ${response.statusText}`);
-    throw new Error(`Error getting role change requests: ${errorBody}`);
+    console.error(`Error approving change request: ${response.statusText}`);
+    throw new Error(`Error approving change request: ${errorBody}`);
   }
 
-  const json = await response.json();
-  const result = json.map((d: any) => {
-    return {
-      data: d,
-      retrievalInfo: {
-        changeSetId: d.draftRecordId,
-        changeSetType: d.changeSetType,
-        actionType: d.actionType,
-      } as ChangeSetRequest,
-    };
-  });
-
-  return result;
+  const text = await response.text();
+  return text ? (JSON.parse(text) as ApprovePhase1Response) : ({} as ApprovePhase1Response);
 };
 
-export const AddApprovalToChangeRequest = async (
-  changeSet: ChangeSetRequest,
+// POST /iga/change-requests/{id}/deny - id in path, no body, returns 204.
+// Used for both REJECT and CANCEL (the old add-rejection and change-set/cancel).
+export const DenyChangeRequest = async (
+  changeSetId: string,
   token: string
 ): Promise<void> => {
-  const formData = new FormData();
-  formData.append("changeSetId", changeSet.changeSetId);
-  formData.append("actionType", changeSet.actionType);
-  formData.append("changeSetType", changeSet.changeSetType);
-
-  const response = await fetch(`${getTcUrl()}/tideAdminResources/add-review`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(
-      `Error adding approval to change set request: ${response.statusText}`
-    );
-    throw new Error(`Error adding approval to change set request: ${errorBody}`);
-  }
-  return;
-};
-
-export const AddRejectionToChangeRequest = async (
-  changeSet: ChangeSetRequest,
-  token: string
-): Promise<void> => {
-  const formData = new FormData();
-  formData.append("actionType", changeSet.actionType);
-  formData.append("changeSetId", changeSet.changeSetId);
-  formData.append("changeSetType", changeSet.changeSetType);
-
   const response = await fetch(
-    `${getTcUrl()}/tideAdminResources/add-rejection`,
+    `${getTcUrl()}/iga/change-requests/${changeSetId}/deny`,
     {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
       },
-      body: formData,
     }
   );
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(
-      `Error adding rejection to change set request: ${response.statusText}`
-    );
-    throw new Error(
-      `Error adding rejection to change set request: ${errorBody}`
-    );
+    console.error(`Error denying change request: ${response.statusText}`);
+    throw new Error(`Error denying change request: ${errorBody}`);
   }
   return;
 };
 
+// POST /iga/change-requests/{id}/commit - id in path, EMPTY body. Apply-only.
+// Usually unnecessary (/approve auto-commits at quorum); kept for an explicit
+// apply step. 412 QUORUM_NOT_MET if sub-quorum, 409 if not PENDING.
 export const CommitChangeRequest = async (
   changeSet: ChangeSetRequest,
   token: string
 ): Promise<void> => {
-  const response = await fetch(`${getTcUrl()}/tide-admin/change-set/commit`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(changeSet),
-  });
+  const response = await fetch(
+    `${getTcUrl()}/iga/change-requests/${changeSet.changeSetId}/commit`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(`Error committing change set request: ${response.statusText}`);
-    throw new Error(`Error committing change set request: ${errorBody}`);
+    console.error(`Error committing change request: ${response.statusText}`);
+    throw new Error(`Error committing change request: ${errorBody}`);
   }
   return;
 };
 
+// CANCEL maps to /deny on the new surface (the old change-set/cancel is gone).
 export const CancelChangeRequest = async (
   changeSet: ChangeSetRequest,
   token: string
 ): Promise<void> => {
-  const response = await fetch(`${getTcUrl()}/tide-admin/change-set/cancel`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(changeSet),
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(`Error cancelling change set request: ${response.statusText}`);
-    throw new Error(`Error cancelling change set request: ${errorBody}`);
-  }
+  await DenyChangeRequest(changeSet.changeSetId, token);
   return;
 };
 
+// REJECT maps to /deny on the new surface (the old add-rejection is gone).
+export const AddRejectionToChangeRequest = async (
+  changeSet: ChangeSetRequest,
+  token: string
+): Promise<void> => {
+  await DenyChangeRequest(changeSet.changeSetId, token);
+  return;
+};
+
+// Legacy no-signature approve. On the new surface an empty-body phase-1
+// /approve records the admin's approval (firstAdmin/simple auto-commits at
+// quorum); for multiAdmin realms it only builds the model and the enclave-signed
+// phase-2 (AddApprovalWithSignedRequest) is required to actually record a vote.
+export const AddApprovalToChangeRequest = async (
+  changeSet: ChangeSetRequest,
+  token: string
+): Promise<void> => {
+  await ApproveChangeRequest(changeSet.changeSetId, token);
+  return;
+};
+
+// Preserved response shape the client (AdminApprovals.tsx) already consumes:
+//   changesetId            -> the CR id
+//   changeSetDraftRequests -> base64 bytes the enclave signs (== requestModel)
+//   requiresApprovalPopup  -> true when multiAdmin needs the enclave ceremony
 export interface RawChangeSetResponse {
   changesetId: string;
   changeSetDraftRequests: string;
   requiresApprovalPopup: boolean | string;
 }
 
+// "Get raw request to sign" is now PHASE 1 of /approve: the empty-body call
+// returns the requestModel (multiAdmin) that the enclave signs. We adapt it into
+// the legacy RawChangeSetResponse[] shape so the existing client enclave-signing
+// flow keeps working unchanged. If mode !== "needs-approval" (firstAdmin/simple
+// realms), the CR was already recorded/committed and there is nothing to sign;
+// we return an empty array so the caller treats it as "no popup required".
 export const GetRawChangeSetRequest = async (
   changeSet: ChangeSetRequest,
   token: string
 ): Promise<RawChangeSetResponse[]> => {
-  const response = await fetch(`${getTcUrl()}/tide-admin/change-set/sign/batch`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({ changeSets: [changeSet] }),
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(`Error getting raw change set request: ${response.statusText}`);
-    throw new Error(`Error getting raw change set request: ${errorBody}`);
+  const phase1 = await ApproveChangeRequest(changeSet.changeSetId, token);
+  const needsApproval = phase1.mode === "needs-approval" && !!phase1.requestModel;
+  if (!needsApproval) {
+    // firstAdmin/simple: recorded (and auto-committed) already; nothing to sign.
+    return [];
   }
-
-  const json = await response.json();
-  // Returns array of all sign requests (may include user + policy requests)
-  return json as RawChangeSetResponse[];
+  return [
+    {
+      changesetId: phase1.changeRequestId ?? changeSet.changeSetId,
+      changeSetDraftRequests: phase1.requestModel as string,
+      requiresApprovalPopup: true,
+    },
+  ];
 };
 
+// PHASE 2: submit the enclave-signed doken toward the CR's threshold via
+// /approve {requestModel:<signed>}. Auto-commits at quorum. Replaces the old
+// multipart add-review with a `requests` form field.
 export const AddApprovalWithSignedRequest = async (
   changeSet: ChangeSetRequest,
   signedRequest: string,
   token: string
 ): Promise<void> => {
-  const formData = new FormData();
-  formData.append("changeSetId", changeSet.changeSetId);
-  formData.append("actionType", changeSet.actionType);
-  formData.append("changeSetType", changeSet.changeSetType);
-  formData.append("requests", signedRequest);
-
-  const response = await fetch(`${getTcUrl()}/tideAdminResources/add-review`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(
-      `Error adding approval with signed request: ${response.statusText}`
-    );
-    throw new Error(`Error adding approval with signed request: ${errorBody}`);
-  }
+  await ApproveChangeRequest(changeSet.changeSetId, token, signedRequest);
   return;
 };
 

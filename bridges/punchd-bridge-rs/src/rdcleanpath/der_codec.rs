@@ -286,3 +286,208 @@ impl DerReader {
         self.read_explicit(tag_num).ok().flatten()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests — ported from tests/gateway/der-codec.test.ts (Node RDCleanPath codec)
+// to preserve coverage after the Node gateway was removed.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_constants() {
+        assert_eq!(TAG_INTEGER, 0x02);
+        assert_eq!(TAG_OCTET_STRING, 0x04);
+        assert_eq!(TAG_UTF8_STRING, 0x0c);
+        assert_eq!(TAG_SEQUENCE, 0x30);
+    }
+
+    #[test]
+    fn context_tag_produces_constructed_tags() {
+        assert_eq!(context_tag(0), 0xa0);
+        assert_eq!(context_tag(1), 0xa1);
+        assert_eq!(context_tag(7), 0xa7);
+        assert_eq!(context_tag(9), 0xa9);
+    }
+
+    #[test]
+    fn encode_integer_cases() {
+        assert_eq!(encode_integer(0), vec![0x02, 0x01, 0x00]);
+        assert_eq!(encode_integer(42), vec![0x02, 0x01, 0x2a]);
+        assert_eq!(encode_integer(127), vec![0x02, 0x01, 0x7f]);
+        // high bit set -> 0x00 prefix
+        assert_eq!(encode_integer(128), vec![0x02, 0x02, 0x00, 0x80]);
+        assert_eq!(encode_integer(256), vec![0x02, 0x02, 0x01, 0x00]);
+        // RDCLEANPATH_VERSION 3390 = 0x0D3E
+        assert_eq!(encode_integer(3390), vec![0x02, 0x02, 0x0d, 0x3e]);
+    }
+
+    #[test]
+    fn encode_octet_string_cases() {
+        assert_eq!(encode_octet_string(&[]), vec![0x04, 0x00]);
+        assert_eq!(
+            encode_octet_string(&[0xDE, 0xAD, 0xBE, 0xEF]),
+            vec![0x04, 0x04, 0xDE, 0xAD, 0xBE, 0xEF]
+        );
+    }
+
+    #[test]
+    fn encode_utf8_string_cases() {
+        assert_eq!(encode_utf8_string(""), vec![0x0c, 0x00]);
+        let hello = encode_utf8_string("hello");
+        assert_eq!(hello[0], 0x0c);
+        assert_eq!(hello[1], 5);
+        assert_eq!(&hello[2..], b"hello");
+        // multibyte
+        let accented = encode_utf8_string("héllo");
+        assert_eq!(accented[0], 0x0c);
+        assert_eq!(std::str::from_utf8(&accented[2..]).unwrap(), "héllo");
+    }
+
+    #[test]
+    fn encode_sequence_cases() {
+        assert_eq!(encode_sequence(&[]), vec![0x30, 0x00]);
+        let inner = encode_integer(42);
+        let seq = encode_sequence(&[&inner]);
+        assert_eq!(seq[0], 0x30);
+        assert_eq!(seq[1] as usize, inner.len());
+        assert_eq!(&seq[2..], inner.as_slice());
+    }
+
+    #[test]
+    fn encode_explicit_cases() {
+        let inner = encode_integer(3390);
+        let buf = encode_explicit(0, &inner);
+        assert_eq!(buf[0], 0xa0);
+        assert_eq!(buf[1] as usize, inner.len());
+        assert_eq!(&buf[2..], inner.as_slice());
+
+        let inner7 = encode_octet_string(&[0x01]);
+        let buf7 = encode_explicit(7, &inner7);
+        assert_eq!(buf7[0], 0xa7);
+    }
+
+    #[test]
+    fn long_form_length_encoding() {
+        // length 200 -> 0x81 0xC8
+        let data200 = vec![0x42u8; 200];
+        let buf = encode_octet_string(&data200);
+        assert_eq!(buf[0], 0x04);
+        assert_eq!(buf[1], 0x81);
+        assert_eq!(buf[2], 200);
+        assert_eq!(buf.len(), 1 + 2 + 200);
+
+        // length 300 -> 0x82 0x01 0x2C
+        let data300 = vec![0x42u8; 300];
+        let buf2 = encode_octet_string(&data300);
+        assert_eq!(buf2[0], 0x04);
+        assert_eq!(buf2[1], 0x82);
+        assert_eq!(((buf2[2] as usize) << 8) | (buf2[3] as usize), 300);
+        assert_eq!(buf2.len(), 1 + 3 + 300);
+    }
+
+    #[test]
+    fn reader_read_integer() {
+        let buf = encode_integer(3390);
+        assert_eq!(DerReader::new(&buf).read_integer().unwrap(), 3390);
+        let zero = encode_integer(0);
+        assert_eq!(DerReader::new(&zero).read_integer().unwrap(), 0);
+        // wrong tag
+        let s = encode_utf8_string("hello");
+        assert!(DerReader::new(&s).read_integer().is_err());
+    }
+
+    #[test]
+    fn reader_read_octet_and_utf8() {
+        let data = [0xDE, 0xAD, 0xBE, 0xEF];
+        let buf = encode_octet_string(&data);
+        assert_eq!(DerReader::new(&buf).read_octet_string().unwrap(), data.to_vec());
+        let empty = encode_octet_string(&[]);
+        assert_eq!(DerReader::new(&empty).read_octet_string().unwrap(), Vec::<u8>::new());
+        let s = encode_utf8_string("hello world");
+        assert_eq!(DerReader::new(&s).read_utf8_string().unwrap(), "hello world");
+    }
+
+    #[test]
+    fn reader_read_sequence_multiple() {
+        let buf = encode_sequence(&[&encode_integer(1), &encode_integer(2), &encode_integer(3)]);
+        let mut reader = DerReader::new(&buf);
+        let mut seq = reader.read_sequence().unwrap();
+        assert_eq!(seq.read_integer().unwrap(), 1);
+        assert_eq!(seq.read_integer().unwrap(), 2);
+        assert_eq!(seq.read_integer().unwrap(), 3);
+        assert!(!seq.has_more());
+    }
+
+    #[test]
+    fn reader_read_explicit_match_and_none() {
+        let inner = encode_integer(42);
+        let buf = encode_explicit(0, &inner);
+        let mut reader = DerReader::new(&buf);
+        let mut ctx = reader.read_explicit(0).unwrap().expect("should match [0]");
+        assert_eq!(ctx.read_integer().unwrap(), 42);
+
+        // non-matching tag returns None without consuming
+        let buf2 = encode_explicit(0, &encode_integer(42));
+        let mut reader2 = DerReader::new(&buf2);
+        assert!(reader2.read_explicit(1).unwrap().is_none());
+    }
+
+    #[test]
+    fn reader_read_sequence_of_octet_strings() {
+        let cert1 = [0x01u8, 0x02];
+        let cert2 = [0x03u8, 0x04];
+        let buf = encode_sequence(&[&encode_octet_string(&cert1), &encode_octet_string(&cert2)]);
+        let result = DerReader::new(&buf).read_sequence_of_octet_strings().unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], cert1.to_vec());
+        assert_eq!(result[1], cert2.to_vec());
+    }
+
+    #[test]
+    fn reader_has_more_peek_skip() {
+        assert!(!DerReader::new(&[]).has_more());
+        let buf = encode_integer(42);
+        let mut reader = DerReader::new(&buf);
+        assert_eq!(reader.peek_tag(), Some(TAG_INTEGER));
+        assert_eq!(reader.read_integer().unwrap(), 42);
+        assert!(!reader.has_more());
+        assert_eq!(DerReader::new(&[]).peek_tag(), None);
+
+        // skip a TLV
+        let mut concat = encode_integer(1);
+        concat.extend_from_slice(&encode_integer(2));
+        let mut r = DerReader::new(&concat);
+        r.skip().unwrap();
+        assert_eq!(r.read_integer().unwrap(), 2);
+    }
+
+    #[test]
+    fn reader_error_handling() {
+        // unexpected end for read_tag
+        assert!(DerReader::new(&[]).read_tag().is_err());
+        // value overflows buffer: OCTET STRING claims len 100 but only 1 byte
+        let bad = [0x04u8, 0x64, 0x00];
+        assert!(DerReader::new(&bad).read_octet_string().is_err());
+    }
+
+    #[test]
+    fn roundtrip_nested_structure() {
+        // SEQUENCE { [0] INTEGER(3390), [2] UTF8("hello"), [6] OCTET(deadbeef) }
+        let original = encode_sequence(&[
+            &encode_explicit(0, &encode_integer(3390)),
+            &encode_explicit(2, &encode_utf8_string("hello")),
+            &encode_explicit(6, &encode_octet_string(&[0xDE, 0xAD, 0xBE, 0xEF])),
+        ]);
+        let mut outer = DerReader::new(&original);
+        let mut seq = outer.read_sequence().unwrap();
+        assert_eq!(seq.read_explicit(0).unwrap().unwrap().read_integer().unwrap(), 3390);
+        assert_eq!(seq.read_explicit(2).unwrap().unwrap().read_utf8_string().unwrap(), "hello");
+        assert_eq!(
+            seq.read_explicit(6).unwrap().unwrap().read_octet_string().unwrap(),
+            vec![0xDE, 0xAD, 0xBE, 0xEF]
+        );
+        assert!(!seq.has_more());
+    }
+}

@@ -66,9 +66,8 @@ keylessh/
 ├── shared/                  # Shared types + schema
 ├── signal-server-rs/        # Rust signal server (signaling, HTTP relay, TURN creds)
 ├── bridges/
-│   ├── ssh-bridge-rs/       # Rust SSH bridge (WS↔TCP tunnel, JWT auth)
-│   ├── punchd-bridge-rs/    # Punchd Gateway (Rust) — WebRTC, QUIC VPN, HTTP proxy
-│   └── tcp-bridge/          # Stateless WS↔TCP forwarder (optional)
+│   ├── ssh-bridge-rs/       # Rust SSH bridge (WS↔TCP tunnel, JWT auth) — optional external
+│   └── punchd-bridge-rs/    # Punchd Gateway (Rust) — WebRTC, QUIC VPN, HTTP proxy
 ├── tide-ssp/                # Windows SSP for passwordless RDP (C + WiX MSI)
 ├── docs/                    # Architecture, deployment, developer guides
 └── script/                  # TideCloak setup scripts
@@ -78,6 +77,9 @@ keylessh/
 
 - Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Deployment: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- Punchd gateway (easy guide): [docs/PUNCHD-GATEWAY.md](docs/PUNCHD-GATEWAY.md) — what punchd is, when you need it, and the simplest SSH-gateway setup
+- Signal server / STUN (easy guide): [docs/SIGNAL-SERVER.md](docs/SIGNAL-SERVER.md) — the signal server + coturn (STUN/TURN) that gateways register with for remote NAT traversal
+- Punchd VPN (easy guide): [docs/VPN-SETUP.md](docs/VPN-SETUP.md) — the native QUIC VPN client + gateway, when to use it vs SSH, and how to set up both sides
 - Developer guide: [docs/DEVELOPERS.md](docs/DEVELOPERS.md)
 
 ### Component docs
@@ -176,17 +178,21 @@ sudo docker run -d \
    - Update Username: user (auto-changes to `ssh:user`)
    - Scroll down and Click `Create Role`
 
-4. Go to [Users](http://localhost:3000/admin/users)
+3. Go to [Change Requests](http://localhost:3000/admin/approvals) and switch to the `Roles` tab
+   - Click `Review` for the `ssh:user` role > confirm with `Y` > `Submit Approvals` > `Commit`
+
+4. Switch to the `Policies` tab (click `Refresh` if empty)
+   - Click `Review` for `ssh:user` > confirm with `Y` > `Submit Approvals` > `Commit`
+
+5. Go to [Users](http://localhost:3000/admin/users)
    - Click the `Action` button for the default admin user
    - Click the `ssh:user` tag in `Available Roles` to move it to `Assigned Roles`
    - Click `Save Changes`
 
-5. Go to [Change Requests](http://localhost:3000/admin/approvals)
+6. Go to [Change Requests](http://localhost:3000/admin/approvals) on the `Access` tab (the first tab)
    - Click `Review` for the user admin > confirm with `Y` > `Submit Approvals` > `Commit`
-   - Switch to the `Policies` tab (click `Refresh` if empty)
-   - Click `Review` for `ssh:user` > confirm with `Y` > `Submit Approvals` > `Commit`
 
-6. Expand your user profile (bottom-left icon) > click `Restart session`
+7. Expand your user profile (bottom-left icon) > click `Restart session`
 
 ### Step 3: Get the public key
 
