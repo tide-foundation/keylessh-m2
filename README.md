@@ -66,9 +66,8 @@ keylessh/
 ├── shared/                  # Shared types + schema
 ├── signal-server-rs/        # Rust signal server (signaling, HTTP relay, TURN creds)
 ├── bridges/
-│   ├── ssh-bridge-rs/       # Rust SSH bridge (WS↔TCP tunnel, JWT auth)
-│   ├── punchd-bridge-rs/    # Punchd Gateway (Rust) — WebRTC, QUIC VPN, HTTP proxy
-│   └── tcp-bridge/          # Stateless WS↔TCP forwarder (optional)
+│   ├── ssh-bridge-rs/       # Rust SSH bridge (WS↔TCP tunnel, JWT auth) — optional external
+│   └── punchd-bridge-rs/    # Punchd Gateway (Rust) — WebRTC, QUIC VPN, HTTP proxy
 ├── tide-ssp/                # Windows SSP for passwordless RDP (C + WiX MSI)
 ├── docs/                    # Architecture, deployment, developer guides
 └── script/                  # TideCloak setup scripts

@@ -132,14 +132,12 @@ curl https://YOUR_IP:9090/health
 
 The gateway runs on your private network and connects outbound to the signal server. It proxies HTTP requests to local backends (web apps, RDP servers) and handles TideCloak authentication.
 
-Available in two implementations:
-- **Node.js** (`bridges/punchd-bridge/gateway`) — full-featured
-- **Rust** (`bridges/punchd-bridge-rs`) — smaller footprint, same protocol
+The gateway is `bridges/punchd-bridge-rs` (Rust).
 
 ### Deploy (Docker)
 
 ```bash
-docker build -t keylessh-gateway bridges/punchd-bridge/gateway
+docker build -t keylessh-gateway bridges/punchd-bridge-rs
 
 docker run -d --restart unless-stopped \
   --name keylessh-gateway \

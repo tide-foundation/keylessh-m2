@@ -33,18 +33,7 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # Optional: TCP Bridge for SSH tunneling (if not using external bridge)
-  # Uncomment if you want to run the bridge locally
-  # tcp-bridge:
-  #   build:
-  #     context: ./tcp-bridge
-  #     dockerfile: Dockerfile
-  #   image: keylessh-bridge:latest
-  #   container_name: keylessh-bridge
-  #   ports:
-  #     - "8080:8080"
-  #   volumes:
-  #     - ./data/tidecloak.json:/app/tidecloak.json:ro
-  #   environment:
-  #     - PORT=8080
-  #   restart: unless-stopped
+  # Optional: external SSH bridge for production SSH scaling. The app has a
+  # built-in bridge for local use; for a standalone bridge, deploy the Rust
+  # ssh-bridge (bridges/ssh-bridge-rs, has its own Dockerfile + deploy.sh) and
+  # point the app at it with BRIDGE_URL.

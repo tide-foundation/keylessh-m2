@@ -113,8 +113,9 @@ NAT traversal across the internet.
   `dest:<gatewayId>:<backend>`). No secret in the gateway can grant access on
   its own.
 - **The gateway registering with the signal server** uses a shared secret,
-  `API_SECRET` (timing-safe compare, `signal-server/src/index.ts`). This just
-  stops random daemons from registering as gateways; it is **not** user auth.
+  `API_SECRET`, checked at registration (`signal-server-rs/src/signaling/`).
+  This just stops random daemons from registering as gateways; it is **not**
+  user auth.
 - **The signal server is a "dumb relay"** — it does not authenticate end users.
   It only pairs a browser with a gateway; the gateway does the real JWT check.
 - **TLS** on the gateway is a **self-signed** cert used purely to encrypt the
@@ -315,8 +316,8 @@ for your environment:
 
 - **`punchd.keylessh.com` as a live host.** The domain appears only as a
   TideCloak origin / redirect binding and as the signal server's default
-  `RELAY_HOST` (`signal-server/src/index.ts`). Whether a real signal server is
-  deployed there for your setup is not something the repo can tell you.
+  `RELAY_HOST` (`signal-server-rs/src/config.rs`). Whether a real signal server
+  is deployed there for your setup is not something the repo can tell you.
 - **Realm/client mismatch.** The realm template (`script/tidecloak/realm.json`)
   is realm `keylessh` with clients `myclient` + `myclient-stun`; the checked-in
   adapter config (`data/tidecloak.json`) is realm `s5` / client `myclient`.

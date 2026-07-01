@@ -377,3 +377,124 @@ fn forward_to_peer(state: &AppState, target_id: &str, msg: &serde_json::Value) {
         tracing::warn!("[Signal] Target {target_id} not found for {msg_type}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests — ported from tests/signal-server/pairing.test.ts (Node signal server)
+// to preserve coverage after the Node signal server was removed. These exercise
+// the pairing decision + the exact JSON "paired"/"error" frames the client and
+// gateway receive.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::registry::GatewayMetadata;
+
+    type Rx = mpsc::UnboundedReceiver<Message>;
+
+    fn state() -> AppState {
+        AppState::new(Config::from_env())
+    }
+
+    fn meta() -> GatewayMetadata {
+        GatewayMetadata {
+            display_name: None,
+            description: None,
+            backends: None,
+            realm: None,
+            public_url: None,
+        }
+    }
+
+    fn reg_gateway(st: &AppState, id: &str, addrs: Vec<String>) -> Rx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        st.registry.register_gateway(id.into(), addrs, tx, meta(), None);
+        rx
+    }
+
+    fn reg_client(st: &AppState, id: &str, token: &str) -> Rx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        st.registry.register_client(id.into(), tx, token.into());
+        rx
+    }
+
+    /// Drain the first Text frame from a receiver and parse it as JSON.
+    fn recv_json(rx: &mut Rx) -> serde_json::Value {
+        match rx.try_recv().expect("expected a message") {
+            Message::Text(t) => serde_json::from_str(&t).expect("valid JSON"),
+            other => panic!("expected Text frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_pair_notifies_client_and_gateway() {
+        let st = state();
+        let mut gw_rx = reg_gateway(&st, "gw-1", vec!["1.2.3.4:443".into()]);
+        let mut client_rx = reg_client(&st, "client-1", "my-jwt");
+
+        auto_pair_client(&st, "client-1");
+
+        let client_msg = recv_json(&mut client_rx);
+        assert_eq!(client_msg["type"], "paired");
+        assert_eq!(client_msg["gateway"]["id"], "gw-1");
+
+        let gw_msg = recv_json(&mut gw_rx);
+        assert_eq!(gw_msg["type"], "paired");
+        assert_eq!(gw_msg["client"]["id"], "client-1");
+        assert_eq!(gw_msg["client"]["token"], "my-jwt");
+
+        // pairing state recorded
+        assert!(st.registry.get_gateway("gw-1").unwrap().paired_clients.contains("client-1"));
+        assert_eq!(
+            st.registry.get_client("client-1").unwrap().paired_gateway_id.as_deref(),
+            Some("gw-1")
+        );
+    }
+
+    #[test]
+    fn auto_pair_errors_when_no_gateway() {
+        let st = state();
+        let mut client_rx = reg_client(&st, "client-1", "");
+        auto_pair_client(&st, "client-1");
+        let msg = recv_json(&mut client_rx);
+        assert_eq!(msg["type"], "error");
+        assert!(msg["message"].as_str().unwrap().contains("No gateway"));
+    }
+
+    #[test]
+    fn auto_pair_forwards_reflexive_address() {
+        let st = state();
+        let mut gw_rx = reg_gateway(&st, "gw-1", vec![]);
+        let _client_rx = reg_client(&st, "client-1", "");
+        st.registry.update_client_reflexive("client-1", "203.0.113.5:9999");
+
+        auto_pair_client(&st, "client-1");
+
+        let gw_msg = recv_json(&mut gw_rx);
+        assert_eq!(gw_msg["client"]["reflexiveAddress"], "203.0.113.5:9999");
+    }
+
+    #[test]
+    fn explicit_pair_selects_named_gateway() {
+        let st = state();
+        let mut target_rx = reg_gateway(&st, "gw-target", vec!["5.6.7.8:443".into()]);
+        let _other_rx = reg_gateway(&st, "gw-other", vec![]);
+        let mut client_rx = reg_client(&st, "client-1", "");
+
+        pair_client_with_gateway(&st, "client-1", "gw-target");
+
+        let client_msg = recv_json(&mut client_rx);
+        assert_eq!(client_msg["gateway"]["id"], "gw-target");
+        let _ = recv_json(&mut target_rx); // gateway got its paired frame
+    }
+
+    #[test]
+    fn explicit_pair_errors_for_unknown_gateway() {
+        let st = state();
+        let mut client_rx = reg_client(&st, "client-1", "");
+        pair_client_with_gateway(&st, "client-1", "gw-nonexistent");
+        let msg = recv_json(&mut client_rx);
+        assert_eq!(msg["type"], "error");
+        assert!(msg["message"].as_str().unwrap().contains("not found"));
+    }
+}
