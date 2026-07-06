@@ -1,0 +1,34 @@
+{
+  "realm": "keylessh-staging01",
+  "auth-server-url": "https://staging.dauth.me",
+  "ssl-required": "external",
+  "resource": "keylessh-staging01-client",
+  "public-client": true,
+  "confidential-port": 0,
+  "jwk": {
+    "keys": [
+      {
+        "kid": "qtro1lY9LBlMUlmboHCw9Nq3eKXSZgWrg5qUBZ7vZKw",
+        "kty": "OKP",
+        "alg": "EdDSA",
+        "use": "sig",
+        "crv": "Ed25519",
+        "x": "mX9486eIB3urAKMu9QXr9si8QMmO_tohmZxpNcucknQ"
+      }
+    ]
+  },
+  "backgroundUrl": "https://staging.dauth.me/realms/keylessh-staging01/tide-idp-resources/images/BACKGROUND_IMAGE",
+  "logoUrl": "https://staging.dauth.me/realms/keylessh-staging01/tide-idp-resources/images/LOGO",
+  "homeOrkUrl": "https://sork1.tideprotocol.com",
+  "vendorId": "4201145686218542474990945419475073546490597276286046557909357420901280886870",
+  "client-origin-auth-https://staging.dauth.me": "ehlx6JKFvJ/Ezd3XDFy4dRp4N+r4gMYC/nBARHg9vA0BxV1+hL1iKYZwZ0dO56CYSNPou2r7vX16+88snb3UDw==",
+  "client-origin-auth-https://staging.keylessh.com": "HbnoFthf09JfU+zGyiltThCRcuiHaeP8YnTrq3NWHHGwcB/61rvwaQ0g3ykQAE3WnO7CgFZuzoxFvd0+QjrYCg==",
+  "gVVK": "997f78f3a788077bab00a32ef505ebf6c8bc40c98efeda21999c6935cb9c9274",
+  "vvkId": "4201145686218542474990945419475073546490597276286046557909357420901280886870",
+  "orkUrl": "https://sork1.tideprotocol.com",
+  "payerPublic": "20000011d6a0e8212d682657147d864b82d10e92776c15ead43dcfdc100ebf4dcfe6a8",
+  "obfGVVK": "997f78f3a788077bab00a32ef505ebf6c8bc40c98efeda21999c6935cb9c9274",
+  "gVRKCertificate": "/CnMS9+Wv/VAAjwN4YtPQXNgJnkKSe8WtmFOML3Bjih2f8+Q3EXBknO3oX3ey20sotfEJMagIRXyDtF3tN4PAA==",
+  "thresholdT": 3,
+  "thresholdN": 5
+}

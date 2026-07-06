@@ -69,7 +69,11 @@ TURN_SECRET="${TURN_SECRET:?Set TURN_SECRET in .env.$DEPLOY_ENV}"
 # TideCloak
 AUTH_SERVER_PUBLIC_URL="${AUTH_SERVER_PUBLIC_URL:-https://login.dauth.me}"
 SERVER_URL="${SERVER_URL:-https://$DEPLOY_ENV.keylessh.com}"
-TIDECLOAK_CONFIG="${TIDECLOAK_CONFIG:-$PROJECT_ROOT/data/tidecloak.json}"
+# Per-environment TideCloak config: prefer data/tidecloak.<env>.json when it
+# exists (e.g. staging points at its own identity server), else the shared one.
+DEFAULT_TIDECLOAK_CONFIG="$PROJECT_ROOT/data/tidecloak.json"
+[ -f "$PROJECT_ROOT/data/tidecloak.$DEPLOY_ENV.json" ] && DEFAULT_TIDECLOAK_CONFIG="$PROJECT_ROOT/data/tidecloak.$DEPLOY_ENV.json"
+TIDECLOAK_CONFIG="${TIDECLOAK_CONFIG:-$DEFAULT_TIDECLOAK_CONFIG}"
 
 # Backends for gateway (SSH targets)
 BACKENDS="${BACKENDS:-}"

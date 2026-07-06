@@ -25,7 +25,7 @@ jobs:
         run: npm ci
 
       - name: Copy TideCloak config
-        run: cp data/tidecloak.json client/src/tidecloakAdapter.json
+        run: cp data/tidecloak.staging.json client/src/tidecloakAdapter.json
 
       - name: Build application
         run: npm run build
@@ -38,7 +38,7 @@ jobs:
           cp package-lock.json deploy/
           cp -r script deploy/
           mkdir -p deploy/data
-          cp data/tidecloak.json deploy/data/
+          cp data/tidecloak.staging.json deploy/data/tidecloak.json
 
           cd deploy
           npm ci --omit=dev
