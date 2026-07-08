@@ -15,7 +15,7 @@ Traditional SSH clients have a fundamental problem: private keys. Whether stored
 
 **KeyleSSH eliminates private keys entirely.**
 
-Instead of managing keys, KeyleSSH uses [Tide technology](https://tide.org) for all its cryptographic operations. SSH authorization signing happens across a **decentralised network of independent nodes called ORKs** (Orchestrated Recluders of Keys) - no single point ever holds a complete key. This isn't just distributed, it's truly decentralised (the key never exists as a whole under any single organization).
+Instead of managing keys, KeyleSSH uses [Tide technology](https://tide.org) for all its cryptographic operations. SSH authorization signing happens across a **decentralised network of independent nodes** - no single point ever holds a complete key throughout its entire lifecycle.
 
 ### How It Works
 
@@ -26,6 +26,8 @@ Instead of managing keys, KeyleSSH uses [Tide technology](https://tide.org) for 
 5. **Blind bastion tunneling** - All SSH session are tunneled through an oblivious jumpbox that has no access or knowledge of to the content of the session
 
 The result: enterprise-grade SSH access control without any private keys to manage, rotate, or protect.
+
+Here's a blog post about [what's under the hood]([https://tide.org](https://tide.org/blog/vibe-coded-pam)).
 
 ## Features
 
