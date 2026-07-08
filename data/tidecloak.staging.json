@@ -1,34 +1,34 @@
 {
-  "realm": "keylessh-staging01",
+  "realm": "keylessh",
   "auth-server-url": "https://staging.dauth.me",
   "ssl-required": "external",
-  "resource": "keylessh-staging01-client",
+  "resource": "keylessh-client",
   "public-client": true,
   "confidential-port": 0,
   "jwk": {
     "keys": [
       {
-        "kid": "qtro1lY9LBlMUlmboHCw9Nq3eKXSZgWrg5qUBZ7vZKw",
+        "kid": "bTljhMbTXbI9YpuYV9Ols4IHlRtRJQDW0VrKiKF-CIE",
         "kty": "OKP",
         "alg": "EdDSA",
         "use": "sig",
         "crv": "Ed25519",
-        "x": "mX9486eIB3urAKMu9QXr9si8QMmO_tohmZxpNcucknQ"
+        "x": "Z-Pa7q7xOQiejD6dtY4lofqHJjWWask6VikYX6ZHqz8"
       }
     ]
   },
-  "backgroundUrl": "https://staging.dauth.me/realms/keylessh-staging01/tide-idp-resources/images/BACKGROUND_IMAGE",
-  "logoUrl": "https://staging.dauth.me/realms/keylessh-staging01/tide-idp-resources/images/LOGO",
+  "backgroundUrl": "https://staging.dauth.me/realms/keylessh/tide-idp-resources/images/BACKGROUND_IMAGE",
+  "logoUrl": "https://staging.dauth.me/realms/keylessh/tide-idp-resources/images/LOGO",
   "homeOrkUrl": "https://sork1.tideprotocol.com",
-  "vendorId": "4201145686218542474990945419475073546490597276286046557909357420901280886870",
-  "client-origin-auth-https://staging.dauth.me": "ehlx6JKFvJ/Ezd3XDFy4dRp4N+r4gMYC/nBARHg9vA0BxV1+hL1iKYZwZ0dO56CYSNPou2r7vX16+88snb3UDw==",
-  "client-origin-auth-https://staging.keylessh.com": "HbnoFthf09JfU+zGyiltThCRcuiHaeP8YnTrq3NWHHGwcB/61rvwaQ0g3ykQAE3WnO7CgFZuzoxFvd0+QjrYCg==",
-  "gVVK": "997f78f3a788077bab00a32ef505ebf6c8bc40c98efeda21999c6935cb9c9274",
-  "vvkId": "4201145686218542474990945419475073546490597276286046557909357420901280886870",
+  "vendorId": "2084799895998666174749640821257299862379987825505582685566143581172052536780",
+  "client-origin-auth-https://staging.dauth.me": "51lKjSJ6SQ5sJbnGKAQG9HmDHqSfVLCAA5F0+TjayJXOuMsCAnA+MjIyxOcCko7kpKRrfIwJorcSTmNMpOoiAg==",
+  "client-origin-auth-https://staging.keylessh.com": "cDQhym1pvxEhmHo62cARg7nvAb5IUrCh4yJ9yLQYZLX6BUL5WWye9vD3lz0gUpErz3AiFOliWlmJwfNcnv6kDw==",
+  "gVVK": "67e3daeeaef139089e8c3e9db58e25a1fa872635966ac93a5629185fa647ab3f",
+  "vvkId": "2084799895998666174749640821257299862379987825505582685566143581172052536780",
   "orkUrl": "https://sork1.tideprotocol.com",
   "payerPublic": "20000011d6a0e8212d682657147d864b82d10e92776c15ead43dcfdc100ebf4dcfe6a8",
-  "obfGVVK": "997f78f3a788077bab00a32ef505ebf6c8bc40c98efeda21999c6935cb9c9274",
-  "gVRKCertificate": "/CnMS9+Wv/VAAjwN4YtPQXNgJnkKSe8WtmFOML3Bjih2f8+Q3EXBknO3oX3ey20sotfEJMagIRXyDtF3tN4PAA==",
+  "obfGVVK": "67e3daeeaef139089e8c3e9db58e25a1fa872635966ac93a5629185fa647ab3f",
+  "gVRKCertificate": "EdJj+Ksfmd7TpUYO/RhsdUEdKAGk+ZnwTKXSsuNhTdncPO7Znx3DfA2IKR7+VTHuweoDtSJ9g/aHHkNQt+fVBA==",
   "thresholdT": 3,
   "thresholdN": 5
 }
