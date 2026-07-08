@@ -27,7 +27,7 @@ Instead of managing keys, KeyleSSH uses [Tide technology](https://tide.org) for 
 
 The result: enterprise-grade SSH access control without any private keys to manage, rotate, or protect.
 
-Here's a blog post about [what's under the hood]([https://tide.org](https://tide.org/blog/vibe-coded-pam)).
+Here's a blog post about [what's under the hood](https://tide.org/blog/vibe-coded-pam).
 
 ## Features
 
