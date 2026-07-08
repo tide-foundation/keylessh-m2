@@ -2,33 +2,33 @@
   "realm": "keylessh",
   "auth-server-url": "https://staging.dauth.me",
   "ssl-required": "external",
-  "resource": "keylessh-client-2",
+  "resource": "keylessh-client",
   "public-client": true,
   "confidential-port": 0,
   "jwk": {
     "keys": [
       {
-        "kid": "bTljhMbTXbI9YpuYV9Ols4IHlRtRJQDW0VrKiKF-CIE",
+        "kid": "3GAVjnCmH93d5IyQMJBqsqLQcfkdBf_6AByi6cMhkV0",
         "kty": "OKP",
         "alg": "EdDSA",
         "use": "sig",
         "crv": "Ed25519",
-        "x": "Z-Pa7q7xOQiejD6dtY4lofqHJjWWask6VikYX6ZHqz8"
+        "x": "mNlrcdjgpdUnC4qyDROaFrXJBxB1oANlypqYa-p9QqA"
       }
     ]
   },
   "backgroundUrl": "https://staging.dauth.me/realms/keylessh/tide-idp-resources/images/BACKGROUND_IMAGE",
   "logoUrl": "https://staging.dauth.me/realms/keylessh/tide-idp-resources/images/LOGO",
   "homeOrkUrl": "https://sork1.tideprotocol.com",
-  "vendorId": "2084799895998666174749640821257299862379987825505582685566143581172052536780",
-  "client-origin-auth-https://staging.dauth.me": "lMHs15ZJbqYWAWaTt9xxty5NObyhznh+KLToqgJw6WxUwhQVMoiQYtU8SpNmyaPvlOvYAufosqXPm5hkOAhqCA==",
-  "client-origin-auth-https://staging.keylessh.com": "Xe+GxbIODQjTeQveNPw4c3vYfM0t4OjsU9NMQd8W5GGIIjG8bL2FbqvWzB/eNfq3UlBx/UI0BDPV1Ml/Wj/pDQ==",
-  "gVVK": "67e3daeeaef139089e8c3e9db58e25a1fa872635966ac93a5629185fa647ab3f",
-  "vvkId": "2084799895998666174749640821257299862379987825505582685566143581172052536780",
+  "vendorId": "1447596145334512241980461715627880594385501188132565688444966447123989224786",
+  "client-origin-auth-https://staging.keylessh.com": "NjIRXmVXNiylq8NbXgb3kdgLihHh+mG4g2R2cZ45ldRHpUO90Byw9OhwOlqS6MWfz2StXjJWID2lh+u9kNELBw==",
+  "client-origin-auth-https://staging.dauth.me": "Hg6eJNJ4fd7llm6pyf7ElLCMdpHCrUmkmxj/WUZZ2Yss6wVGh+6JW1dnhrhH1KgWTkKnn67iXScOMYTqymOyDA==",
+  "gVVK": "98d96b71d8e0a5d5270b8ab20d139a16b5c9071075a00365ca9a986bea7d42a0",
+  "vvkId": "1447596145334512241980461715627880594385501188132565688444966447123989224786",
   "orkUrl": "https://sork1.tideprotocol.com",
   "payerPublic": "20000011d6a0e8212d682657147d864b82d10e92776c15ead43dcfdc100ebf4dcfe6a8",
-  "obfGVVK": "67e3daeeaef139089e8c3e9db58e25a1fa872635966ac93a5629185fa647ab3f",
-  "gVRKCertificate": "EdJj+Ksfmd7TpUYO/RhsdUEdKAGk+ZnwTKXSsuNhTdncPO7Znx3DfA2IKR7+VTHuweoDtSJ9g/aHHkNQt+fVBA==",
+  "obfGVVK": "98d96b71d8e0a5d5270b8ab20d139a16b5c9071075a00365ca9a986bea7d42a0",
+  "gVRKCertificate": "V2tBFJ5MLQFsHMl2/nap70IriM7taXlDEKdNt4wxvCY5YiDr4qYt0ygy4+DRxvaH50MBwRI/y3VWBayV0E9QBw==",
   "thresholdT": 3,
   "thresholdN": 5
 }
