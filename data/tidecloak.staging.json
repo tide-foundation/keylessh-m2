@@ -8,27 +8,27 @@
   "jwk": {
     "keys": [
       {
-        "kid": "MEFsIH3RCOyo7v83wD72KIo9EiBuKxoo5G9buKJb3uA",
+        "kid": "Trt1MQzA2LalKPre0B9CC0kuikFWsfrOGYDWElKyBAY",
         "kty": "OKP",
         "alg": "EdDSA",
         "use": "sig",
         "crv": "Ed25519",
-        "x": "oZGA_0SlKBGu2tlyaAV8YQCIi1DdMmqO4vp1OH_ULpA"
+        "x": "jT_jvFpKIKE2vCRWr6XDOageMKVkoH9olX5azAHtvk0"
       }
     ]
   },
   "backgroundUrl": "https://staging.dauth.me/realms/keylessh/tide-idp-resources/images/BACKGROUND_IMAGE",
   "logoUrl": "https://staging.dauth.me/realms/keylessh/tide-idp-resources/images/LOGO",
   "homeOrkUrl": "https://sork1.tideprotocol.com",
-  "vendorId": "6618192301900486275841695875094400894880073681586544918288198810289721295468",
-  "client-origin-auth-https://staging.keylessh.com": "5Vfgv0sAjgKr6+3cpoVJ1NvLFYIgfO26PvfpSI8384KkDChugUfe6KU92zi+ETqe+WbfHbEY98Uv4qlH9kUsBA==",
-  "client-origin-auth-https://staging.dauth.me": "0rPhQUalvK9hWY1boDhyKp4XGmaGIYAFXBJjt4BAhJwZhiNAEIkEDB3Jcz0j73fYH5GUmUO5jgwfy3hYL7t5DQ==",
-  "gVVK": "a19180ff44a52811aedad97268057c6100888b50dd326a8ee2fa75387fd42e90",
-  "vvkId": "6618192301900486275841695875094400894880073681586544918288198810289721295468",
+  "vendorId": "2291104047549736291779317047293333815414941165382796697912620673241778848040",
+  "client-origin-auth-https://staging.keylessh.com": "3U9s2vlmAX249lLUdC8AfiPmYOuB1rX94kcTkjGX8N51bEOC2IkMymJ6taljFETraTo8oQ6Sc89yoec3+qf1CQ==",
+  "client-origin-auth-https://staging.dauth.me": "wnNtAgqohj2BsCc5LcteuiGh32rbwT3A7FjMrdrpe6k1pSMsT9Kmzu61+uLaxrxuVnXpsuz2p86NoqPTh1j+BA==",
+  "gVVK": "8d3fe3bc5a4a20a136bc2456afa5c339a81e30a564a07f68957e5acc01edbe4d",
+  "vvkId": "2291104047549736291779317047293333815414941165382796697912620673241778848040",
   "orkUrl": "https://sork1.tideprotocol.com",
   "payerPublic": "20000011d6a0e8212d682657147d864b82d10e92776c15ead43dcfdc100ebf4dcfe6a8",
-  "obfGVVK": "a19180ff44a52811aedad97268057c6100888b50dd326a8ee2fa75387fd42e90",
-  "gVRKCertificate": "jUKkhHgYo3QLuvYHRnsGzIU8NE5pqGn8QhuUMu1nMVJU3cyw39BdAcZ96T5NC/29/Bo0YkBvWoLG0aYkCbAbDg==",
+  "obfGVVK": "8d3fe3bc5a4a20a136bc2456afa5c339a81e30a564a07f68957e5acc01edbe4d",
+  "gVRKCertificate": "FXQMr3yHWPJSNfKSUJ8vNp7AYZ2HCvRBpWQtnHhm63Zh/CjIJgaZTtwIrHis7aymteZ/vQkzL2PCAPdrUivzDw==",
   "thresholdT": 3,
   "thresholdN": 5
 }
