@@ -1,6 +1,6 @@
 {
   "realm": "keylessh",
-  "auth-server-url": "https://staging.dauth.me",
+  "auth-server-url": "https://staging.dauth.me/",
   "ssl-required": "external",
   "resource": "keylessh-client",
   "public-client": true,
@@ -8,27 +8,27 @@
   "jwk": {
     "keys": [
       {
-        "kid": "xs4mpRgMexJ7GpqWC261trGhS6VSaGsjNJzLGZpc3Lc",
+        "kid": "_OKVLtICa18jZ1tsSoJu1TclvKkoFbOIa18kqBCOgYo",
         "kty": "OKP",
         "alg": "EdDSA",
         "use": "sig",
         "crv": "Ed25519",
-        "x": "ePiYjqUEPq8R-GsARNOwpvkaIhQzd_vyOH7j3-mE2zo"
+        "x": "1Ih_dDCC017s1wxOuoFkr3RAiC1GlpFNWVh1IoCAnQc"
       }
     ]
   },
   "backgroundUrl": "https://staging.dauth.me/realms/keylessh/tide-idp-resources/images/BACKGROUND_IMAGE",
   "logoUrl": "https://staging.dauth.me/realms/keylessh/tide-idp-resources/images/LOGO",
   "homeOrkUrl": "https://sork1.tideprotocol.com",
-  "vendorId": "6233351249978251759752408099968571093949739422968724556172177315909541266846",
-  "client-origin-auth-https://staging.keylessh.com": "dJg2BXAAtMaNMpNqvEiJvjaMNPIaNfQMGl8xfJenMvYRztkVL/MF6QjighYajTstmSJUgUkakjZnt85bh9K/Dg==",
-  "client-origin-auth-https://staging.dauth.me": "xQUggVvWmzN02NX+CzSAt/VXH89TGzO1CCbBO7jvfBoddmUmAywLO0CpsSJaN3E4DdxI/YXmuK9ytMva1iy2CQ==",
-  "gVVK": "78f8988ea5043eaf11f86b0044d3b0a6f91a22143377fbf2387ee3dfe984db3a",
-  "vvkId": "6233351249978251759752408099968571093949739422968724556172177315909541266846",
+  "vendorId": "4200978725077804517654125527222313753467586434986191223556335357107180334947",
+  "client-origin-auth-https://staging.keylessh.com": "jri7f5J/NC4jhIUTvrHWb8o1R7FKBl043U0acG7zlz4xyS96/gzm6DflcNDVFPpOUsd/oEmChVKqw0gI01OuBg==",
+  "client-origin-auth-https://staging.dauth.me": "h9k03TG5J8sd1C4g93qjF1dufYaHNDOyctQt1cdaM00krWM7bNqEu0PEgIoLZfuHqeqcys59qRkCJprrxTFDAw==",
+  "gVVK": "d4887f743082d35eecd70c4eba8164af7440882d4696914d5958752280809d07",
+  "vvkId": "4200978725077804517654125527222313753467586434986191223556335357107180334947",
   "orkUrl": "https://sork1.tideprotocol.com",
   "payerPublic": "20000011d6a0e8212d682657147d864b82d10e92776c15ead43dcfdc100ebf4dcfe6a8",
-  "obfGVVK": "78f8988ea5043eaf11f86b0044d3b0a6f91a22143377fbf2387ee3dfe984db3a",
-  "gVRKCertificate": "xfJ3Ea2FcWhFoPOVuC5bUZevFcAABuYb+mMzlYhRCF7TqXYimK8IZbdDy11njIMs90JbgGRFAZbC4jIrUTLgAQ==",
+  "obfGVVK": "d4887f743082d35eecd70c4eba8164af7440882d4696914d5958752280809d07",
+  "gVRKCertificate": "J3tUO21h+Ld+sWtXPjTLW/YKaWmSDUhtiplnivZkLtUna/uiJOEMCgQyWT2ESq8LM2Zv3+GMb6O9za1Id30+DQ==",
   "thresholdT": 3,
   "thresholdN": 5
 }
