@@ -1,0 +1,35 @@
+{
+  "stun-server-client-id": "myclient-stun",
+  "realm": "keylessh-demo",
+  "auth-server-url": "https://login.dauth.me/",
+  "ssl-required": "external",
+  "resource": "keylessh-demo-client",
+  "public-client": true,
+  "confidential-port": 0,
+  "jwk": {
+    "keys": [
+      {
+        "kid": "jTJB4EZRXv6fGCp9VCar60mJwNDOtIKWbtTcVzNN3Q8",
+        "kty": "OKP",
+        "alg": "EdDSA",
+        "use": "sig",
+        "crv": "Ed25519",
+        "x": "OkDQwctqo1xSl5UUWaUKBAisqOjgwdskvEJcV2jlDoc"
+      }
+    ]
+  },
+  "backgroundUrl": "https://login.dauth.me/realms/keylessh-demo/tide-idp-resources/images/BACKGROUND_IMAGE",
+  "logoUrl": "https://login.dauth.me/realms/keylessh-demo/tide-idp-resources/images/LOGO",
+  "homeOrkUrl": "https://ork1.tideprotocol.com",
+  "vendorId": "4998074007955795026331148099236088089828375166888299096621438329878108174457",
+  "client-origin-auth-https://demo.keylessh.com": "zS7LJoqIldQ3tYteI6gMWF56Kesd4qV9Of0XibdFcMY/S7QyX1DQmThqfg4enYUYtVzZxW8fBzhPAB92CcDMCw==",
+  "client-origin-auth-https://login.dauth.me": "WyNVXy2Ans5c4/cEe65o6cEVLoiE7bU+rlUqnuhAU5zT4Rj4nVrnPThiHhvq8GgIcvlH5xZ6KmqbJRO+Wyc3Bw==",
+  "gVVK": "3a40d0c1cb6aa35c5297951459a50a0408aca8e8e0c1db24bc425c5768e50e87",
+  "vvkId": "4998074007955795026331148099236088089828375166888299096621438329878108174457",
+  "orkUrl": "https://ork1.tideprotocol.com",
+  "payerPublic": "200000b967a7799ffd4476e1074777ebc83bec23a3843cb2e5ca43c83561802c8e646b",
+  "obfGVVK": "3a40d0c1cb6aa35c5297951459a50a0408aca8e8e0c1db24bc425c5768e50e87",
+  "gVRKCertificate": "INWG8EcW1lPxk1sDz7ouI2aYztYTNx9JJXTgbOvkMm6nI73o0snoP3MxuTBTO2Tb8e4h3Qa1Ef1nvFGtvGCxAA==",
+  "thresholdT": 14,
+  "thresholdN": 20
+}
