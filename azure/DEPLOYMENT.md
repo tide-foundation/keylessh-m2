@@ -35,8 +35,8 @@ Understanding this is the key to deploying correctly.
   `data/tidecloak.json` from the deploy package (`wwwroot/data`).
   - **demo** → config comes from the **`TIDECLOAK_CONFIG` app setting** (env var).
   - **devops / staging** → config is **baked into the build**: the workflow copies
-    `data/tidecloak.json` (devops) or `data/tidecloak.staging.json` (staging) into the
-    package.
+    `data/tidecloak.devops.json` (devops) or `data/tidecloak.staging.json` (staging) into
+    the package.
 - **Web app – client side**: the browser fetches the config at runtime from
   **`GET /api/auth/config`** (which returns `GetConfig()`), so it is **not** baked into
   the JS bundle. **Verify a deploy by curling `/api/auth/config`, not by diffing bundles.**
@@ -47,9 +47,10 @@ Understanding this is the key to deploying correctly.
   key changes, the gateway must be recreated with the new adapter or it rejects tokens
   with `AZP mismatch` / `JWT verification failed`.
 
-Committed adapter files: `data/tidecloak.json` (devops), `data/tidecloak.staging.json`
-(staging), `data/tidecloak.demo.json` (demo gateway). `data/` is gitignored, so these are
-**force-added** (`git add -f`).
+Committed adapter files: `data/tidecloak.devops.json` (devops),
+`data/tidecloak.staging.json` (staging), `data/tidecloak.demo.json` (demo). `data/` is
+gitignored, so these are **force-added** (`git add -f`). `data/tidecloak.json` is the
+legacy fallback (used only if no `data/tidecloak.<env>.json` exists).
 
 ---
 
@@ -75,7 +76,7 @@ DEPLOY_ENV=<env> ./azure/deploy-devops.sh [--setup | --webapp | --gateway | --al
 | Env | Workflow | Publish-profile secret | Config baked |
 |-----|----------|------------------------|--------------|
 | demo | `azure-deploy.yml` | `AZURE_WEBAPP_PUBLISH_PROFILE` | none (uses env var) |
-| devops | `azure-deploy-devops.yml` | `AZURE_WEBAPP_DEVOPS_PUBLISH_PROFILE` | `data/tidecloak.json` |
+| devops | `azure-deploy-devops.yml` | `AZURE_WEBAPP_DEVOPS_PUBLISH_PROFILE` | `data/tidecloak.devops.json` |
 | staging | `azure-deploy-staging.yml` | `AZURE_WEBAPP_STAGING_PUBLISH_PROFILE` | `data/tidecloak.staging.json` |
 
 ```bash
